@@ -1,0 +1,86 @@
+# ============================================================
+# Python
+# ============================================================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables and secrets
+.env
+.env.*
+*.pem
+*.key
+
+# ============================================================
+# Isaac Sim / Omniverse
+# ============================================================
+.cache/
+cache/
+logs/
+output/
+outputs/
+captures/
+recordings/
+screenshots/
+
+*.log
+*.tmp
+*.bak
+*.autosave
+*.usd~
+*.usda~
+*.usdc~
+
+# Local Isaac Sim generated settings
+user.config.json
+privacy.toml
+
+# ============================================================
+# ROS 2
+# ============================================================
+build/
+install/
+log/
+
+# ROS bag / database recordings
+*.db3
+*.mcap
+metadata.yaml
+
+# ============================================================
+# Sensor-generated data
+# ============================================================
+pointclouds/
+camera_output/
+lidar_output/
+sensor_output/
+dataset_output/
+
+*.pcd
+*.ply
+*.bag
+
+# ============================================================
+# Videos
+# ============================================================
+*.mp4
+*.avi
+*.mov
+*.webm
+
+# ============================================================
+# IDE / OS
+# ============================================================
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*~
