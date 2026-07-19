@@ -84,3 +84,6 @@ dataset_output/
 .DS_Store
 Thumbs.db
 *~
+
+# Model weights
+models/

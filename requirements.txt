@@ -1,0 +1,7 @@
+# ROS 2 Humble의 rclpy, cv_bridge, NumPy, OpenCV는 apt 패키지를 사용한다.
+mavsdk
+
+# detector_mode=yolo일 때만 필요하다.
+ultralytics
+
+empy==3.3.4

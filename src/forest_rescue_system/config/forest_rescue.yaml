@@ -1,0 +1,86 @@
+human_detector_node:
+  ros__parameters:
+    image_topic: /quadrotor/Camera/rgb
+    detection_topic: /victim/detection
+    annotated_image_topic: /victim/annotated_image
+
+    # 기본 실행은 COCO 사전학습 YOLO11 사람 탐지를 사용한다.
+    detector_mode: yolo
+    model_path: ~/b3_cobot3_ws/models/yolo11s.pt
+    person_class_id: 0
+    # 합성 영상 첫 검증은 낮게 시작하고 오탐을 보며 조정한다.
+    confidence_threshold: 0.25
+    inference_period_sec: 0.20
+
+    # 5m 고도에서 영상 중앙 부근에 보이는 사람 크기를 가정한다.
+    mock_delay_sec: 8.0
+    mock_confidence: 0.95
+    mock_x_min_ratio: 0.46
+    mock_y_min_ratio: 0.38
+    mock_x_max_ratio: 0.54
+    mock_y_max_ratio: 0.66
+
+victim_localizer_node:
+  ros__parameters:
+    depth_topic: /quadrotor/Camera/depth
+    camera_info_topic: /quadrotor/Camera/camera_info
+    detection_topic: /victim/detection
+    camera_position_topic: /victim/position_camera
+    map_position_topic: /victim/position_map
+    camera_frame_override: Camera
+    map_frame: map
+    roi_center_ratio: 0.50
+    minimum_depth_m: 0.20
+    maximum_depth_m: 30.0
+    # 탐지와 위치 토픽은 계속 처리하되 동일 종류 로그는 10초마다 출력한다.
+    log_period_sec: 10.0
+
+mission_manager_node:
+  ros__parameters:
+    required_detection_frames: 3
+    auto_start: false
+    # PX4 연결 직후 5m 이륙하고 제자리 Hover 상태(READY)로 대기한다.
+    auto_takeoff_on_connect: true
+    # 조난자를 찾으면 복귀하지 않고 현 위치에서 Hover한다.
+    keep_hover_after_detection: true
+
+drone_controller_node:
+  ros__parameters:
+    system_address: udpin://0.0.0.0:14540
+    takeoff_altitude_m: 5.0
+    altitude_acceptance_radius_m: 0.1
+    takeoff_tolerance_m: 0.15
+    # 초기 Hover는 현재 Yaw를 유지하고, 수색 시작 시에만 0도를 적용한다.
+    search_yaw_deg: 0.0
+    waypoint_hold_seconds: 4.0
+    waypoint_acceptance_radius_m: 0.5
+    waypoint_altitude_tolerance_m: 0.5
+    waypoint_timeout_sec: 15.0
+    # PX4 local NED 기준 North,East 쌍이며 8m×8m 영역을 지그재그로 돈다.
+    search_waypoints: "0,0;4,0;8,0;8,4;4,4;0,4;0,8;4,8;8,8"
+    map_frame: map
+    base_frame: base_link
+
+sensor_tf_node:
+  ros__parameters:
+    base_frame: base_link
+    camera_frame: Camera
+    lidar_frame: base_scan
+    camera_translation: [0.3, 0.0, -0.07]
+    # ROS optical frame(X=우, Y=하, Z=전방)을 base_link에 연결하며
+    # optical Z축이 수평보다 아래쪽 30도를 향하게 한다.
+    camera_quaternion_xyzw: [-0.612372, 0.612372, -0.353553, 0.353553]
+    lidar_translation: [0.0, 0.0, 0.15]
+    lidar_quaternion_xyzw: [0.0, 0.0, 0.0, 1.0]
+
+obstacle_monitor_node:
+  ros__parameters:
+    point_cloud_topic: /point_cloud
+    safety_distance_m: 1.5
+    # 360도 LiDAR 전체 수평면을 사용한다. 카메라 60도와 별개인 안전 영역이다.
+    forward_half_angle_deg: 180.0
+    minimum_height_m: -0.8
+    maximum_height_m: 0.8
+    # 이륙 중 지면 반사 경고를 제외하고 임무 준비/수색 중에만 감시한다.
+    active_mission_states: [READY, SEARCHING]
+    warning_period_sec: 10.0

@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 
 """
-Forest-rescue simulation baseline.
+산림 조난자 탐지 드론의 Isaac Sim 기본 환경.
 
-Components:
+구성:
 - Isaac Sim 5.1
 - Pegasus Simulator 5.1
 - PX4 SITL
-- Iris quadrotor
-- ROS 2 RGB camera
-- One stationary victim
+- 3DR Iris 쿼드로터
+- ROS 2 RGB/Depth/PointCloud 카메라
+- RTX Rotary LiDAR
+- 고정 위치 조난자 1명
 """
 
+import math
 import os
 import numpy as np
 from pathlib import Path
@@ -20,11 +22,21 @@ import carb
 from isaacsim import SimulationApp
 
 
-# SimulationApp must be created before importing most Isaac Sim modules.
+# 센서 및 시나리오 기본 설정값
+CAMERA_PRIM_PATH = "/World/quadrotor/body/Camera"
+CAMERA_FOCAL_LENGTH_MM = 18.0
+CAMERA_DOWN_TILT_DEG = 30.0
+# PX4 Yaw 0도에서 카메라는 대략 North(+Y)를 향한다. 5m 고도와
+# 하향각 30도에서 지면 중심은 드론 전방 약 8.7m이다.
+# 조난자는 초기 시야 바깥쪽에 두고, 0~8m로 확장한 수색 경로의
+# 중반(East 4m, North 4m 부근)에 도착했을 때 시야로 들어오게 한다.
+VICTIM_POSITION = [4.0, 4.0, 0.0]
+
+
+# 대부분의 Isaac Sim 모듈보다 먼저 SimulationApp을 생성해야 한다.
 simulation_app = SimulationApp({"headless": False})
 
 
-# Enable the ROS 2 Bridge explicitly.
 from isaacsim.core.utils.extensions import enable_extension
 
 # ROS 2 sensor topic 발행에 필요한 extension을 활성화한다.
@@ -40,7 +52,7 @@ enable_extension("isaacsim.util.camera_inspector")
 simulation_app.update()
 
 
-# The Pegasus people example recreates the stage after loading extensions.
+# Extension을 불러온 뒤 깨끗한 Stage를 생성한다.
 import omni.usd
 
 omni.usd.get_context().new_stage()
@@ -48,6 +60,7 @@ omni.usd.get_context().new_stage()
 
 import omni.timeline
 from omni.isaac.core.world import World
+from pxr import Gf, UsdGeom
 from scipy.spatial.transform import Rotation
 
 from pegasus.simulator.params import ROBOTS, SIMULATION_ENVIRONMENTS
@@ -69,10 +82,10 @@ class ForestRescueSimulation:
     def __init__(self):
         self.timeline = omni.timeline.get_timeline_interface()
 
-        # Pegasus interface
+        # Pegasus 인터페이스
         self.pg = PegasusInterface()
 
-        # Set and validate the PX4 path.
+        # PX4 경로를 설정하고 SITL 바이너리가 있는지 확인한다.
         px4_path = Path(
             os.environ.get(
                 "PX4_AUTOPILOT_PATH",
@@ -98,11 +111,11 @@ class ForestRescueSimulation:
             f"{os.environ.get('RMW_IMPLEMENTATION')}"
         )
 
-        # Create Isaac Sim world.
+        # Isaac Sim World를 생성한다.
         self.pg._world = World(**self.pg._world_settings)
         self.world = self.pg.world
 
-        # Load a simple environment for the first integration test.
+        # 최초 통합 시험에서는 Rough Plane을 사용한다.
         self.pg.load_asset(
             SIMULATION_ENVIRONMENTS["Rough Plane"],
             "/World/layout",
@@ -110,8 +123,10 @@ class ForestRescueSimulation:
 
         self._spawn_stationary_victim()
         self._spawn_iris()
+        simulation_app.update()
+        self._configure_drone_camera()
 
-        # Viewport camera only affects what is shown in the Isaac Sim window.
+        # Viewport 카메라는 Isaac Sim 창에 보이는 시점만 변경한다.
         self.pg.set_viewport_camera(
             [7.0, 7.0, 5.0],
             [0.0, 0.0, 0.0],
@@ -121,7 +136,9 @@ class ForestRescueSimulation:
 
         print("[OK] Forest-rescue baseline initialized")
         print("[INFO] RGB topic: /quadrotor/Camera/rgb")
+        print("[INFO] Depth topic: /quadrotor/Camera/depth")
         print("[INFO] CameraInfo topic: /quadrotor/Camera/camera_info")
+        print("[INFO] LiDAR topic: /point_cloud")
 
     def _spawn_stationary_victim(self):
         preferred_asset = "original_female_adult_business_02"
@@ -141,17 +158,17 @@ class ForestRescueSimulation:
                 f"Using {selected_asset} instead."
             )
 
-        # Fixed position for the first test.
-        # Random placement will be added after this baseline works.
+        # 기본 시스템에서는 고정 위치를 사용한다.
+        # 환경 담당자는 이후 랜덤 배치 모듈로 교체할 수 있다.
         self.victim = Person(
             "victim_01",
             selected_asset,
-            init_pos=[4.0, 0.0, 0.0],
+            init_pos=VICTIM_POSITION,
             init_yaw=3.14,
         )
 
         print(f"[INFO] Victim asset: {selected_asset}")
-        print("[INFO] Victim position: [4.0, 0.0, 0.0]")
+        print(f"[INFO] Victim position: {VICTIM_POSITION}")
 
     def _spawn_iris(self):
         multirotor_config = MultirotorConfig()
@@ -164,12 +181,12 @@ class ForestRescueSimulation:
             }
         )
 
-        # PX4 controls the drone through MAVLink.
+        # PX4가 MAVLink를 통해 드론을 제어한다.
         multirotor_config.backends = [
             PX4MavlinkBackend(px4_config)
         ]
 
-        # Publish the existing Iris camera through ROS 2.
+        # Iris 기본 카메라의 RGB/Depth/PointCloud를 ROS 2로 발행한다.
         multirotor_config.graphs = [
             ROS2CameraGraph(
                 "body/Camera",
@@ -215,6 +232,93 @@ class ForestRescueSimulation:
                 degrees=True,
             ).as_quat(),
             config=multirotor_config,
+        )
+
+    def _configure_drone_camera(self):
+        """카메라 시야각과 하향 장착각을 Stage에 영구 적용한다."""
+        stage = omni.usd.get_context().get_stage()
+        camera_prim = stage.GetPrimAtPath(CAMERA_PRIM_PATH)
+        if not camera_prim.IsValid():
+            raise RuntimeError(
+                f"Iris 카메라 Prim을 찾을 수 없습니다: {CAMERA_PRIM_PATH}"
+            )
+
+        camera = UsdGeom.Camera(camera_prim)
+        camera.GetFocalLengthAttr().Set(CAMERA_FOCAL_LENGTH_MM)
+
+        horizontal_aperture = float(
+            camera.GetHorizontalApertureAttr().Get()
+        )
+        horizontal_fov_deg = math.degrees(
+            2.0
+            * math.atan(
+                horizontal_aperture
+                / (2.0 * CAMERA_FOCAL_LENGTH_MM)
+            )
+        )
+
+        # Iris 카메라의 기존 자세를 보존하면서 카메라 local X축을
+        # 기준으로 아래쪽 30도 회전을 추가한다.
+        xformable = UsdGeom.Xformable(camera_prim)
+        orient_op = next(
+            (
+                op
+                for op in xformable.GetOrderedXformOps()
+                if op.GetOpType() == UsdGeom.XformOp.TypeOrient
+            ),
+            None,
+        )
+
+        if orient_op is None:
+            carb.log_warn(
+                "Camera orient op가 없어 하향각은 적용하지 못했습니다."
+            )
+        else:
+            current_quaternion = orient_op.Get()
+            imaginary = current_quaternion.GetImaginary()
+            current_rotation = Rotation.from_quat(
+                [
+                    float(imaginary[0]),
+                    float(imaginary[1]),
+                    float(imaginary[2]),
+                    float(current_quaternion.GetReal()),
+                ]
+            )
+            down_rotation = Rotation.from_euler(
+                "X",
+                -CAMERA_DOWN_TILT_DEG,
+                degrees=True,
+            )
+            configured_xyzw = (
+                current_rotation * down_rotation
+            ).as_quat()
+            x, y, z, w = [float(value) for value in configured_xyzw]
+
+            attribute_type = str(
+                orient_op.GetAttr().GetTypeName()
+            )
+            if attribute_type == "quatd":
+                configured_quaternion = Gf.Quatd(
+                    w,
+                    Gf.Vec3d(x, y, z),
+                )
+            elif attribute_type == "quath":
+                configured_quaternion = Gf.Quath(
+                    w,
+                    Gf.Vec3h(x, y, z),
+                )
+            else:
+                configured_quaternion = Gf.Quatf(
+                    w,
+                    Gf.Vec3f(x, y, z),
+                )
+            orient_op.Set(configured_quaternion)
+
+        print(
+            "[INFO] Camera setting: "
+            f"focal={CAMERA_FOCAL_LENGTH_MM:.1f}mm, "
+            f"horizontal_fov≈{horizontal_fov_deg:.1f}deg, "
+            f"down_tilt={CAMERA_DOWN_TILT_DEG:.1f}deg"
         )
 
     def run(self):

@@ -56,8 +56,8 @@ async def main():
     )
 
     try:
-        print("[3] 이륙 고도 2m 설정")
-        await drone.action.set_takeoff_altitude(2.0)
+        print("[3] 이륙 고도 5m 설정")
+        await drone.action.set_takeoff_altitude(5.0)
 
         print("[4] Arm")
         await drone.action.arm()
