@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 
-"""탐색 임무의 상태 전환과 드론 명령을 관리한다."""
+"""세 드론의 수색·탐지·복귀 상태를 중앙에서 관리한다."""
+
+from functools import partial
+import math
+import time
 
 from geometry_msgs.msg import PointStamped
 import rclpy
@@ -12,52 +16,103 @@ from forest_rescue_interfaces.msg import VictimDetection
 
 
 class MissionManagerNode(Node):
-    """초기 자동 이륙·Hover와 탐색 임무 상태를 관리한다."""
+    """탐지 드론은 Hover, 나머지 드론은 자동 복귀·착륙시킨다."""
 
     def __init__(self):
         super().__init__("mission_manager_node")
 
-        self.declare_parameter("required_detection_frames", 3)
-        self.declare_parameter("auto_start", False)
-        self.declare_parameter("auto_takeoff_on_connect", True)
-        self.declare_parameter("keep_hover_after_detection", True)
-
-        self.command_publisher = self.create_publisher(
-            String,
-            "/drone/command",
-            10,
+        self.declare_parameter(
+            "drone_ids",
+            ["quadrotor_01", "quadrotor_02", "quadrotor_03"],
         )
+        self.declare_parameter("required_detection_frames", 5)
+        self.declare_parameter("minimum_detection_confidence", 0.60)
+        self.declare_parameter("detection_start_delay_sec", 60.0)
+        self.declare_parameter("require_map_position_before_detection", True)
+        self.declare_parameter("start_exclusion_radius_m", 15.0)
+        self.declare_parameter("detection_position_consistency_radius_m", 4.0)
+        self.declare_parameter("detection_position_timeout_sec", 1.0)
+        self.declare_parameter("victim_approach_height_m", 7.0)
+        self.declare_parameter(
+            "search_zone_bounds_xy",
+            [
+                -46.7, 46.7, 13.55, 46.7,
+                -46.7, 46.7, -13.55, 13.55,
+                -46.7, 46.7, -46.7, -13.55,
+            ],
+        )
+        self.declare_parameter(
+            "start_exclusion_centers_xy",
+            [-34.0, 40.0, -29.0, 40.0, -39.0, 40.0],
+        )
+        self.declare_parameter("auto_takeoff_on_connect", True)
+
+        self.drone_ids = [
+            str(value) for value in self.get_parameter("drone_ids").value
+        ]
+        self.command_publishers = {}
+        self.drone_status = {drone_id: "UNKNOWN" for drone_id in self.drone_ids}
+        self.detection_counts = {drone_id: 0 for drone_id in self.drone_ids}
+        self.search_finished = set()
+        self.failed_drones = set()
+        self.latest_camera_positions = {}
+        self.latest_map_positions = {}
+        self.pending_detection_stamps = {
+            drone_id: {} for drone_id in self.drone_ids
+        }
+        self.confirmed_map_sequences = {
+            drone_id: [] for drone_id in self.drone_ids
+        }
+        self.recent_map_positions = {
+            drone_id: {} for drone_id in self.drone_ids
+        }
+        self.search_started_at = None
+        self.last_detection_delay_log_at = 0.0
+        self.last_exclusion_log_at = {drone_id: 0.0 for drone_id in self.drone_ids}
+        self.last_zone_log_at = {drone_id: 0.0 for drone_id in self.drone_ids}
+
+        for index, drone_id in enumerate(self.drone_ids, start=1):
+            prefix = f"/drone_{index:02d}"
+            self.command_publishers[drone_id] = self.create_publisher(
+                String,
+                f"{prefix}/command",
+                10,
+            )
+            self.create_subscription(
+                String,
+                f"{prefix}/status",
+                partial(self._drone_status_callback, drone_id),
+                10,
+            )
+            self.create_subscription(
+                VictimDetection,
+                f"{prefix}/victim/detection",
+                partial(self._detection_callback, drone_id),
+                10,
+            )
+            self.create_subscription(
+                PointStamped,
+                f"{prefix}/victim/position_camera",
+                partial(self._camera_position_callback, drone_id),
+                10,
+            )
+            self.create_subscription(
+                PointStamped,
+                f"{prefix}/victim/position_map",
+                partial(self._map_position_callback, drone_id),
+                10,
+            )
+
         self.state_publisher = self.create_publisher(
             String,
             "/mission/state",
             10,
         )
-
-        self.create_subscription(
-            VictimDetection,
-            "/victim/detection",
-            self._detection_callback,
-            10,
-        )
-        self.create_subscription(
-            PointStamped,
-            "/victim/position_camera",
-            self._camera_position_callback,
-            10,
-        )
-        self.create_subscription(
-            PointStamped,
-            "/victim/position_map",
-            self._map_position_callback,
-            10,
-        )
-        self.create_subscription(
+        self.finder_publisher = self.create_publisher(
             String,
-            "/drone/status",
-            self._drone_status_callback,
+            "/mission/finder_drone",
             10,
         )
-
         self.start_service = self.create_service(
             Trigger,
             "/mission/start",
@@ -70,219 +125,428 @@ class MissionManagerNode(Node):
         )
 
         self.state = "IDLE"
-        self.detection_count = 0
-        self.victim_confirmed = False
-        self.hovering = False
+        self.initial_takeoff_requested = False
+        self.finder_drone = None
+        self.finder_hovering = False
         self.camera_position_received = False
         self.map_position_received = False
-        self.initial_takeoff_requested = False
         self._publish_state("IDLE")
 
-        self.auto_start_timer = None
-        if bool(self.get_parameter("auto_start").value):
-            self.auto_start_timer = self.create_timer(
-                2.0,
-                self._auto_start_once,
-            )
-
-    def _auto_start_once(self):
-        # auto_takeoff_on_connect가 켜져 있으면 READY 이후 사용자가
-        # /mission/start를 호출하는 흐름을 우선한다.
-        if (
-            self.state == "IDLE"
-            and not bool(
-                self.get_parameter("auto_takeoff_on_connect").value
-            )
-        ):
-            self._begin_mission()
-        if self.auto_start_timer is not None:
-            self.auto_start_timer.cancel()
-
     def _start_mission_callback(self, _request, response):
-        if self.state not in (
-            "IDLE",
-            "READY",
-            "COMPLETE",
-            "SEARCH_COMPLETE_NOT_FOUND",
-            "ERROR",
-        ):
+        if self.state != "READY":
             response.success = False
-            response.message = (
-                "현재 임무 상태에서는 시작할 수 없습니다: "
-                f"{self.state}"
-            )
+            response.message = f"READY 상태에서만 시작할 수 있습니다: {self.state}"
             return response
 
-        self._begin_mission()
+        self._reset_detection_state()
+        self.search_started_at = time.monotonic()
+        self.last_detection_delay_log_at = 0.0
+        self._publish_state("SEARCHING")
+        self._send_all("START_SEARCH")
         response.success = True
-        response.message = "산림 조난자 탐색 임무를 시작했습니다."
+        response.message = "드론 3대의 분할 구역 수색을 시작했습니다."
         return response
-
-    def _begin_mission(self):
-        # READY/COMPLETE/미탐지 종료이면 이미 공중 Hover 중이다.
-        already_airborne = self.hovering or self.state in (
-            "READY",
-            "COMPLETE",
-            "SEARCH_COMPLETE_NOT_FOUND",
-        )
-
-        self.detection_count = 0
-        self.victim_confirmed = False
-        self.camera_position_received = False
-        self.map_position_received = False
-
-        if already_airborne:
-            self.hovering = False
-            self._publish_state("SEARCHING")
-            self._send_drone_command("START_SEARCH")
-        else:
-            self.hovering = False
-            self._publish_state("TAKEOFF")
-            self._send_drone_command("TAKEOFF")
 
     def _land_callback(self, _request, response):
         self._publish_state("LANDING")
-        self._send_drone_command("LAND")
+        self._send_all("LAND")
         response.success = True
-        response.message = "착륙 명령을 전송했습니다."
+        response.message = "모든 드론에 착륙 명령을 전송했습니다."
         return response
 
-    def _drone_status_callback(self, message):
-        status = message.data.upper()
-        self.get_logger().info(f"드론 상태 수신: {status}")
+    def _reset_detection_state(self):
+        self.finder_drone = None
+        self.finder_hovering = False
+        self.camera_position_received = False
+        self.map_position_received = False
+        self.search_finished.clear()
+        self.failed_drones.clear()
+        self.latest_camera_positions.clear()
+        self.latest_map_positions.clear()
+        for drone_id in self.drone_ids:
+            self.detection_counts[drone_id] = 0
+            self.pending_detection_stamps[drone_id].clear()
+            self.confirmed_map_sequences[drone_id].clear()
+            self.recent_map_positions[drone_id].clear()
+
+    def _drone_status_callback(self, drone_id, message):
+        status = message.data.strip().upper()
+        previous = self.drone_status[drone_id]
+        self.drone_status[drone_id] = status
+        if status != previous:
+            self.get_logger().info(f"{drone_id} 상태: {status}")
 
         if (
-            status == "CONNECTED"
-            and self.state == "IDLE"
+            bool(self.get_parameter("auto_takeoff_on_connect").value)
             and not self.initial_takeoff_requested
-            and bool(
-                self.get_parameter("auto_takeoff_on_connect").value
+            and all(
+                self.drone_status[item] == "CONNECTED"
+                for item in self.drone_ids
             )
         ):
             self.initial_takeoff_requested = True
             self._publish_state("INITIAL_TAKEOFF")
-            self._send_drone_command("TAKEOFF")
-
-        elif status == "AIRBORNE" and self.state == "INITIAL_TAKEOFF":
-            # 목표 고도에 도착하면 수색을 시작하지 않고 제자리에서 대기한다.
-            self._publish_state("INITIAL_HOVER")
-            self._send_drone_command("HOVER")
-
-        elif status == "AIRBORNE" and self.state == "TAKEOFF":
-            self._publish_state("SEARCHING")
-            self._send_drone_command("START_SEARCH")
-
-        elif status == "HOVERING":
-            self.hovering = True
-            if self.state == "INITIAL_HOVER":
-                self._publish_state("READY")
-                self.get_logger().info(
-                    "초기 이륙 완료: 제자리 Hover 상태에서 임무 시작을 "
-                    "대기합니다."
-                )
-            elif self.victim_confirmed:
-                self._publish_state("VICTIM_LOCATED")
-                self._try_complete_mission()
-
-        elif status == "LANDED":
-            self.hovering = False
-            self._publish_state("IDLE")
-
-        elif (
-            status == "SEARCH_FINISHED_NO_VICTIM"
-            and self.state == "SEARCHING"
-            and not self.victim_confirmed
-        ):
-            self.hovering = True
-            self._publish_state("SEARCH_COMPLETE_NOT_FOUND")
-            self.get_logger().warning(
-                "전체 수색 경로를 완료했지만 조난자를 탐지하지 "
-                "못했습니다. 현 위치에서 Hover를 유지합니다."
-            )
-
-        elif status.startswith("ERROR"):
-            self._publish_state("ERROR")
-
-    def _detection_callback(self, detection):
-        if self.state != "SEARCHING" or self.victim_confirmed:
+            self._send_all("TAKEOFF")
             return
 
-        if detection.detected:
-            self.detection_count += 1
-            required = int(
-                self.get_parameter("required_detection_frames").value
-            )
-            self.get_logger().info(
-                "조난자 연속 탐지: "
-                f"{self.detection_count}/{required}"
-            )
-            if self.detection_count >= required:
-                self.victim_confirmed = True
-                self._publish_state("VICTIM_DETECTED")
-                self._send_drone_command("HOVER")
-        else:
-            self.detection_count = 0
+        airborne_states = {
+            "AIRBORNE",
+            "HOVERING",
+            "SEARCHING",
+            "AVOIDING_OBSTACLE",
+            "AVOIDING_OBSTACLE_XY",
+        }
+        if self.state == "INITIAL_TAKEOFF" and all(
+            self.drone_status[item] in airborne_states
+            for item in self.drone_ids
+        ):
+            self._publish_state("INITIAL_HOVER")
+            self._send_all("HOVER")
+            return
 
-    def _camera_position_callback(self, message):
-        first_position = not self.camera_position_received
+        if self.state == "INITIAL_HOVER" and all(
+            self.drone_status[item] == "HOVERING"
+            for item in self.drone_ids
+        ):
+            self._publish_state("READY")
+            self.get_logger().info(
+                "드론 3대 초기 이륙 완료: /mission/start 대기"
+            )
+            return
+
+        if status == "SEARCH_FINISHED_NO_VICTIM":
+            self.search_finished.add(drone_id)
+            self._try_finish_search_without_victim()
+            return
+
+        if self.finder_drone is not None:
+            if drone_id == self.finder_drone and status == "HOVERING":
+                self.finder_hovering = True
+            self._try_complete_mission()
+        elif self.state == "RETURNING_NO_VICTIM" and all(
+            self.drone_status[item] == "LANDED" for item in self.drone_ids
+        ):
+            self._publish_state("SEARCH_COMPLETE_NOT_FOUND")
+
+        if status.startswith("ERROR"):
+            if drone_id not in self.failed_drones:
+                self.failed_drones.add(drone_id)
+                self._send_command(drone_id, "HOVER")
+                self.get_logger().error(
+                    f"{drone_id} 오류 격리: 해당 드론만 Hover, "
+                    "나머지 드론은 LiDAR 수색 계속"
+                )
+            active_drones = [
+                item for item in self.drone_ids
+                if item not in self.failed_drones
+            ]
+            if not active_drones:
+                self._publish_state("MISSION_FAILED")
+            else:
+                self._try_finish_search_without_victim()
+
+    def _detection_callback(self, drone_id, detection):
+        if self.state != "SEARCHING" or self.finder_drone is not None:
+            return
+        if drone_id in self.failed_drones:
+            return
+
+        delay_sec = float(
+            self.get_parameter("detection_start_delay_sec").value
+        )
+        elapsed = (
+            time.monotonic() - self.search_started_at
+            if self.search_started_at is not None
+            else 0.0
+        )
+        if elapsed < delay_sec:
+            # 탐지 노드 설정이 잘못되거나 이전 메시지가 남아 있어도
+            # 중앙 관리자에서 한 번 더 초기 구조자 오탐을 차단한다.
+            now = time.monotonic()
+            if detection.detected and now - self.last_detection_delay_log_at >= 5.0:
+                self.get_logger().warning(
+                    f"{drone_id} 초기 탐지 무시: "
+                    f"유효화까지 {delay_sec - elapsed:.1f}초"
+                )
+                self.last_detection_delay_log_at = now
+            self._reset_drone_detection_sequence(drone_id)
+            return
+
+        if not detection.detected:
+            self._reset_drone_detection_sequence(drone_id)
+            return
+
+        minimum_confidence = float(
+            self.get_parameter("minimum_detection_confidence").value
+        )
+        if float(detection.confidence) < minimum_confidence:
+            self._reset_drone_detection_sequence(drone_id)
+            return
+
+        # Detection callback과 Localizer callback은 서로 다른 구독이다.
+        # 예전처럼 latest_map_positions를 즉시 읽으면 이전 bbox의 위치를
+        # 현재 bbox에 잘못 연결할 수 있다. 같은 Header stamp의 map 위치가
+        # 도착할 때까지 이번 양성 탐지를 보류한다.
+        stamp_ns = self._stamp_to_nanoseconds(detection.header.stamp)
+        now = time.monotonic()
+        pending = self.pending_detection_stamps[drone_id]
+        pending[stamp_ns] = (
+            now,
+            float(detection.confidence),
+            (
+                int(detection.x_min),
+                int(detection.y_min),
+                int(detection.x_max),
+                int(detection.y_max),
+            ),
+        )
+        timeout = float(
+            self.get_parameter("detection_position_timeout_sec").value
+        )
+        for old_stamp, record in list(pending.items()):
+            inserted_at = record[0]
+            if now - inserted_at > timeout:
+                pending.pop(old_stamp, None)
+        # 프로세스 스케줄링에 따라 Localizer의 map 메시지가 Detection보다
+        # 먼저 도착할 수도 있으므로 짧게 보관한 동일 stamp 결과도 확인한다.
+        cached_map = self.recent_map_positions[drone_id].get(stamp_ns)
+        if cached_map is not None:
+            self._validate_synchronized_detection(drone_id, cached_map[0])
+
+    def _camera_position_callback(self, drone_id, message):
+        self.latest_camera_positions[drone_id] = message
+        if drone_id != self.finder_drone:
+            return
+        if not self.camera_position_received:
+            self.get_logger().info(
+                f"조난자 카메라 위치: ({message.point.x:.2f}, "
+                f"{message.point.y:.2f}, {message.point.z:.2f})"
+            )
         self.camera_position_received = True
-        if first_position and self.state in (
-            "SEARCHING",
-            "VICTIM_DETECTED",
-            "VICTIM_LOCATED",
-        ):
-            self.get_logger().info(
-                "조난자 카메라 위치 최초 수신: "
-                f"({message.point.x:.2f}, {message.point.y:.2f}, "
-                f"{message.point.z:.2f})"
-            )
         self._try_complete_mission()
 
-    def _map_position_callback(self, message):
-        first_position = not self.map_position_received
-        self.map_position_received = True
-        if first_position and self.state in (
-            "SEARCHING",
-            "VICTIM_DETECTED",
-            "VICTIM_LOCATED",
-        ):
+    def _map_position_callback(self, drone_id, message):
+        self.latest_map_positions[drone_id] = message
+        stamp_ns = self._stamp_to_nanoseconds(message.header.stamp)
+        now = time.monotonic()
+        recent = self.recent_map_positions[drone_id]
+        recent[stamp_ns] = (message, now)
+        timeout = float(
+            self.get_parameter("detection_position_timeout_sec").value
+        )
+        for old_stamp, (_old_message, inserted_at) in list(recent.items()):
+            if now - inserted_at > timeout:
+                recent.pop(old_stamp, None)
+        self._validate_synchronized_detection(drone_id, message)
+        if drone_id != self.finder_drone:
+            return
+        if not self.map_position_received:
             self.get_logger().info(
-                "조난자 map 위치 최초 수신: "
-                f"({message.point.x:.2f}, {message.point.y:.2f}, "
-                f"{message.point.z:.2f})"
+                f"조난자 map 위치: ({message.point.x:.2f}, "
+                f"{message.point.y:.2f}, {message.point.z:.2f})"
             )
+        self.map_position_received = True
         self._try_complete_mission()
+
+    def _validate_synchronized_detection(self, drone_id, message):
+        """동일 영상 stamp의 위치가 연속해서 일치할 때만 확정한다."""
+        if self.state != "SEARCHING" or self.finder_drone is not None:
+            return
+        if drone_id in self.failed_drones:
+            return
+
+        stamp_ns = self._stamp_to_nanoseconds(message.header.stamp)
+        pending = self.pending_detection_stamps[drone_id]
+        detection_record = pending.pop(stamp_ns, None)
+        if detection_record is None:
+            return
+        _inserted_at, confidence, bbox = detection_record
+
+        x = float(message.point.x)
+        y = float(message.point.y)
+        z = float(message.point.z)
+        if not all(math.isfinite(value) for value in (x, y, z)):
+            self._reset_drone_detection_sequence(drone_id)
+            return
+        if self._is_in_start_exclusion_zone(x, y):
+            self._reset_drone_detection_sequence(drone_id)
+            now = time.monotonic()
+            if now - self.last_exclusion_log_at[drone_id] >= 5.0:
+                self.get_logger().warning(
+                    f"{drone_id} 시작 구역 person 무시: map=({x:.2f}, {y:.2f})"
+                )
+                self.last_exclusion_log_at[drone_id] = now
+            return
+        if not self._is_in_assigned_search_zone(drone_id, x, y):
+            self._reset_drone_detection_sequence(drone_id)
+            now = time.monotonic()
+            if now - self.last_zone_log_at[drone_id] >= 5.0:
+                self.get_logger().warning(
+                    f"{drone_id} 담당 구역 밖 person 무시: "
+                    f"map=({x:.2f}, {y:.2f}), conf={confidence:.2f}"
+                )
+                self.last_zone_log_at[drone_id] = now
+            return
+
+        sequence = self.confirmed_map_sequences[drone_id]
+        consistency_radius = float(
+            self.get_parameter(
+                "detection_position_consistency_radius_m"
+            ).value
+        )
+        if sequence:
+            center_x = sum(point[0] for point in sequence) / len(sequence)
+            center_y = sum(point[1] for point in sequence) / len(sequence)
+            center_z = sum(point[2] for point in sequence) / len(sequence)
+            position_error = math.sqrt(
+                (x - center_x) ** 2
+                + (y - center_y) ** 2
+                + (z - center_z) ** 2
+            )
+            if position_error > consistency_radius:
+                self.get_logger().warning(
+                    f"{drone_id} 탐지 위치 불일치: {position_error:.2f}m "
+                    "→ 연속 탐지 재시작"
+                )
+                sequence.clear()
+
+        sequence.append((x, y, z))
+        required = int(
+            self.get_parameter("required_detection_frames").value
+        )
+        if len(sequence) > required:
+            del sequence[:-required]
+        self.detection_counts[drone_id] = len(sequence)
+        self.get_logger().info(
+            f"{drone_id} 위치 일치 조난자 탐지: "
+            f"{len(sequence)}/{required}, conf={confidence:.2f}, "
+            f"bbox={bbox}, map=({x:.2f}, {y:.2f}, {z:.2f})"
+        )
+        if len(sequence) < required:
+            return
+
+        victim_x = sum(point[0] for point in sequence) / len(sequence)
+        victim_y = sum(point[1] for point in sequence) / len(sequence)
+        victim_z = sum(point[2] for point in sequence) / len(sequence)
+        approach_z = victim_z + float(
+            self.get_parameter("victim_approach_height_m").value
+        )
+
+        self.finder_drone = drone_id
+        self.camera_position_received = drone_id in self.latest_camera_positions
+        self.map_position_received = True
+        self._publish_finder(drone_id)
+        self._publish_state("VICTIM_DETECTED")
+        self._send_command(
+            drone_id,
+            f"APPROACH_VICTIM:{victim_x:.3f},{victim_y:.3f},{approach_z:.3f}",
+        )
+        for other_id in self.drone_ids:
+            if other_id != drone_id and other_id not in self.failed_drones:
+                self._send_command(other_id, "RETURN_HOME")
+        self.get_logger().warning(
+            f"조난자 확정 map=({victim_x:.2f}, {victim_y:.2f}, "
+            f"{victim_z:.2f}); {drone_id}는 상공 {approach_z:.2f}m로 접근, "
+            "나머지 드론은 자동 복귀"
+        )
+
+    def _reset_drone_detection_sequence(self, drone_id):
+        self.detection_counts[drone_id] = 0
+        self.pending_detection_stamps[drone_id].clear()
+        self.confirmed_map_sequences[drone_id].clear()
+        self.recent_map_positions[drone_id].clear()
+
+    @staticmethod
+    def _stamp_to_nanoseconds(stamp):
+        return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
 
     def _try_complete_mission(self):
-        # 위치 토픽이 계속 들어와도 COMPLETE 처리는 임무당 한 번만 수행한다.
-        if self.state == "COMPLETE":
+        if self.finder_drone is None or self.state == "COMPLETE":
             return
-
-        # TF가 아직 없어도 카메라 위치까지 계산되면 센서 파이프라인은 완료다.
-        if not (
-            self.victim_confirmed
-            and self.hovering
+        other_landed = all(
+            item in self.failed_drones or self.drone_status[item] == "LANDED"
+            for item in self.drone_ids
+            if item != self.finder_drone
+        )
+        if (
+            self.finder_hovering
             and self.camera_position_received
+            and self.map_position_received
+            and other_landed
         ):
-            return
-
-        self._publish_state("COMPLETE")
-        if bool(self.get_parameter("keep_hover_after_detection").value):
+            self._publish_state("COMPLETE")
             self.get_logger().info(
-                "조난자 위치에서 Hover를 유지합니다. "
-                "착륙은 /mission/land 서비스를 호출하세요."
+                f"임무 완료: {self.finder_drone}는 조난자 위치 Hover, "
+                "나머지 드론은 홈 착륙 완료"
             )
-        else:
-            self._publish_state("LANDING")
-            self._send_drone_command("LAND")
 
-    def _send_drone_command(self, command):
+    def _is_in_start_exclusion_zone(self, x, y):
+        values = [
+            float(value)
+            for value in self.get_parameter(
+                "start_exclusion_centers_xy"
+            ).value
+        ]
+        radius = float(
+            self.get_parameter("start_exclusion_radius_m").value
+        )
+        for index in range(0, len(values) - 1, 2):
+            if math.hypot(x - values[index], y - values[index + 1]) <= radius:
+                return True
+        return False
+
+    def _is_in_assigned_search_zone(self, drone_id, x, y):
+        values = [
+            float(value)
+            for value in self.get_parameter("search_zone_bounds_xy").value
+        ]
+        try:
+            drone_index = self.drone_ids.index(drone_id)
+        except ValueError:
+            return False
+        offset = drone_index * 4
+        if offset + 3 >= len(values):
+            self.get_logger().error(
+                "search_zone_bounds_xy 설정이 드론 수보다 짧습니다."
+            )
+            return False
+        x_min, x_max, y_min, y_max = values[offset:offset + 4]
+        return x_min <= x <= x_max and y_min <= y <= y_max
+
+    def _try_finish_search_without_victim(self):
+        """오류 드론을 제외한 정상 드론이 모두 수색을 마쳤는지 확인한다."""
+        if self.finder_drone is not None or self.state != "SEARCHING":
+            return
+        active_drones = [
+            item for item in self.drone_ids
+            if item not in self.failed_drones
+        ]
+        if not active_drones:
+            return
+        if not all(item in self.search_finished for item in active_drones):
+            return
+        self._publish_state("RETURNING_NO_VICTIM")
+        for item in active_drones:
+            self._send_command(item, "RETURN_HOME")
+
+    def _send_command(self, drone_id, command):
         message = String()
         message.data = command
-        self.command_publisher.publish(message)
-        self.get_logger().info(f"드론 명령 전송: {command}")
+        self.command_publishers[drone_id].publish(message)
+        self.get_logger().info(f"{drone_id} 명령: {command}")
+
+    def _send_all(self, command):
+        for drone_id in self.drone_ids:
+            self._send_command(drone_id, command)
+
+    def _publish_finder(self, drone_id):
+        message = String()
+        message.data = drone_id
+        self.finder_publisher.publish(message)
 
     def _publish_state(self, state):
+        if state == self.state and state != "IDLE":
+            return
         self.state = state
         message = String()
         message.data = state

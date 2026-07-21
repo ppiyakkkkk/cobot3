@@ -22,11 +22,14 @@ class HumanDetectorNode(Node):
     def __init__(self):
         super().__init__("human_detector_node")
 
-        self.declare_parameter("image_topic", "/quadrotor/Camera/rgb")
-        self.declare_parameter("detection_topic", "/victim/detection")
+        self.declare_parameter("image_topic", "/quadrotor_01/Camera/rgb")
+        self.declare_parameter("drone_id", "quadrotor_01")
+        self.declare_parameter(
+            "detection_topic", "/drone_01/victim/detection"
+        )
         self.declare_parameter(
             "annotated_image_topic",
-            "/victim/annotated_image",
+            "/drone_01/victim/annotated_image",
         )
         self.declare_parameter("detector_mode", "yolo")
         self.declare_parameter(
@@ -36,6 +39,11 @@ class HumanDetectorNode(Node):
         self.declare_parameter("person_class_id", 0)
         self.declare_parameter("confidence_threshold", 0.25)
         self.declare_parameter("inference_period_sec", 0.2)
+        self.declare_parameter("mission_state_topic", "/mission/state")
+        # 시작 지점의 구조자를 조난자로 확정하지 않도록, 수색 시작 후
+        # 일정 시간 동안 실제/Mock 탐지를 모두 비활성화한다.
+        self.declare_parameter("detection_start_delay_sec", 60.0)
+        self.declare_parameter("detect_only_while_searching", True)
         self.declare_parameter("mock_delay_sec", 8.0)
         self.declare_parameter("mock_confidence", 0.95)
         self.declare_parameter("mock_x_min_ratio", 0.46)
@@ -44,6 +52,7 @@ class HumanDetectorNode(Node):
         self.declare_parameter("mock_y_max_ratio", 0.66)
 
         self.image_topic = self.get_parameter("image_topic").value
+        self.drone_id = str(self.get_parameter("drone_id").value)
         self.detector_mode = str(
             self.get_parameter("detector_mode").value
         ).lower()
@@ -56,12 +65,19 @@ class HumanDetectorNode(Node):
         self.mock_delay_sec = float(
             self.get_parameter("mock_delay_sec").value
         )
+        self.detection_start_delay_sec = float(
+            self.get_parameter("detection_start_delay_sec").value
+        )
+        self.detect_only_while_searching = bool(
+            self.get_parameter("detect_only_while_searching").value
+        )
 
         self.bridge = CvBridge()
         self.last_inference_time = 0.0
         self.model = None
         self.mission_state = "IDLE"
         self.search_started_at = None
+        self.delay_notice_printed = False
 
         self.detection_publisher = self.create_publisher(
             VictimDetection,
@@ -81,7 +97,7 @@ class HumanDetectorNode(Node):
         )
         self.create_subscription(
             String,
-            "/mission/state",
+            str(self.get_parameter("mission_state_topic").value),
             self._mission_state_callback,
             10,
         )
@@ -94,7 +110,8 @@ class HumanDetectorNode(Node):
             )
 
         self.get_logger().info(
-            f"탐지 모드={self.detector_mode}, 입력={self.image_topic}"
+            f"{self.drone_id} 탐지 모드={self.detector_mode}, "
+            f"입력={self.image_topic}"
         )
         if self.detector_mode == "mock":
             self.get_logger().warning(
@@ -104,14 +121,16 @@ class HumanDetectorNode(Node):
 
     def _mission_state_callback(self, message):
         state = message.data.strip().upper()
-        if self.detector_mode == "mock":
-            if state == "SEARCHING" and self.mission_state != "SEARCHING":
-                self.search_started_at = time.monotonic()
-                self.get_logger().info(
-                    "SEARCHING 진입: Mock 탐지 지연 타이머를 시작합니다."
-                )
-            elif state != "SEARCHING":
-                self.search_started_at = None
+        if state == "SEARCHING" and self.mission_state != "SEARCHING":
+            self.search_started_at = time.monotonic()
+            self.delay_notice_printed = False
+            self.get_logger().info(
+                "SEARCHING 진입: "
+                f"{self.detection_start_delay_sec:.1f}초 후 사람 탐지를 시작합니다."
+            )
+        elif state != "SEARCHING":
+            self.search_started_at = None
+            self.delay_notice_printed = False
         self.mission_state = state
 
     def _load_yolo_model(self):
@@ -151,7 +170,9 @@ class HumanDetectorNode(Node):
             self.get_logger().error(f"RGB 변환 실패: {error}")
             return
 
-        if self.detector_mode == "mock":
+        if not self._detection_is_enabled(now):
+            detection = self._empty_detection(message)
+        elif self.detector_mode == "mock":
             detection = self._run_mock_detection(message, image)
         else:
             detection = self._run_yolo_detection(message, image)
@@ -173,6 +194,28 @@ class HumanDetectorNode(Node):
         )
         annotated_message.header = message.header
         self.annotated_image_publisher.publish(annotated_message)
+
+    def _detection_is_enabled(self, now):
+        """수색 전 또는 초기 유예시간에는 사람 탐지 결과를 차단한다."""
+        if self.detect_only_while_searching and self.mission_state != "SEARCHING":
+            return False
+        if self.search_started_at is None:
+            return not self.detect_only_while_searching
+
+        elapsed = now - self.search_started_at
+        if elapsed < self.detection_start_delay_sec:
+            if not self.delay_notice_printed:
+                self.get_logger().info(
+                    "초기 구조자 오탐 방지 중: "
+                    f"탐지 활성화까지 {self.detection_start_delay_sec - elapsed:.1f}초"
+                )
+                self.delay_notice_printed = True
+            return False
+
+        if self.delay_notice_printed:
+            self.get_logger().info("사람 탐지를 활성화했습니다.")
+            self.delay_notice_printed = False
+        return True
 
     def _empty_detection(self, image_message):
         detection = VictimDetection()

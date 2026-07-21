@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 
-"""LiDAR 수평 감시 영역의 최소 거리를 계산해 안전 정지 신호를 만든다."""
+"""360° LiDAR로 팽창 costmap과 로컬 A* 우회 경로를 만든다."""
 
+import heapq
 import math
 import time
 
 import numpy as np
+from geometry_msgs.msg import Vector3Stamped
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -18,25 +20,97 @@ class ObstacleMonitorNode(Node):
     def __init__(self):
         super().__init__("obstacle_monitor_node")
 
-        self.declare_parameter("point_cloud_topic", "/point_cloud")
-        self.declare_parameter("safety_distance_m", 1.5)
-        self.declare_parameter("forward_half_angle_deg", 180.0)
+        self.declare_parameter("drone_id", "quadrotor_01")
+        self.declare_parameter(
+            "point_cloud_topic", "/quadrotor_01/point_cloud"
+        )
+        self.declare_parameter(
+            "blocked_topic", "/drone_01/obstacle/blocked"
+        )
+        self.declare_parameter(
+            "distance_topic", "/drone_01/obstacle/min_distance"
+        )
+        self.declare_parameter("mission_state_topic", "/mission/state")
+        self.declare_parameter("safety_distance_m", 4.0)
+        self.declare_parameter("emergency_distance_m", 0.9)
+        self.declare_parameter("front_sector_half_angle_deg", 45.0)
+        self.declare_parameter("side_sector_offset_deg", 70.0)
+        self.declare_parameter("side_sector_half_angle_deg", 30.0)
+        self.declare_parameter("minimum_obstacle_points", 3)
+        self.declare_parameter("blocked_confirm_scans", 2)
+        self.declare_parameter("clear_confirm_scans", 3)
+        self.declare_parameter("processing_period_sec", 0.10)
         self.declare_parameter("minimum_height_m", -0.8)
         self.declare_parameter("maximum_height_m", 0.8)
         self.declare_parameter(
+            "movement_direction_topic",
+            "/drone_01/navigation/direction_body_rad",
+        )
+        self.declare_parameter(
+            "clearances_topic",
+            "/drone_01/obstacle/clearances",
+        )
+        self.declare_parameter(
+            "avoidance_vector_topic",
+            "/drone_01/obstacle/avoidance_vector",
+        )
+        self.declare_parameter(
+            "local_detour_topic",
+            "/drone_01/obstacle/local_detour_body",
+        )
+        self.declare_parameter(
+            "candidate_offsets_deg",
+            [0.0, -25.0, 25.0, -50.0, 50.0, -75.0, 75.0, -100.0, 100.0],
+        )
+        self.declare_parameter("candidate_sector_half_angle_deg", 15.0)
+        self.declare_parameter("candidate_min_clearance_m", 3.5)
+        self.declare_parameter("candidate_score_distance_cap_m", 15.0)
+        self.declare_parameter("candidate_turn_penalty", 1.5)
+        self.declare_parameter("local_grid_size_m", 24.0)
+        self.declare_parameter("local_grid_resolution_m", 0.25)
+        self.declare_parameter("obstacle_inflation_radius_m", 1.0)
+        self.declare_parameter("local_planner_goal_distance_m", 8.0)
+        self.declare_parameter("local_planner_lookahead_m", 3.0)
+        self.declare_parameter("local_planner_period_sec", 0.40)
+        self.declare_parameter("planner_start_release_radius_m", 0.60)
+        self.declare_parameter(
             "active_mission_states",
-            ["READY", "SEARCHING"],
+            [
+                "INITIAL_TAKEOFF",
+                "INITIAL_HOVER",
+                "READY",
+                "SEARCHING",
+                "VICTIM_DETECTED",
+                "RETURNING_NO_VICTIM",
+                "COMPLETE",
+                "MISSION_FAILED",
+            ],
         )
         self.declare_parameter("warning_period_sec", 10.0)
 
         self.blocked_publisher = self.create_publisher(
             Bool,
-            "/obstacle/blocked",
+            str(self.get_parameter("blocked_topic").value),
             10,
         )
         self.distance_publisher = self.create_publisher(
             Float32,
-            "/obstacle/min_distance",
+            str(self.get_parameter("distance_topic").value),
+            10,
+        )
+        self.clearances_publisher = self.create_publisher(
+            Vector3Stamped,
+            str(self.get_parameter("clearances_topic").value),
+            10,
+        )
+        self.avoidance_vector_publisher = self.create_publisher(
+            Vector3Stamped,
+            str(self.get_parameter("avoidance_vector_topic").value),
+            10,
+        )
+        self.local_detour_publisher = self.create_publisher(
+            Vector3Stamped,
+            str(self.get_parameter("local_detour_topic").value),
             10,
         )
         self.create_subscription(
@@ -46,15 +120,35 @@ class ObstacleMonitorNode(Node):
             qos_profile_sensor_data,
         )
         self.create_subscription(
+            Float32,
+            str(self.get_parameter("movement_direction_topic").value),
+            self._movement_direction_callback,
+            10,
+        )
+        self.create_subscription(
             String,
-            "/mission/state",
+            str(self.get_parameter("mission_state_topic").value),
             self._mission_state_callback,
             10,
         )
 
         self.last_blocked = False
+        self.blocked_scan_count = 0
+        self.clear_scan_count = 0
         self.monitoring_enabled = False
         self.last_warning_time = float("-inf")
+        self.last_processing_time = float("-inf")
+        self.last_local_plan_time = float("-inf")
+        self.local_detour_x_m = 0.0
+        self.local_detour_y_m = 0.0
+        self.local_detour_valid = False
+        self.processing_period_sec = max(
+            0.02,
+            float(self.get_parameter("processing_period_sec").value),
+        )
+        # LiDAR body frame의 +X축을 0 rad로 사용한다. 컨트롤러가 다음
+        # Waypoint 방향을 body frame 각도로 계속 갱신한다.
+        self.movement_direction_rad = 0.0
         self.warning_period_sec = max(
             0.1,
             float(self.get_parameter("warning_period_sec").value),
@@ -64,8 +158,15 @@ class ObstacleMonitorNode(Node):
             for state in self.get_parameter("active_mission_states").value
         }
         self.get_logger().info(
-            "LiDAR 360도 수평 장애물 감시 노드 시작: READY/SEARCHING 대기"
+            f"{self.get_parameter('drone_id').value} LiDAR 장애물 감시 시작"
         )
+
+    def _movement_direction_callback(self, message):
+        new_direction = self._wrap_angle(float(message.data))
+        if abs(self._wrap_angle(new_direction - self.movement_direction_rad)) > math.radians(8.0):
+            self.local_detour_valid = False
+            self.last_local_plan_time = float("-inf")
+        self.movement_direction_rad = new_direction
 
     def _mission_state_callback(self, message):
         state = message.data.strip().upper()
@@ -75,13 +176,18 @@ class ObstacleMonitorNode(Node):
 
         self.monitoring_enabled = enabled
         self.last_blocked = False
+        self.blocked_scan_count = 0
+        self.clear_scan_count = 0
         if enabled:
             self.get_logger().info(
                 f"LiDAR 장애물 감시 활성화: mission_state={state}"
             )
         else:
             # 감시가 꺼질 때 이전 차단 상태가 남지 않게 해제한다.
-            self._publish_result(float("inf"), False, allow_warning=False)
+            self._publish_result(
+                float("inf"), float("inf"), float("inf"), False,
+                allow_warning=False,
+            )
             self.get_logger().info(
                 f"LiDAR 장애물 감시 비활성화: mission_state={state}"
             )
@@ -89,6 +195,10 @@ class ObstacleMonitorNode(Node):
     def _point_cloud_callback(self, message):
         if not self.monitoring_enabled:
             return
+        now = time.monotonic()
+        if now - self.last_processing_time < self.processing_period_sec:
+            return
+        self.last_processing_time = now
 
         try:
             points = point_cloud2.read_points_numpy(
@@ -111,16 +221,15 @@ class ObstacleMonitorNode(Node):
 
         points = np.asarray(points)
         if points.size == 0:
-            self._publish_result(float("inf"), False)
+            self._publish_result(
+                float("inf"), float("inf"), float("inf"), False
+            )
             return
         points = points.reshape(-1, 3)
 
         x = points[:, 0]
         y = points[:, 1]
         z = points[:, 2]
-        angle_limit = math.radians(
-            float(self.get_parameter("forward_half_angle_deg").value)
-        )
         minimum_height = float(
             self.get_parameter("minimum_height_m").value
         )
@@ -128,36 +237,147 @@ class ObstacleMonitorNode(Node):
             self.get_parameter("maximum_height_m").value
         )
 
-        angles = np.arctan2(y, x)
-        mask = (
-            (x > 0.0)
-            & (np.abs(angles) <= angle_limit)
-            & (z >= minimum_height)
-            & (z <= maximum_height)
-        )
-        if not np.any(mask):
-            self._publish_result(float("inf"), False)
+        height_mask = (z >= minimum_height) & (z <= maximum_height)
+        if not np.any(height_mask):
+            self._publish_result(float("inf"), float("inf"), float("inf"), False)
             return
 
-        distances = np.hypot(x[mask], y[mask])
-        minimum_distance = float(np.min(distances))
+        # x>0 고정 필터를 제거하고 360도 포인트의 각도를 모두 계산한다.
+        angles = np.arctan2(y[height_mask], x[height_mask])
+        distances = np.hypot(x[height_mask], y[height_mask])
+        center = self.movement_direction_rad
+        front_half = math.radians(
+            float(self.get_parameter("front_sector_half_angle_deg").value)
+        )
+        side_offset = math.radians(
+            float(self.get_parameter("side_sector_offset_deg").value)
+        )
+        side_half = math.radians(
+            float(self.get_parameter("side_sector_half_angle_deg").value)
+        )
+
+        front_mask = np.abs(self._angle_difference(angles, center)) <= front_half
+        left_mask = (
+            np.abs(self._angle_difference(angles, center + side_offset))
+            <= side_half
+        )
+        right_mask = (
+            np.abs(self._angle_difference(angles, center - side_offset))
+            <= side_half
+        )
+
+        nearest_360_distance = float(np.min(distances))
+        front_distance = self._minimum_distance(distances, front_mask)
+        left_distance = self._minimum_distance(distances, left_mask)
+        right_distance = self._minimum_distance(distances, right_mask)
+        (
+            recommended_direction_rad,
+            recommended_clearance_m,
+            recommended_valid,
+        ) = self._select_avoidance_direction(angles, distances, center)
         safety_distance = float(
             self.get_parameter("safety_distance_m").value
         )
+        minimum_points = int(
+            self.get_parameter("minimum_obstacle_points").value
+        )
+        close_front_points = int(
+            np.count_nonzero(front_mask & (distances < safety_distance))
+        )
+        emergency_distance = float(
+            self.get_parameter("emergency_distance_m").value
+        )
+        close_360_points = int(
+            np.count_nonzero(distances < emergency_distance)
+        )
+        raw_blocked = (
+            close_front_points >= minimum_points
+            or close_360_points >= minimum_points
+        )
+        blocked = self._apply_blocked_hysteresis(raw_blocked)
+
+        # 장애물 크기를 가정하지 않고 현재 높이의 실제 점군을 로컬
+        # occupancy grid로 만든다. 장애물은 드론 반경+안전여유만큼
+        # 팽창하고, 목표 방향의 가상 지점까지 A* 경로를 계산한다.
+        if raw_blocked:
+            planner_period = float(
+                self.get_parameter("local_planner_period_sec").value
+            )
+            if now - self.last_local_plan_time >= planner_period:
+                (
+                    self.local_detour_x_m,
+                    self.local_detour_y_m,
+                    self.local_detour_valid,
+                ) = self._plan_local_detour(
+                    x[height_mask],
+                    y[height_mask],
+                    center,
+                )
+                self.last_local_plan_time = now
+        else:
+            self.local_detour_valid = False
+
         self._publish_result(
-            minimum_distance,
-            minimum_distance < safety_distance,
+            front_distance,
+            left_distance,
+            right_distance,
+            blocked,
+            nearest_360_distance=nearest_360_distance,
+            recommended_direction_rad=recommended_direction_rad,
+            recommended_clearance_m=recommended_clearance_m,
+            recommended_valid=recommended_valid,
         )
 
     def _publish_result(
         self,
-        minimum_distance,
+        front_distance,
+        left_distance,
+        right_distance,
         blocked,
         allow_warning=True,
+        nearest_360_distance=float("inf"),
+        recommended_direction_rad=0.0,
+        recommended_clearance_m=0.0,
+        recommended_valid=False,
     ):
+        if not blocked:
+            self.local_detour_valid = False
         distance_message = Float32()
-        distance_message.data = minimum_distance
+        distance_message.data = front_distance
         self.distance_publisher.publish(distance_message)
+
+        clearances = Vector3Stamped()
+        clearances.header.stamp = self.get_clock().now().to_msg()
+        clearances.header.frame_id = str(
+            self.get_parameter("drone_id").value
+        ) + "/base_scan"
+        clearances.vector.x = front_distance
+        clearances.vector.y = left_distance
+        clearances.vector.z = right_distance
+        self.clearances_publisher.publish(clearances)
+
+        avoidance = Vector3Stamped()
+        avoidance.header = clearances.header
+        # x: LiDAR body frame 기준 추천 진행각(rad)
+        # y: 해당 후보 섹터의 실제 최소 여유거리(m)
+        # z: 1.0이면 유효, 0.0이면 검증된 회피 방향 없음
+        avoidance.vector.x = float(recommended_direction_rad)
+        avoidance.vector.y = float(recommended_clearance_m)
+        avoidance.vector.z = 1.0 if recommended_valid else 0.0
+        self.avoidance_vector_publisher.publish(avoidance)
+
+        local_detour = Vector3Stamped()
+        local_detour.header = clearances.header
+        # body frame 좌표: x=전방(m), y=좌측(m),
+        # z의 절댓값=360° 최소거리(m), 부호=경로 유효 여부다.
+        local_detour.vector.x = float(self.local_detour_x_m)
+        local_detour.vector.y = float(self.local_detour_y_m)
+        local_detour.vector.z = (
+            float(nearest_360_distance)
+            if self.local_detour_valid
+            else -(float(nearest_360_distance) + 1.0e-6)
+        )
+        self.local_detour_publisher.publish(local_detour)
 
         blocked_message = Bool()
         blocked_message.data = blocked
@@ -169,11 +389,320 @@ class ObstacleMonitorNode(Node):
             and blocked
             and now - self.last_warning_time >= self.warning_period_sec
         ):
+            recommendation = (
+                f"{math.degrees(recommended_direction_rad):.0f}°/"
+                f"{recommended_clearance_m:.2f}m"
+                if recommended_valid
+                else "NONE"
+            )
+            local_plan = (
+                f"({self.local_detour_x_m:.2f}, "
+                f"{self.local_detour_y_m:.2f})m"
+                if self.local_detour_valid
+                else "NONE"
+            )
             self.get_logger().warning(
-                f"안전거리 내 장애물: {minimum_distance:.2f}m"
+                f"이동 방향 장애물: 전방={front_distance:.2f}m, "
+                f"좌측={left_distance:.2f}m, 우측={right_distance:.2f}m, "
+                f"360°최소={nearest_360_distance:.2f}m, "
+                f"VFH참고={recommendation}, 로컬A*={local_plan}"
             )
             self.last_warning_time = now
         self.last_blocked = blocked
+
+    @staticmethod
+    def _wrap_angle(angle):
+        return (angle + math.pi) % (2.0 * math.pi) - math.pi
+
+    @staticmethod
+    def _angle_difference(angles, center):
+        return (angles - center + math.pi) % (2.0 * math.pi) - math.pi
+
+    @staticmethod
+    def _minimum_distance(distances, mask):
+        if not np.any(mask):
+            return float("inf")
+        return float(np.min(distances[mask]))
+
+    def _apply_blocked_hysteresis(self, raw_blocked):
+        """한두 프레임의 LiDAR 잡음으로 회피 상태가 진동하지 않게 한다."""
+        if raw_blocked:
+            self.blocked_scan_count += 1
+            self.clear_scan_count = 0
+            if self.blocked_scan_count >= max(
+                1,
+                int(self.get_parameter("blocked_confirm_scans").value),
+            ):
+                return True
+            return self.last_blocked
+
+        self.clear_scan_count += 1
+        self.blocked_scan_count = 0
+        if self.clear_scan_count >= max(
+            1,
+            int(self.get_parameter("clear_confirm_scans").value),
+        ):
+            return False
+        return self.last_blocked
+
+    def _select_avoidance_direction(self, angles, distances, target_center):
+        """장애물 여유가 확보된 LiDAR 후보 중 최적 방향을 고른다."""
+        offsets_deg = [
+            float(value)
+            for value in self.get_parameter("candidate_offsets_deg").value
+        ]
+        half_angle = math.radians(
+            float(
+                self.get_parameter("candidate_sector_half_angle_deg").value
+            )
+        )
+        minimum_clearance = float(
+            self.get_parameter("candidate_min_clearance_m").value
+        )
+        score_cap = float(
+            self.get_parameter("candidate_score_distance_cap_m").value
+        )
+        turn_penalty = float(
+            self.get_parameter("candidate_turn_penalty").value
+        )
+
+        best = None
+        for offset_deg in offsets_deg:
+            offset_rad = math.radians(offset_deg)
+            candidate_angle = self._wrap_angle(target_center + offset_rad)
+            mask = (
+                np.abs(self._angle_difference(angles, candidate_angle))
+                <= half_angle
+            )
+            clearance = self._minimum_distance(distances, mask)
+            # Isaac RTX LiDAR PointCloud에서 해당 섹터에 반환점이 없으면
+            # 측정 범위 안에 장애물이 없는 것으로 취급한다. 기존 코드는
+            # inf를 UNKNOWN으로 버려 열린 숲길에서도 VFH=NONE이 되었다.
+            if math.isnan(clearance):
+                continue
+            effective_clearance = (
+                score_cap if math.isinf(clearance) else clearance
+            )
+            if effective_clearance < minimum_clearance:
+                continue
+            score = (
+                min(effective_clearance, score_cap)
+                - turn_penalty * abs(offset_rad)
+            )
+            if best is None or score > best[0]:
+                best = (score, candidate_angle, effective_clearance)
+
+        if best is None:
+            return 0.0, 0.0, False
+        return float(best[1]), float(best[2]), True
+
+    def _plan_local_detour(self, obstacle_x, obstacle_y, target_angle):
+        """팽창된 로컬 격자에서 목표 방향까지 A* 우회점을 구한다."""
+        grid_size_m = float(self.get_parameter("local_grid_size_m").value)
+        resolution = float(
+            self.get_parameter("local_grid_resolution_m").value
+        )
+        if grid_size_m <= 2.0 or resolution <= 0.05:
+            return 0.0, 0.0, False
+
+        cell_count = max(21, int(round(grid_size_m / resolution)))
+        if cell_count % 2 == 0:
+            cell_count += 1
+        center_cell = cell_count // 2
+        half_size = center_cell * resolution
+        occupied = np.zeros((cell_count, cell_count), dtype=bool)
+
+        valid = (
+            np.isfinite(obstacle_x)
+            & np.isfinite(obstacle_y)
+            & (np.abs(obstacle_x) <= half_size)
+            & (np.abs(obstacle_y) <= half_size)
+        )
+        if np.any(valid):
+            columns = np.rint(obstacle_x[valid] / resolution).astype(int) + center_cell
+            rows = center_cell - np.rint(obstacle_y[valid] / resolution).astype(int)
+            inside = (
+                (rows >= 0) & (rows < cell_count)
+                & (columns >= 0) & (columns < cell_count)
+            )
+            occupied[rows[inside], columns[inside]] = True
+
+        occupied = self._inflate_grid(
+            occupied,
+            int(math.ceil(
+                float(
+                    self.get_parameter("obstacle_inflation_radius_m").value
+                ) / resolution
+            )),
+        )
+        start = (center_cell, center_cell)
+        # 이미 장애물 팽창영역 가장자리에 들어온 경우 시작 셀까지 막히면
+        # A*가 탈출 경로를 전혀 만들 수 없다. 실제 충돌 임박 여부는 별도의
+        # emergency_distance_m으로 판정하므로, 드론 중심 주변의 작은 원만
+        # 출발 가능 영역으로 복구해 장애물 반대편으로 빠져나오게 한다.
+        release_radius_cells = max(
+            0,
+            int(math.floor(
+                float(
+                    self.get_parameter(
+                        "planner_start_release_radius_m"
+                    ).value
+                ) / resolution
+            )),
+        )
+        for row_offset in range(
+            -release_radius_cells,
+            release_radius_cells + 1,
+        ):
+            for column_offset in range(
+                -release_radius_cells,
+                release_radius_cells + 1,
+            ):
+                if (
+                    row_offset ** 2 + column_offset ** 2
+                    > release_radius_cells ** 2
+                ):
+                    continue
+                occupied[
+                    center_cell + row_offset,
+                    center_cell + column_offset,
+                ] = False
+
+        goal_distance = min(
+            float(
+                self.get_parameter("local_planner_goal_distance_m").value
+            ),
+            half_size - resolution,
+        )
+        goal_x = math.cos(target_angle) * goal_distance
+        goal_y = math.sin(target_angle) * goal_distance
+        goal = (
+            center_cell - int(round(goal_y / resolution)),
+            center_cell + int(round(goal_x / resolution)),
+        )
+        goal = self._nearest_free_cell(occupied, goal, max_radius_cells=16)
+        if goal is None:
+            return 0.0, 0.0, False
+
+        path = self._astar_grid(occupied, start, goal)
+        if len(path) < 2:
+            return 0.0, 0.0, False
+
+        lookahead = max(
+            resolution,
+            float(self.get_parameter("local_planner_lookahead_m").value),
+        )
+        selected = path[-1]
+        traveled = 0.0
+        previous = path[0]
+        for cell in path[1:]:
+            traveled += math.hypot(
+                cell[0] - previous[0],
+                cell[1] - previous[1],
+            ) * resolution
+            selected = cell
+            if traveled >= lookahead:
+                break
+            previous = cell
+
+        detour_x = (selected[1] - center_cell) * resolution
+        detour_y = (center_cell - selected[0]) * resolution
+        if math.hypot(detour_x, detour_y) < 0.5:
+            return 0.0, 0.0, False
+        return float(detour_x), float(detour_y), True
+
+    @staticmethod
+    def _inflate_grid(occupied, radius_cells):
+        if radius_cells <= 0 or not np.any(occupied):
+            return occupied
+        inflated = occupied.copy()
+        rows, columns = occupied.shape
+        for row_offset in range(-radius_cells, radius_cells + 1):
+            for column_offset in range(-radius_cells, radius_cells + 1):
+                if row_offset ** 2 + column_offset ** 2 > radius_cells ** 2:
+                    continue
+                source_row_start = max(0, -row_offset)
+                source_row_end = min(rows, rows - row_offset)
+                source_col_start = max(0, -column_offset)
+                source_col_end = min(columns, columns - column_offset)
+                target_row_start = source_row_start + row_offset
+                target_row_end = source_row_end + row_offset
+                target_col_start = source_col_start + column_offset
+                target_col_end = source_col_end + column_offset
+                inflated[
+                    target_row_start:target_row_end,
+                    target_col_start:target_col_end,
+                ] |= occupied[
+                    source_row_start:source_row_end,
+                    source_col_start:source_col_end,
+                ]
+        return inflated
+
+    @staticmethod
+    def _nearest_free_cell(occupied, goal, max_radius_cells):
+        rows, columns = occupied.shape
+        goal_row = min(rows - 1, max(0, int(goal[0])))
+        goal_col = min(columns - 1, max(0, int(goal[1])))
+        if not occupied[goal_row, goal_col]:
+            return goal_row, goal_col
+        for radius in range(1, max_radius_cells + 1):
+            candidates = []
+            for row in range(max(0, goal_row - radius), min(rows, goal_row + radius + 1)):
+                for col in range(max(0, goal_col - radius), min(columns, goal_col + radius + 1)):
+                    if max(abs(row - goal_row), abs(col - goal_col)) != radius:
+                        continue
+                    if not occupied[row, col]:
+                        candidates.append((row, col))
+            if candidates:
+                return min(
+                    candidates,
+                    key=lambda cell: (cell[0] - goal_row) ** 2 + (cell[1] - goal_col) ** 2,
+                )
+        return None
+
+    @staticmethod
+    def _astar_grid(occupied, start, goal):
+        rows, columns = occupied.shape
+        neighbors = (
+            (-1, 0, 1.0), (1, 0, 1.0), (0, -1, 1.0), (0, 1, 1.0),
+            (-1, -1, math.sqrt(2.0)), (-1, 1, math.sqrt(2.0)),
+            (1, -1, math.sqrt(2.0)), (1, 1, math.sqrt(2.0)),
+        )
+        queue = [(0.0, start)]
+        came_from = {}
+        cost_so_far = {start: 0.0}
+        while queue:
+            _priority, current = heapq.heappop(queue)
+            if current == goal:
+                path = [current]
+                while current in came_from:
+                    current = came_from[current]
+                    path.append(current)
+                path.reverse()
+                return path
+            for row_delta, col_delta, step_cost in neighbors:
+                neighbor = (current[0] + row_delta, current[1] + col_delta)
+                if not (0 <= neighbor[0] < rows and 0 <= neighbor[1] < columns):
+                    continue
+                if occupied[neighbor]:
+                    continue
+                # 대각선으로 장애물 모서리를 가로지르지 않는다.
+                if row_delta and col_delta:
+                    if occupied[current[0] + row_delta, current[1]]:
+                        continue
+                    if occupied[current[0], current[1] + col_delta]:
+                        continue
+                new_cost = cost_so_far[current] + step_cost
+                if new_cost >= cost_so_far.get(neighbor, float("inf")):
+                    continue
+                cost_so_far[neighbor] = new_cost
+                came_from[neighbor] = current
+                heuristic = math.hypot(
+                    goal[0] - neighbor[0],
+                    goal[1] - neighbor[1],
+                )
+                heapq.heappush(queue, (new_cost + heuristic, neighbor))
+        return []
 
 
 def main(args=None):

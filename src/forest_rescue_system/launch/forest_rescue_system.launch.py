@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 
-"""산림 조난자 탐지 드론 기본 시스템을 한 번에 실행한다."""
+"""산림 구조용 드론 3대의 ROS 2 노드를 한 번에 실행한다."""
 
 import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, SetEnvironmentVariable
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -22,47 +23,70 @@ def generate_launch_description():
     config = LaunchConfiguration("config")
     mavsdk_python = LaunchConfiguration("mavsdk_python")
     detector_python = LaunchConfiguration("detector_python")
-
-    node_names = (
-        ("sensor_tf", "sensor_tf_node"),
-        ("obstacle_monitor", "obstacle_monitor_node"),
-        ("human_detector", "human_detector_node"),
-        ("victim_localizer", "victim_localizer_node"),
-        ("drone_controller", "drone_controller_node"),
-        ("mission_manager", "mission_manager_node"),
+    use_rviz = LaunchConfiguration("use_rviz")
+    rviz_config = os.path.join(
+        package_share,
+        "config",
+        "forest_rescue_multi.rviz",
     )
 
-    nodes = []
-    for executable, node_name in node_names:
-        options = dict(
+    nodes = [
+        # 중앙 관리자를 먼저 시작하고 각 드론의 주기 상태를 받는다.
+        Node(
             package="forest_rescue_system",
-            executable=executable,
-            name=node_name,
+            executable="mission_manager",
+            name="mission_manager_node",
             output="screen",
             parameters=[config],
         )
+    ]
 
-        # MAVSDK가 필요한 드론 제어 노드만 pegasus_control을 사용한다.
-        if executable == "drone_controller":
-            options["prefix"] = [mavsdk_python]
-
-        # YOLO와 MAVSDK가 설치된 pegasus_control Python을 사용한다.
-        if executable == "human_detector":
-            options["prefix"] = [detector_python]
-
-        nodes.append(Node(**options))
+    for index in range(1, 4):
+        suffix = f"{index:02d}"
+        common = dict(
+            package="forest_rescue_system",
+            output="screen",
+            parameters=[config],
+        )
+        nodes.extend(
+            [
+                Node(
+                    **common,
+                    executable="sensor_tf",
+                    name=f"sensor_tf_{suffix}",
+                ),
+                Node(
+                    **common,
+                    executable="obstacle_monitor",
+                    name=f"obstacle_monitor_{suffix}",
+                ),
+                Node(
+                    **common,
+                    executable="human_detector",
+                    name=f"human_detector_{suffix}",
+                    prefix=[detector_python],
+                ),
+                Node(
+                    **common,
+                    executable="victim_localizer",
+                    name=f"victim_localizer_{suffix}",
+                ),
+                Node(
+                    **common,
+                    executable="drone_controller",
+                    name=f"drone_controller_{suffix}",
+                    prefix=[mavsdk_python],
+                ),
+            ]
+        )
 
     return LaunchDescription(
         [
-            # ~/.local의 NumPy 2.x가 ROS Humble cv_bridge보다 먼저 로드되는 것을 막는다.
-            SetEnvironmentVariable(
-                name="PYTHONNOUSERSITE",
-                value="1",
-            ),
+            SetEnvironmentVariable(name="PYTHONNOUSERSITE", value="1"),
             DeclareLaunchArgument(
                 "config",
                 default_value=default_config,
-                description="통합 시스템 YAML 설정 파일",
+                description="3드론 통합 시스템 YAML 설정 파일",
             ),
             DeclareLaunchArgument(
                 "mavsdk_python",
@@ -76,10 +100,21 @@ def generate_launch_description():
                 default_value=os.path.expanduser(
                     "~/venvs/pegasus_control/bin/python"
                 ),
-                description=(
-                    "Ultralytics와 ROS 영상 의존성이 설치된 탐지용 Python"
-                ),
+                description="Ultralytics가 설치된 Python 실행 파일",
+            ),
+            DeclareLaunchArgument(
+                "use_rviz",
+                default_value="false",
+                description="세 드론 통합 RViz 화면을 함께 실행",
             ),
             *nodes,
+            Node(
+                package="rviz2",
+                executable="rviz2",
+                name="forest_rescue_rviz",
+                output="screen",
+                arguments=["-d", rviz_config],
+                condition=IfCondition(use_rviz),
+            ),
         ]
     )

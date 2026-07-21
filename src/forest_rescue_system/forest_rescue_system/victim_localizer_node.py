@@ -28,29 +28,37 @@ class VictimLocalizerNode(Node):
     def __init__(self):
         super().__init__("victim_localizer_node")
 
+        self.declare_parameter("drone_id", "quadrotor_01")
+
         self.declare_parameter(
             "depth_topic",
-            "/quadrotor/Camera/depth",
+            "/quadrotor_01/Camera/depth",
         )
         self.declare_parameter(
             "camera_info_topic",
-            "/quadrotor/Camera/camera_info",
+            "/quadrotor_01/Camera/camera_info",
         )
-        self.declare_parameter("detection_topic", "/victim/detection")
+        self.declare_parameter(
+            "detection_topic", "/drone_01/victim/detection"
+        )
         self.declare_parameter(
             "camera_position_topic",
-            "/victim/position_camera",
+            "/drone_01/victim/position_camera",
         )
         self.declare_parameter(
             "map_position_topic",
-            "/victim/position_map",
+            "/drone_01/victim/position_map",
         )
         self.declare_parameter("camera_frame_override", "Camera")
         self.declare_parameter("map_frame", "map")
         self.declare_parameter("roi_center_ratio", 0.5)
         self.declare_parameter("minimum_depth_m", 0.2)
         self.declare_parameter("maximum_depth_m", 30.0)
+        self.declare_parameter("max_depth_detection_time_delta_sec", 0.20)
         self.declare_parameter("log_period_sec", 10.0)
+        self.declare_parameter("mission_state_topic", "/mission/state")
+
+        self.drone_id = str(self.get_parameter("drone_id").value)
 
         self.bridge = CvBridge()
         self.latest_depth = None
@@ -95,7 +103,7 @@ class VictimLocalizerNode(Node):
         )
         self.create_subscription(
             String,
-            "/mission/state",
+            str(self.get_parameter("mission_state_topic").value),
             self._mission_state_callback,
             10,
         )
@@ -103,7 +111,9 @@ class VictimLocalizerNode(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        self.get_logger().info("Depth 기반 조난자 위치 계산 노드 시작")
+        self.get_logger().info(
+            f"{self.drone_id} Depth 기반 조난자 위치 계산 노드 시작"
+        )
 
     def _mission_state_callback(self, message):
         state = message.data.strip().upper()
@@ -147,6 +157,24 @@ class VictimLocalizerNode(Node):
             if self._should_log("missing_depth_or_info"):
                 self.get_logger().warning(
                     "Depth 또는 CameraInfo를 아직 받지 못했습니다."
+                )
+            return
+
+        # RGB bbox와 무관한 과거 Depth를 결합하면 사람의 map 좌표가 크게
+        # 튈 수 있다. 두 영상의 Header stamp가 가까운 경우만 역투영한다.
+        if self.latest_depth_header is None:
+            return
+        detection_stamp_ns = self._stamp_to_nanoseconds(detection.header.stamp)
+        depth_stamp_ns = self._stamp_to_nanoseconds(self.latest_depth_header.stamp)
+        stamp_delta_sec = abs(detection_stamp_ns - depth_stamp_ns) / 1.0e9
+        max_delta_sec = float(
+            self.get_parameter("max_depth_detection_time_delta_sec").value
+        )
+        if stamp_delta_sec > max_delta_sec:
+            if self._should_log("depth_stamp_mismatch"):
+                self.get_logger().warning(
+                    "RGB 탐지와 Depth 시각 불일치로 위치 계산 보류: "
+                    f"차이={stamp_delta_sec:.3f}초"
                 )
             return
 
@@ -219,7 +247,10 @@ class VictimLocalizerNode(Node):
                 f"y={point.point.y:.2f}, "
                 f"z={point.point.z:.2f}m"
             )
-        if self._publish_map_position(point):
+        if (
+            self._publish_map_position(point)
+            and self.mission_state in ("VICTIM_DETECTED", "VICTIM_LOCATED")
+        ):
             self.position_locked = True
             self.get_logger().info(
                 "조난자 위치를 현재 임무의 확정 위치로 고정했습니다."
@@ -233,6 +264,10 @@ class VictimLocalizerNode(Node):
             return False
         self.last_log_times[key] = now
         return True
+
+    @staticmethod
+    def _stamp_to_nanoseconds(stamp):
+        return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
 
     def _extract_center_roi(self, detection):
         height, width = self.latest_depth.shape[:2]
@@ -299,6 +334,9 @@ class VictimLocalizerNode(Node):
                 )
             return False
 
+        # TF 조회에는 최신 변환을 사용했지만, 결과가 어느 RGB bbox에서
+        # 계산됐는지 Mission Manager가 대조할 수 있도록 원래 stamp를 복원한다.
+        map_point.header.stamp = camera_point.header.stamp
         self.map_position_publisher.publish(map_point)
         if self._should_log("map_position"):
             self.get_logger().info(

@@ -1,0 +1,893 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    doc = "Self-contained forest rescue environment for Isaac Sim 5.1 and Pegasus Simulator. Units are meters, Z-up."
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+# 이 파일은 외부 에셋 없이 바로 열 수 있는 산림 구조 드론 시험 환경이다.
+# 중앙 20 x 20 m는 기존 8 x 8 m 수색 경로와 조난자 (4, 4, 0) 시험을 위해 평탄하게 유지한다.
+# 외곽은 높아지는 산지형이며, 나무 줄기·바위·지형에는 단순 충돌체가 적용되어 있다.
+
+def Xform "World"
+{
+    def PhysicsScene "PhysicsScene"
+    {
+        vector3f physics:gravityDirection = (0, 0, -1)
+        float physics:gravityMagnitude = 9.81
+    }
+
+    def DistantLight "Sun"
+    {
+        float inputs:angle = 0.8
+        color3f inputs:color = (1.0, 0.94, 0.82)
+        float inputs:intensity = 2800
+        double3 xformOp:rotateXYZ = (35, -25, -35)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    def DomeLight "Sky"
+    {
+        color3f inputs:color = (0.36, 0.48, 0.62)
+        float inputs:intensity = 350
+    }
+
+    def Xform "Environment"
+    {
+        # 30 x 30 m 저지대 분지형 지형. 중앙은 z=0, 외곽 산등성이는 최대 z=3.4 m다.
+        def Mesh "Terrain" (
+            prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsMeshCollisionAPI"]
+        )
+        {
+            uniform bool doubleSided = true
+            int[] faceVertexCounts = [
+                4, 4, 4, 4, 4, 4,
+                4, 4, 4, 4, 4, 4,
+                4, 4, 4, 4, 4, 4,
+                4, 4, 4, 4, 4, 4,
+                4, 4, 4, 4, 4, 4,
+                4, 4, 4, 4, 4, 4
+            ]
+            int[] faceVertexIndices = [
+                0, 1, 8, 7, 1, 2, 9, 8, 2, 3, 10, 9, 3, 4, 11, 10, 4, 5, 12, 11, 5, 6, 13, 12,
+                7, 8, 15, 14, 8, 9, 16, 15, 9, 10, 17, 16, 10, 11, 18, 17, 11, 12, 19, 18, 12, 13, 20, 19,
+                14, 15, 22, 21, 15, 16, 23, 22, 16, 17, 24, 23, 17, 18, 25, 24, 18, 19, 26, 25, 19, 20, 27, 26,
+                21, 22, 29, 28, 22, 23, 30, 29, 23, 24, 31, 30, 24, 25, 32, 31, 25, 26, 33, 32, 26, 27, 34, 33,
+                28, 29, 36, 35, 29, 30, 37, 36, 30, 31, 38, 37, 31, 32, 39, 38, 32, 33, 40, 39, 33, 34, 41, 40,
+                35, 36, 43, 42, 36, 37, 44, 43, 37, 38, 45, 44, 38, 39, 46, 45, 39, 40, 47, 46, 40, 41, 48, 47
+            ]
+            point3f[] points = [
+                (-15, -15, 3.2), (-10, -15, 2.6), (-5, -15, 2.1), (0, -15, 1.8), (5, -15, 2.0), (10, -15, 2.7), (15, -15, 3.4),
+                (-15, -10, 2.4), (-10, -10, 0.0), (-5, -10, 0.0), (0, -10, 0.0), (5, -10, 0.0), (10, -10, 0.0), (15, -10, 2.5),
+                (-15, -5, 2.0), (-10, -5, 0.0), (-5, -5, 0.0), (0, -5, 0.0), (5, -5, 0.0), (10, -5, 0.0), (15, -5, 2.1),
+                (-15, 0, 1.8), (-10, 0, 0.0), (-5, 0, 0.0), (0, 0, 0.0), (5, 0, 0.0), (10, 0, 0.0), (15, 0, 1.9),
+                (-15, 5, 2.0), (-10, 5, 0.0), (-5, 5, 0.0), (0, 5, 0.0), (5, 5, 0.0), (10, 5, 0.0), (15, 5, 2.2),
+                (-15, 10, 2.5), (-10, 10, 0.0), (-5, 10, 0.0), (0, 10, 0.0), (5, 10, 0.0), (10, 10, 0.0), (15, 10, 2.7),
+                (-15, 15, 3.3), (-10, 15, 2.7), (-5, 15, 2.2), (0, 15, 1.9), (5, 15, 2.2), (10, 15, 2.9), (15, 15, 3.5)
+            ]
+            color3f[] primvars:displayColor = [(0.16, 0.30, 0.10)]
+            uniform token primvars:displayColor:interpolation = "constant"
+            bool physics:collisionEnabled = true
+            uniform token physics:approximation = "none"
+            uniform token subdivisionScheme = "none"
+        }
+
+        # 구조자 출발점에서 조난자 후보 영역으로 이어지는 지상 구조 접근로다.
+        def Xform "GroundRescueTrail"
+        {
+            def Cube "Segment_01"
+            {
+                double size = 2
+                color3f[] primvars:displayColor = [(0.35, 0.20, 0.08)]
+                double3 xformOp:translate = (-7.5, -6.5, 0.035)
+                double3 xformOp:rotateXYZ = (0, 0, 45)
+                double3 xformOp:scale = (2.12, 0.65, 0.018)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+            def Cube "Segment_02"
+            {
+                double size = 2
+                color3f[] primvars:displayColor = [(0.35, 0.20, 0.08)]
+                double3 xformOp:translate = (-4.0, -3.5, 0.035)
+                double3 xformOp:rotateXYZ = (0, 0, 36.87)
+                double3 xformOp:scale = (2.5, 0.65, 0.018)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+            def Cube "Segment_03"
+            {
+                double size = 2
+                color3f[] primvars:displayColor = [(0.35, 0.20, 0.08)]
+                double3 xformOp:translate = (0.0, -0.5, 0.035)
+                double3 xformOp:rotateXYZ = (0, 0, 36.87)
+                double3 xformOp:scale = (2.5, 0.65, 0.018)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+            def Cube "Segment_04"
+            {
+                double size = 2
+                color3f[] primvars:displayColor = [(0.35, 0.20, 0.08)]
+                double3 xformOp:translate = (3.5, 2.5, 0.035)
+                double3 xformOp:rotateXYZ = (0, 0, 45)
+                double3 xformOp:scale = (2.12, 0.65, 0.018)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+            def Cube "Segment_05"
+            {
+                double size = 2
+                color3f[] primvars:displayColor = [(0.35, 0.20, 0.08)]
+                double3 xformOp:translate = (6.5, 5.5, 0.035)
+                double3 xformOp:rotateXYZ = (0, 0, 45)
+                double3 xformOp:scale = (2.12, 0.65, 0.018)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+        }
+
+        # 파란 원: 구조자 출발 구역. 청록 원: 드론 출발 구역. 주황 원: 조난자 후보 구역.
+        def Xform "MissionZones"
+        {
+            def Cylinder "RescuerStartZone"
+            {
+                uniform token axis = "Z"
+                double height = 0.05
+                double radius = 1.2
+                color3f[] primvars:displayColor = [(0.05, 0.25, 0.85)]
+                double3 xformOp:translate = (-9, -8, 0.025)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+            }
+            def Cylinder "DroneStartZone"
+            {
+                uniform token axis = "Z"
+                double height = 0.04
+                double radius = 0.9
+                color3f[] primvars:displayColor = [(0.0, 0.75, 0.65)]
+                double3 xformOp:translate = (0, 0, 0.02)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+            }
+            def Cylinder "VictimZone_01"
+            {
+                uniform token axis = "Z"
+                double height = 0.035
+                double radius = 0.65
+                color3f[] primvars:displayColor = [(1.0, 0.32, 0.02)]
+                double3 xformOp:translate = (4, 4, 0.018)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+            }
+            def Cylinder "VictimZone_02"
+            {
+                uniform token axis = "Z"
+                double height = 0.035
+                double radius = 0.65
+                color3f[] primvars:displayColor = [(1.0, 0.32, 0.02)]
+                double3 xformOp:translate = (8, 4, 0.018)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+            }
+            def Cylinder "VictimZone_03"
+            {
+                uniform token axis = "Z"
+                double height = 0.035
+                double radius = 0.65
+                color3f[] primvars:displayColor = [(1.0, 0.32, 0.02)]
+                double3 xformOp:translate = (4, 8, 0.018)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+            }
+        }
+
+        def Xform "Trees"
+        {
+            def Xform "Pine_01"
+            {
+                double3 xformOp:translate = (-12, -7, 0.0)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+                def Cylinder "Trunk" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+                {
+                    uniform token axis = "Z"
+                    double height = 4.2
+                    double radius = 0.30
+                    color3f[] primvars:displayColor = [(0.25, 0.10, 0.03)]
+                    bool physics:collisionEnabled = true
+                    double3 xformOp:translate = (0, 0, 2.1)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownLow"
+                {
+                    uniform token axis = "Z"
+                    double height = 3.2
+                    double radius = 1.45
+                    color3f[] primvars:displayColor = [(0.03, 0.22, 0.06)]
+                    double3 xformOp:translate = (0, 0, 4.0)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownHigh"
+                {
+                    uniform token axis = "Z"
+                    double height = 2.7
+                    double radius = 1.05
+                    color3f[] primvars:displayColor = [(0.05, 0.30, 0.08)]
+                    double3 xformOp:translate = (0, 0, 5.1)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+            }
+
+            def Xform "Pine_02"
+            {
+                double3 xformOp:translate = (-11, -2, 0.0)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+                def Cylinder "Trunk" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+                {
+                    uniform token axis = "Z"
+                    double height = 4.8
+                    double radius = 0.34
+                    color3f[] primvars:displayColor = [(0.24, 0.09, 0.03)]
+                    bool physics:collisionEnabled = true
+                    double3 xformOp:translate = (0, 0, 2.4)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownLow"
+                {
+                    uniform token axis = "Z"
+                    double height = 3.5
+                    double radius = 1.55
+                    color3f[] primvars:displayColor = [(0.03, 0.24, 0.06)]
+                    double3 xformOp:translate = (0, 0, 4.5)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownHigh"
+                {
+                    uniform token axis = "Z"
+                    double height = 2.8
+                    double radius = 1.10
+                    color3f[] primvars:displayColor = [(0.05, 0.32, 0.08)]
+                    double3 xformOp:translate = (0, 0, 5.7)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+            }
+
+            def Xform "Pine_03"
+            {
+                double3 xformOp:translate = (-11, 5, 0.0)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+                def Cylinder "Trunk" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+                {
+                    uniform token axis = "Z"
+                    double height = 4.5
+                    double radius = 0.31
+                    color3f[] primvars:displayColor = [(0.26, 0.11, 0.035)]
+                    bool physics:collisionEnabled = true
+                    double3 xformOp:translate = (0, 0, 2.25)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownLow"
+                {
+                    uniform token axis = "Z"
+                    double height = 3.3
+                    double radius = 1.45
+                    color3f[] primvars:displayColor = [(0.035, 0.22, 0.055)]
+                    double3 xformOp:translate = (0, 0, 4.25)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownHigh"
+                {
+                    uniform token axis = "Z"
+                    double height = 2.8
+                    double radius = 1.05
+                    color3f[] primvars:displayColor = [(0.06, 0.30, 0.08)]
+                    double3 xformOp:translate = (0, 0, 5.35)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+            }
+
+            def Xform "Pine_04"
+            {
+                double3 xformOp:translate = (-8, 9, 0.0)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+                def Cylinder "Trunk" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+                {
+                    uniform token axis = "Z"
+                    double height = 5.0
+                    double radius = 0.35
+                    color3f[] primvars:displayColor = [(0.22, 0.08, 0.03)]
+                    bool physics:collisionEnabled = true
+                    double3 xformOp:translate = (0, 0, 2.5)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownLow"
+                {
+                    uniform token axis = "Z"
+                    double height = 3.6
+                    double radius = 1.65
+                    color3f[] primvars:displayColor = [(0.025, 0.20, 0.05)]
+                    double3 xformOp:translate = (0, 0, 4.7)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownHigh"
+                {
+                    uniform token axis = "Z"
+                    double height = 3.0
+                    double radius = 1.15
+                    color3f[] primvars:displayColor = [(0.045, 0.28, 0.07)]
+                    double3 xformOp:translate = (0, 0, 5.9)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+            }
+
+            def Xform "Pine_05"
+            {
+                double3 xformOp:translate = (-5, 7, 0.0)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+                def Cylinder "Trunk" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+                {
+                    uniform token axis = "Z"
+                    double height = 4.0
+                    double radius = 0.28
+                    color3f[] primvars:displayColor = [(0.27, 0.11, 0.04)]
+                    bool physics:collisionEnabled = true
+                    double3 xformOp:translate = (0, 0, 2.0)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownLow"
+                {
+                    uniform token axis = "Z"
+                    double height = 3.0
+                    double radius = 1.35
+                    color3f[] primvars:displayColor = [(0.04, 0.23, 0.06)]
+                    double3 xformOp:translate = (0, 0, 3.8)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownHigh"
+                {
+                    uniform token axis = "Z"
+                    double height = 2.5
+                    double radius = 0.95
+                    color3f[] primvars:displayColor = [(0.06, 0.31, 0.08)]
+                    double3 xformOp:translate = (0, 0, 4.8)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+            }
+
+            def Xform "Pine_06"
+            {
+                double3 xformOp:translate = (-3, 10, 0.0)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+                def Cylinder "Trunk" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+                {
+                    uniform token axis = "Z"
+                    double height = 4.6
+                    double radius = 0.32
+                    color3f[] primvars:displayColor = [(0.25, 0.10, 0.03)]
+                    bool physics:collisionEnabled = true
+                    double3 xformOp:translate = (0, 0, 2.3)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownLow"
+                {
+                    uniform token axis = "Z"
+                    double height = 3.4
+                    double radius = 1.5
+                    color3f[] primvars:displayColor = [(0.03, 0.22, 0.05)]
+                    double3 xformOp:translate = (0, 0, 4.35)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownHigh"
+                {
+                    uniform token axis = "Z"
+                    double height = 2.7
+                    double radius = 1.0
+                    color3f[] primvars:displayColor = [(0.05, 0.30, 0.07)]
+                    double3 xformOp:translate = (0, 0, 5.45)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+            }
+
+            def Xform "Pine_07"
+            {
+                double3 xformOp:translate = (1, 9, 0.0)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+                def Cylinder "Trunk" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+                {
+                    uniform token axis = "Z"
+                    double height = 4.2
+                    double radius = 0.29
+                    color3f[] primvars:displayColor = [(0.24, 0.09, 0.03)]
+                    bool physics:collisionEnabled = true
+                    double3 xformOp:translate = (0, 0, 2.1)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownLow"
+                {
+                    uniform token axis = "Z"
+                    double height = 3.1
+                    double radius = 1.4
+                    color3f[] primvars:displayColor = [(0.03, 0.23, 0.06)]
+                    double3 xformOp:translate = (0, 0, 3.95)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownHigh"
+                {
+                    uniform token axis = "Z"
+                    double height = 2.6
+                    double radius = 1.0
+                    color3f[] primvars:displayColor = [(0.05, 0.31, 0.08)]
+                    double3 xformOp:translate = (0, 0, 5.0)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+            }
+
+            def Xform "Pine_08"
+            {
+                double3 xformOp:translate = (6, 10, 0.0)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+                def Cylinder "Trunk" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+                {
+                    uniform token axis = "Z"
+                    double height = 4.9
+                    double radius = 0.34
+                    color3f[] primvars:displayColor = [(0.23, 0.085, 0.025)]
+                    bool physics:collisionEnabled = true
+                    double3 xformOp:translate = (0, 0, 2.45)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownLow"
+                {
+                    uniform token axis = "Z"
+                    double height = 3.6
+                    double radius = 1.6
+                    color3f[] primvars:displayColor = [(0.025, 0.21, 0.05)]
+                    double3 xformOp:translate = (0, 0, 4.6)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownHigh"
+                {
+                    uniform token axis = "Z"
+                    double height = 2.9
+                    double radius = 1.1
+                    color3f[] primvars:displayColor = [(0.045, 0.29, 0.07)]
+                    double3 xformOp:translate = (0, 0, 5.8)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+            }
+
+            def Xform "Pine_09"
+            {
+                double3 xformOp:translate = (10, 8, 0.0)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+                def Cylinder "Trunk" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+                {
+                    uniform token axis = "Z"
+                    double height = 4.3
+                    double radius = 0.30
+                    color3f[] primvars:displayColor = [(0.26, 0.10, 0.035)]
+                    bool physics:collisionEnabled = true
+                    double3 xformOp:translate = (0, 0, 2.15)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownLow"
+                {
+                    uniform token axis = "Z"
+                    double height = 3.2
+                    double radius = 1.45
+                    color3f[] primvars:displayColor = [(0.03, 0.22, 0.055)]
+                    double3 xformOp:translate = (0, 0, 4.05)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownHigh"
+                {
+                    uniform token axis = "Z"
+                    double height = 2.6
+                    double radius = 1.0
+                    color3f[] primvars:displayColor = [(0.055, 0.30, 0.075)]
+                    double3 xformOp:translate = (0, 0, 5.1)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+            }
+
+            def Xform "Pine_10"
+            {
+                double3 xformOp:translate = (11, 3, 0.0)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+                def Cylinder "Trunk" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+                {
+                    uniform token axis = "Z"
+                    double height = 4.7
+                    double radius = 0.33
+                    color3f[] primvars:displayColor = [(0.24, 0.09, 0.03)]
+                    bool physics:collisionEnabled = true
+                    double3 xformOp:translate = (0, 0, 2.35)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownLow"
+                {
+                    uniform token axis = "Z"
+                    double height = 3.5
+                    double radius = 1.55
+                    color3f[] primvars:displayColor = [(0.03, 0.21, 0.05)]
+                    double3 xformOp:translate = (0, 0, 4.45)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownHigh"
+                {
+                    uniform token axis = "Z"
+                    double height = 2.8
+                    double radius = 1.05
+                    color3f[] primvars:displayColor = [(0.05, 0.29, 0.07)]
+                    double3 xformOp:translate = (0, 0, 5.55)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+            }
+
+            def Xform "Pine_11"
+            {
+                double3 xformOp:translate = (10, -3, 0.0)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+                def Cylinder "Trunk" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+                {
+                    uniform token axis = "Z"
+                    double height = 4.1
+                    double radius = 0.29
+                    color3f[] primvars:displayColor = [(0.27, 0.11, 0.04)]
+                    bool physics:collisionEnabled = true
+                    double3 xformOp:translate = (0, 0, 2.05)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownLow"
+                {
+                    uniform token axis = "Z"
+                    double height = 3.0
+                    double radius = 1.35
+                    color3f[] primvars:displayColor = [(0.04, 0.24, 0.06)]
+                    double3 xformOp:translate = (0, 0, 3.85)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownHigh"
+                {
+                    uniform token axis = "Z"
+                    double height = 2.5
+                    double radius = 0.95
+                    color3f[] primvars:displayColor = [(0.06, 0.32, 0.08)]
+                    double3 xformOp:translate = (0, 0, 4.85)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+            }
+
+            def Xform "Pine_12"
+            {
+                double3 xformOp:translate = (11, -8, 0.0)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+                def Cylinder "Trunk" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+                {
+                    uniform token axis = "Z"
+                    double height = 4.8
+                    double radius = 0.34
+                    color3f[] primvars:displayColor = [(0.23, 0.08, 0.025)]
+                    bool physics:collisionEnabled = true
+                    double3 xformOp:translate = (0, 0, 2.4)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownLow"
+                {
+                    uniform token axis = "Z"
+                    double height = 3.5
+                    double radius = 1.6
+                    color3f[] primvars:displayColor = [(0.025, 0.20, 0.05)]
+                    double3 xformOp:translate = (0, 0, 4.5)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownHigh"
+                {
+                    uniform token axis = "Z"
+                    double height = 2.9
+                    double radius = 1.1
+                    color3f[] primvars:displayColor = [(0.045, 0.28, 0.07)]
+                    double3 xformOp:translate = (0, 0, 5.65)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+            }
+
+            def Xform "Pine_13"
+            {
+                double3 xformOp:translate = (5, -10, 0.0)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+                def Cylinder "Trunk" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+                {
+                    uniform token axis = "Z"
+                    double height = 4.4
+                    double radius = 0.31
+                    color3f[] primvars:displayColor = [(0.26, 0.10, 0.035)]
+                    bool physics:collisionEnabled = true
+                    double3 xformOp:translate = (0, 0, 2.2)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownLow"
+                {
+                    uniform token axis = "Z"
+                    double height = 3.3
+                    double radius = 1.45
+                    color3f[] primvars:displayColor = [(0.035, 0.22, 0.055)]
+                    double3 xformOp:translate = (0, 0, 4.15)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownHigh"
+                {
+                    uniform token axis = "Z"
+                    double height = 2.7
+                    double radius = 1.0
+                    color3f[] primvars:displayColor = [(0.055, 0.30, 0.075)]
+                    double3 xformOp:translate = (0, 0, 5.2)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+            }
+
+            def Xform "Pine_14"
+            {
+                double3 xformOp:translate = (0, -9, 0.0)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+                def Cylinder "Trunk" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+                {
+                    uniform token axis = "Z"
+                    double height = 4.0
+                    double radius = 0.28
+                    color3f[] primvars:displayColor = [(0.27, 0.11, 0.04)]
+                    bool physics:collisionEnabled = true
+                    double3 xformOp:translate = (0, 0, 2.0)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownLow"
+                {
+                    uniform token axis = "Z"
+                    double height = 3.0
+                    double radius = 1.35
+                    color3f[] primvars:displayColor = [(0.04, 0.23, 0.06)]
+                    double3 xformOp:translate = (0, 0, 3.8)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownHigh"
+                {
+                    uniform token axis = "Z"
+                    double height = 2.5
+                    double radius = 0.95
+                    color3f[] primvars:displayColor = [(0.06, 0.31, 0.08)]
+                    double3 xformOp:translate = (0, 0, 4.8)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+            }
+
+            def Xform "Pine_15"
+            {
+                double3 xformOp:translate = (-5, -8, 0.0)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+                def Cylinder "Trunk" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+                {
+                    uniform token axis = "Z"
+                    double height = 4.5
+                    double radius = 0.32
+                    color3f[] primvars:displayColor = [(0.25, 0.10, 0.03)]
+                    bool physics:collisionEnabled = true
+                    double3 xformOp:translate = (0, 0, 2.25)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownLow"
+                {
+                    uniform token axis = "Z"
+                    double height = 3.3
+                    double radius = 1.5
+                    color3f[] primvars:displayColor = [(0.03, 0.22, 0.05)]
+                    double3 xformOp:translate = (0, 0, 4.25)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownHigh"
+                {
+                    uniform token axis = "Z"
+                    double height = 2.7
+                    double radius = 1.05
+                    color3f[] primvars:displayColor = [(0.05, 0.30, 0.07)]
+                    double3 xformOp:translate = (0, 0, 5.3)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+            }
+
+            # 중앙 수색 구역 내부의 회피 시험용 나무 3그루다.
+            def Xform "ObstacleTree_01"
+            {
+                double3 xformOp:translate = (4, 2, 0.0)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+                def Cylinder "Trunk" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+                {
+                    uniform token axis = "Z"
+                    double height = 5.2
+                    double radius = 0.38
+                    color3f[] primvars:displayColor = [(0.23, 0.08, 0.025)]
+                    bool physics:collisionEnabled = true
+                    double3 xformOp:translate = (0, 0, 2.6)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownLow"
+                {
+                    uniform token axis = "Z"
+                    double height = 3.8
+                    double radius = 1.7
+                    color3f[] primvars:displayColor = [(0.025, 0.20, 0.05)]
+                    double3 xformOp:translate = (0, 0, 4.9)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownHigh"
+                {
+                    uniform token axis = "Z"
+                    double height = 3.0
+                    double radius = 1.15
+                    color3f[] primvars:displayColor = [(0.045, 0.28, 0.07)]
+                    double3 xformOp:translate = (0, 0, 6.2)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+            }
+
+            def Xform "ObstacleTree_02"
+            {
+                double3 xformOp:translate = (7, 5.5, 0.0)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+                def Cylinder "Trunk" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+                {
+                    uniform token axis = "Z"
+                    double height = 4.6
+                    double radius = 0.35
+                    color3f[] primvars:displayColor = [(0.25, 0.095, 0.03)]
+                    bool physics:collisionEnabled = true
+                    double3 xformOp:translate = (0, 0, 2.3)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownLow"
+                {
+                    uniform token axis = "Z"
+                    double height = 3.4
+                    double radius = 1.55
+                    color3f[] primvars:displayColor = [(0.03, 0.22, 0.055)]
+                    double3 xformOp:translate = (0, 0, 4.35)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownHigh"
+                {
+                    uniform token axis = "Z"
+                    double height = 2.8
+                    double radius = 1.05
+                    color3f[] primvars:displayColor = [(0.05, 0.30, 0.075)]
+                    double3 xformOp:translate = (0, 0, 5.5)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+            }
+
+            def Xform "ObstacleTree_03"
+            {
+                double3 xformOp:translate = (1.5, 6.5, 0.0)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+                def Cylinder "Trunk" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+                {
+                    uniform token axis = "Z"
+                    double height = 4.3
+                    double radius = 0.32
+                    color3f[] primvars:displayColor = [(0.26, 0.10, 0.035)]
+                    bool physics:collisionEnabled = true
+                    double3 xformOp:translate = (0, 0, 2.15)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownLow"
+                {
+                    uniform token axis = "Z"
+                    double height = 3.2
+                    double radius = 1.45
+                    color3f[] primvars:displayColor = [(0.035, 0.23, 0.06)]
+                    double3 xformOp:translate = (0, 0, 4.05)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+                def Cone "CrownHigh"
+                {
+                    uniform token axis = "Z"
+                    double height = 2.6
+                    double radius = 1.0
+                    color3f[] primvars:displayColor = [(0.055, 0.31, 0.08)]
+                    double3 xformOp:translate = (0, 0, 5.1)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+            }
+        }
+
+        def Xform "Rocks"
+        {
+            def Sphere "Rock_01" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+            {
+                double radius = 1
+                color3f[] primvars:displayColor = [(0.22, 0.24, 0.20)]
+                bool physics:collisionEnabled = true
+                double3 xformOp:translate = (-3, 3, 0.45)
+                double3 xformOp:rotateXYZ = (8, 16, 24)
+                double3 xformOp:scale = (0.9, 0.65, 0.45)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+            def Sphere "Rock_02" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+            {
+                double radius = 1
+                color3f[] primvars:displayColor = [(0.28, 0.27, 0.23)]
+                bool physics:collisionEnabled = true
+                double3 xformOp:translate = (6, -2, 0.55)
+                double3 xformOp:rotateXYZ = (12, -10, 35)
+                double3 xformOp:scale = (1.15, 0.75, 0.55)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+            def Sphere "Rock_03" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+            {
+                double radius = 1
+                color3f[] primvars:displayColor = [(0.20, 0.22, 0.19)]
+                bool physics:collisionEnabled = true
+                double3 xformOp:translate = (9, 2, 0.42)
+                double3 xformOp:rotateXYZ = (-5, 18, 8)
+                double3 xformOp:scale = (0.75, 1.0, 0.42)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+            def Sphere "Rock_04" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+            {
+                double radius = 1
+                color3f[] primvars:displayColor = [(0.30, 0.29, 0.25)]
+                bool physics:collisionEnabled = true
+                double3 xformOp:translate = (-7, 4, 0.60)
+                double3 xformOp:rotateXYZ = (10, 8, -20)
+                double3 xformOp:scale = (1.25, 0.85, 0.60)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+            def Sphere "Rock_05" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+            {
+                double radius = 1
+                color3f[] primvars:displayColor = [(0.23, 0.25, 0.21)]
+                bool physics:collisionEnabled = true
+                double3 xformOp:translate = (0.5, 4.5, 0.38)
+                double3 xformOp:rotateXYZ = (5, -12, 18)
+                double3 xformOp:scale = (0.75, 0.55, 0.38)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+            def Sphere "Rock_06" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+            {
+                double radius = 1
+                color3f[] primvars:displayColor = [(0.26, 0.26, 0.22)]
+                bool physics:collisionEnabled = true
+                double3 xformOp:translate = (8, 8, 0.52)
+                double3 xformOp:rotateXYZ = (-7, 14, 30)
+                double3 xformOp:scale = (1.05, 0.72, 0.52)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+        }
+
+        # 지도 경계 확인용 낮은 표지석. 충돌은 적용하지 않는다.
+        def Xform "BoundaryMarkers"
+        {
+            def Cube "NorthWest"
+            {
+                double size = 1
+                color3f[] primvars:displayColor = [(0.95, 0.75, 0.05)]
+                double3 xformOp:translate = (-10, 10, 0.25)
+                double3 xformOp:scale = (0.25, 0.25, 0.5)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+            def Cube "NorthEast"
+            {
+                double size = 1
+                color3f[] primvars:displayColor = [(0.95, 0.75, 0.05)]
+                double3 xformOp:translate = (10, 10, 0.25)
+                double3 xformOp:scale = (0.25, 0.25, 0.5)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+            def Cube "SouthWest"
+            {
+                double size = 1
+                color3f[] primvars:displayColor = [(0.95, 0.75, 0.05)]
+                double3 xformOp:translate = (-10, -10, 0.25)
+                double3 xformOp:scale = (0.25, 0.25, 0.5)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+            def Cube "SouthEast"
+            {
+                double size = 1
+                color3f[] primvars:displayColor = [(0.95, 0.75, 0.05)]
+                double3 xformOp:translate = (10, -10, 0.25)
+                double3 xformOp:scale = (0.25, 0.25, 0.5)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+        }
+    }
+}
