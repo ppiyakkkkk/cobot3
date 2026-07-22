@@ -9,15 +9,15 @@ from pathlib import Path
 import cv2
 from cv_bridge import CvBridge, CvBridgeError
 import rclpy
-from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
 
 from forest_rescue_interfaces.msg import VictimDetection
+from forest_rescue_system.log_utils import TimestampedNode
 
 
-class HumanDetectorNode(Node):
+class HumanDetectorNode(TimestampedNode):
     """Mock 또는 Ultralytics YOLO로 사람 Bounding Box를 발행한다."""
 
     def __init__(self):
@@ -153,7 +153,8 @@ class HumanDetectorNode(Node):
     def _mission_state_callback(self, message):
         state = message.data.strip().upper()
         if state == "SEARCHING" and self.mission_state != "SEARCHING":
-            self.search_started_at = time.monotonic()
+            # 탐지 유예시간은 시뮬레이션을 Pause하면 함께 멈춰야 한다.
+            self.search_started_at = self._sim_time_sec()
             self.delay_notice_printed = False
             self.latest_detected_image = None
             self.latest_detection_stamp_ns = None
@@ -236,7 +237,7 @@ class HumanDetectorNode(Node):
             self.get_logger().error(f"RGB 변환 실패: {error}")
             return
 
-        if not self._detection_is_enabled(now):
+        if not self._detection_is_enabled():
             detection = self._empty_detection(message)
         elif self.detector_mode == "mock":
             detection = self._run_mock_detection(message, image)
@@ -268,14 +269,14 @@ class HumanDetectorNode(Node):
         annotated_message.header = message.header
         self.annotated_image_publisher.publish(annotated_message)
 
-    def _detection_is_enabled(self, now):
+    def _detection_is_enabled(self):
         """수색 전 또는 초기 유예시간에는 사람 탐지 결과를 차단한다."""
         if self.detect_only_while_searching and self.mission_state != "SEARCHING":
             return False
         if self.search_started_at is None:
             return not self.detect_only_while_searching
 
-        elapsed = now - self.search_started_at
+        elapsed = self._sim_time_sec() - self.search_started_at
         if elapsed < self.detection_start_delay_sec:
             if not self.delay_notice_printed:
                 self.get_logger().info(
@@ -304,7 +305,7 @@ class HumanDetectorNode(Node):
             return detection
         if self.search_started_at is None:
             return detection
-        if time.monotonic() - self.search_started_at < self.mock_delay_sec:
+        if self._sim_time_sec() - self.search_started_at < self.mock_delay_sec:
             return detection
 
         height, width = image.shape[:2]
@@ -325,6 +326,10 @@ class HumanDetectorNode(Node):
             height * self.get_parameter("mock_y_max_ratio").value
         )
         return detection
+
+    def _sim_time_sec(self):
+        """use_sim_time 적용 시 /clock 기준 현재 시각을 초로 반환한다."""
+        return self.get_clock().now().nanoseconds / 1.0e9
 
     def _run_yolo_detection(self, image_message, image):
         """YOLO 결과 중 confidence가 가장 높은 person을 선택한다."""
@@ -368,7 +373,7 @@ class HumanDetectorNode(Node):
 
     @staticmethod
     def _draw_detection(image, detection):
-        color = (0, 255, 0)
+        color = (255, 0, 0)  # OpenCV BGR: 파란색 bbox와 글자
         cv2.rectangle(
             image,
             (detection.x_min, detection.y_min),

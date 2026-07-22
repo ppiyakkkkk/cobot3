@@ -24,6 +24,7 @@ def generate_launch_description():
     mavsdk_python = LaunchConfiguration("mavsdk_python")
     detector_python = LaunchConfiguration("detector_python")
     use_rviz = LaunchConfiguration("use_rviz")
+    use_sim_time = LaunchConfiguration("use_sim_time")
     rviz_config = os.path.join(
         package_share,
         "config",
@@ -37,7 +38,7 @@ def generate_launch_description():
             executable="mission_manager",
             name="mission_manager_node",
             output="screen",
-            parameters=[config],
+            parameters=[config, {"use_sim_time": use_sim_time}],
         ),
         # 실제 Start/Victim과 USD Terrain을 RViz에 함께 표시한다.
         Node(
@@ -45,7 +46,7 @@ def generate_launch_description():
             executable="rviz_visualization",
             name="rviz_visualization_node",
             output="screen",
-            parameters=[config],
+            parameters=[config, {"use_sim_time": use_sim_time}],
         ),
     ]
 
@@ -54,7 +55,7 @@ def generate_launch_description():
         common = dict(
             package="forest_rescue_system",
             output="screen",
-            parameters=[config],
+            parameters=[config, {"use_sim_time": use_sim_time}],
         )
         nodes.extend(
             [
@@ -115,6 +116,11 @@ def generate_launch_description():
                 default_value="false",
                 description="세 드론 통합 RViz 화면을 함께 실행",
             ),
+            DeclareLaunchArgument(
+                "use_sim_time",
+                default_value="true",
+                description="Isaac Sim /clock을 모든 ROS 2 노드에서 사용",
+            ),
             *nodes,
             Node(
                 package="rviz2",
@@ -122,6 +128,7 @@ def generate_launch_description():
                 name="forest_rescue_rviz",
                 output="screen",
                 arguments=["-d", rviz_config],
+                parameters=[{"use_sim_time": use_sim_time}],
                 condition=IfCondition(use_rviz),
             ),
         ]

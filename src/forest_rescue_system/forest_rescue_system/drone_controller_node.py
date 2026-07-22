@@ -7,7 +7,6 @@ import json
 import math
 from pathlib import Path
 import threading
-import time
 
 import numpy as np
 from geometry_msgs.msg import (
@@ -23,13 +22,14 @@ from mavsdk.param import ParamError
 from mavsdk.telemetry import TelemetryError
 from nav_msgs.msg import Path as NavPath
 import rclpy
-from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, Float32, String
 from tf2_ros import TransformBroadcaster
 
+from forest_rescue_system.log_utils import TimestampedNode
 
-class DroneControllerNode(Node):
+
+class DroneControllerNode(TimestampedNode):
     """namespace와 설정을 통해 PX4 드론 한 대를 독립적으로 제어한다."""
 
     def __init__(self):
@@ -614,14 +614,18 @@ class DroneControllerNode(Node):
         self.avoidance_direction_body_rad = float(message.vector.x)
         self.avoidance_direction_clearance_m = float(message.vector.y)
         self.avoidance_direction_valid = bool(message.vector.z >= 0.5)
-        self.avoidance_direction_received_at = time.monotonic()
+        self.avoidance_direction_received_at = self._stamp_to_seconds(
+            message.header.stamp
+        )
 
     def _local_detour_callback(self, message):
         self.local_detour_body_x_m = float(message.vector.x)
         self.local_detour_body_y_m = float(message.vector.y)
         self.local_detour_valid = bool(message.vector.z >= 0.0)
         self.local_detour_nearest_360_m = abs(float(message.vector.z))
-        self.local_detour_received_at = time.monotonic()
+        self.local_detour_received_at = self._stamp_to_seconds(
+            message.header.stamp
+        )
 
     async def _wait_for_health(self, timeout_sec=60.0):
         async def wait_stream():
@@ -666,8 +670,8 @@ class DroneControllerNode(Node):
             tolerance = float(
                 self.get_parameter("takeoff_tolerance_m").value
             )
-            deadline = time.monotonic() + 40.0
-            while time.monotonic() < deadline:
+            deadline = self._sim_time_sec() + 40.0
+            while self._sim_time_sec() < deadline:
                 if self.latest_relative_altitude_m >= altitude - tolerance:
                     self._publish_status("AIRBORNE")
                     return
@@ -766,7 +770,7 @@ class DroneControllerNode(Node):
                 )
                 if not reached:
                     return
-                await asyncio.sleep(max(0.0, hold_seconds))
+                await self._sleep_sim_time(max(0.0, hold_seconds))
 
             await self._hold_current_position(stop_search=False)
             self.search_task = None
@@ -880,10 +884,10 @@ class DroneControllerNode(Node):
             f"error={initial_error_deg:.1f}°"
         )
 
-        deadline = time.monotonic() + timeout_sec
+        deadline = self._sim_time_sec() + timeout_sec
         stable_samples = 0
 
-        while time.monotonic() < deadline:
+        while self._sim_time_sec() < deadline:
             self._publish_movement_direction(
                 target_north_m,
                 target_east_m,
@@ -906,7 +910,7 @@ class DroneControllerNode(Node):
                 stable_samples += 1
                 if stable_samples >= required_stable_samples:
                     if settle_sec > 0.0:
-                        await asyncio.sleep(settle_sec)
+                        await self._sleep_sim_time(settle_sec)
                     self.get_logger().info(
                         "진행방향 Yaw 정렬 완료: "
                         f"yaw={self.latest_yaw_deg:.1f}°, "
@@ -967,7 +971,7 @@ class DroneControllerNode(Node):
         # 보내지 않는다. 첫 PointCloud 판정을 기다린 뒤 경로가 열려
         # 있을 때만 원래 Waypoint를 명령한다.
         if allow_avoidance:
-            await asyncio.sleep(0.35)
+            await self._sleep_sim_time(0.35)
         if not (allow_avoidance and self.obstacle_blocked):
             await self.drone.offboard.set_position_ned(
                 PositionNedYaw(
@@ -977,13 +981,13 @@ class DroneControllerNode(Node):
                     command_yaw_deg,
                 )
             )
-        deadline = time.monotonic() + timeout_sec
-        while time.monotonic() < deadline:
+        deadline = self._sim_time_sec() + timeout_sec
+        while self._sim_time_sec() < deadline:
             self._publish_movement_direction(north_m, east_m)
             if self.stop_search_event.is_set() and allow_avoidance:
                 return False
             if allow_avoidance and self.obstacle_blocked:
-                avoidance_started = time.monotonic()
+                avoidance_started = self._sim_time_sec()
                 avoided_horizontally = await self._perform_horizontal_avoidance(
                     north_m,
                     east_m,
@@ -1028,8 +1032,8 @@ class DroneControllerNode(Node):
                                 f"{avoidance_replans}/{max_replans}: "
                                 f"{retry_hover:.1f}초 Hover 후 LiDAR 재검사"
                             )
-                            await asyncio.sleep(retry_hover)
-                            deadline += time.monotonic() - avoidance_started
+                            await self._sleep_sim_time(retry_hover)
+                            deadline += self._sim_time_sec() - avoidance_started
                             continue
 
                         if allow_waypoint_skip:
@@ -1051,7 +1055,7 @@ class DroneControllerNode(Node):
 
                 # 장애물 회피에 사용한 시간은 Waypoint 이동 제한시간에서
                 # 제외한다. 드론 정지가 아니라 타이머만 연장하는 처리다.
-                deadline += time.monotonic() - avoidance_started
+                deadline += self._sim_time_sec() - avoidance_started
 
                 # 수평 우회 중에는 임시점 방향을 바라본다. 우회가 끝나면
                 # 원래 Waypoint 방향으로 다시 회전한 뒤 수색을 재개한다.
@@ -1148,17 +1152,21 @@ class DroneControllerNode(Node):
             self.get_parameter("avoidance_direction_attempts").value
         )
         for _ in range(max(1, attempt_count)):
-            detour_age = time.monotonic() - self.local_detour_received_at
+            detour_age = self._sim_time_sec() - self.local_detour_received_at
             detour_max_age = float(
                 self.get_parameter("local_detour_max_age_sec").value
             )
             local_detour_fresh = (
                 self.local_detour_valid
+                and detour_age >= 0.0
                 and detour_age <= detour_max_age
             )
-            vector_age = time.monotonic() - self.avoidance_direction_received_at
+            vector_age = (
+                self._sim_time_sec() - self.avoidance_direction_received_at
+            )
             vector_fresh = (
                 self.avoidance_direction_valid
+                and vector_age >= 0.0
                 and vector_age
                 <= float(
                     self.get_parameter("avoidance_vector_max_age_sec").value
@@ -1217,7 +1225,7 @@ class DroneControllerNode(Node):
 
             # 아직 이동하지 않고 분석 중심만 추천 방향으로 바꿔 재검증한다.
             self._publish_movement_direction(detour_north, detour_east)
-            await asyncio.sleep(
+            await self._sleep_sim_time(
                 float(
                     self.get_parameter("avoidance_direction_check_sec").value
                 )
@@ -1286,7 +1294,7 @@ class DroneControllerNode(Node):
                 )
             )
 
-            movement_started_at = time.monotonic()
+            movement_started_at = self._sim_time_sec()
             blocked_since = None
             commit_sec = max(
                 0.0,
@@ -1303,7 +1311,7 @@ class DroneControllerNode(Node):
             deadline = movement_started_at + float(
                 self.get_parameter("avoidance_xy_timeout_sec").value
             )
-            while time.monotonic() < deadline:
+            while self._sim_time_sec() < deadline:
                 if self.stop_search_event.is_set():
                     return False
                 self._publish_movement_direction(detour_north, detour_east)
@@ -1319,7 +1327,7 @@ class DroneControllerNode(Node):
                         "local_detour_hard_stop_distance_m"
                     ).value
                 )
-                now = time.monotonic()
+                now = self._sim_time_sec()
                 emergency_blocked = (
                     self.local_detour_nearest_360_m < hard_stop
                 )
@@ -1373,13 +1381,13 @@ class DroneControllerNode(Node):
                 self.latest_yaw_deg,
             )
         )
-        deadline = time.monotonic() + float(
+        deadline = self._sim_time_sec() + float(
             self.get_parameter("avoidance_brake_timeout_sec").value
         )
         stopped_speed = float(
             self.get_parameter("avoidance_stopped_speed_m_s").value
         )
-        while time.monotonic() < deadline:
+        while self._sim_time_sec() < deadline:
             speed = math.sqrt(
                 self.latest_velocity_north_m_s ** 2
                 + self.latest_velocity_east_m_s ** 2
@@ -1477,12 +1485,12 @@ class DroneControllerNode(Node):
                 expected_travel_sec = (
                     abs(climb_start_down - next_down) / vertical_speed
                 )
-                step_deadline = time.monotonic() + max(
+                step_deadline = self._sim_time_sec() + max(
                     climb_timeout,
                     expected_travel_sec * 3.0 + 3.0,
                     settle * 4.0,
                 )
-                while time.monotonic() < step_deadline:
+                while self._sim_time_sec() < step_deadline:
                     if (
                         self.stop_search_event is not None
                         and self.stop_search_event.is_set()
@@ -1500,7 +1508,7 @@ class DroneControllerNode(Node):
                         f"{retry_index + 1}/{step_retries}"
                     )
                     await self._hold_current_position(stop_search=False)
-                    await asyncio.sleep(max(0.2, settle))
+                    await self._sleep_sim_time(max(0.2, settle))
             if not step_reached:
                 self.get_logger().warning(
                     "상승 회피 단계 고도 도달 실패: "
@@ -1513,8 +1521,11 @@ class DroneControllerNode(Node):
             # 목표 고도 도달 후에도 LiDAR가 settle 시간 동안 연속해서
             # 깨끗해야만 원래 진행 방향을 다시 명령한다.
             clear_since = None
-            validation_deadline = time.monotonic() + max(2.0, settle * 3.0)
-            while time.monotonic() < validation_deadline:
+            validation_deadline = self._sim_time_sec() + max(
+                2.0,
+                settle * 3.0,
+            )
+            while self._sim_time_sec() < validation_deadline:
                 if (
                     self.stop_search_event is not None
                     and self.stop_search_event.is_set()
@@ -1525,8 +1536,8 @@ class DroneControllerNode(Node):
                     await asyncio.sleep(0.1)
                     break
                 if clear_since is None:
-                    clear_since = time.monotonic()
-                elif time.monotonic() - clear_since >= settle:
+                    clear_since = self._sim_time_sec()
+                elif self._sim_time_sec() - clear_since >= settle:
                     self._publish_status(resume_status)
                     return True
                 await asyncio.sleep(0.1)
@@ -1749,8 +1760,8 @@ class DroneControllerNode(Node):
         stopped_speed = float(
             self.get_parameter("landing_stopped_speed_m_s").value
         )
-        deadline = time.monotonic() + timeout
-        descent_start_deadline = time.monotonic() + max(
+        deadline = self._sim_time_sec() + timeout
+        descent_start_deadline = self._sim_time_sec() + max(
             1.0,
             float(
                 self.get_parameter(
@@ -1769,7 +1780,7 @@ class DroneControllerNode(Node):
         )
         stable_samples = 0
 
-        while time.monotonic() < deadline:
+        while self._sim_time_sec() < deadline:
             horizontal_error = math.hypot(
                 self.latest_north_m,
                 self.latest_east_m,
@@ -1805,7 +1816,7 @@ class DroneControllerNode(Node):
                         f"속도={total_speed:.2f}m/s, "
                         f"settle={settle_sec:.1f}s"
                     )
-                    await asyncio.sleep(settle_sec)
+                    await self._sleep_sim_time(settle_sec)
                     return True
             else:
                 stable_samples = 0
@@ -1813,7 +1824,7 @@ class DroneControllerNode(Node):
             # 접근 고도 명령 후에도 실제 D가 전혀 증가하지 않으면 남은
             # 전체 타임아웃을 기다리지 않고 PX4 LAND 대체 경로로 넘긴다.
             if (
-                time.monotonic() >= descent_start_deadline
+                self._sim_time_sec() >= descent_start_deadline
                 and target_down_m > initial_down_m
                 and self.latest_down_m - initial_down_m < minimum_progress_m
             ):
@@ -1973,6 +1984,25 @@ class DroneControllerNode(Node):
         async for armed in self.drone.telemetry.armed():
             if not armed:
                 return
+
+    def _sim_time_sec(self):
+        """use_sim_time 적용 시 /clock 기준 현재 시각을 초로 반환한다."""
+        return self.get_clock().now().nanoseconds / 1.0e9
+
+    @staticmethod
+    def _stamp_to_seconds(stamp):
+        return float(stamp.sec) + float(stamp.nanosec) / 1.0e9
+
+    async def _sleep_sim_time(self, duration_sec):
+        """Pause 중 진행되지 않는 임무용 대기시간이다.
+
+        asyncio 자체는 실제 시간을 사용하므로 짧게 양보하면서 ROS clock의
+        경과량을 확인한다. MAVSDK 통신 타임아웃에는 이 함수를 쓰지 않는다.
+        """
+        duration_sec = max(0.0, float(duration_sec))
+        deadline = self._sim_time_sec() + duration_sec
+        while self._sim_time_sec() < deadline:
+            await asyncio.sleep(0.05)
 
     @staticmethod
     def _parse_waypoints(value):

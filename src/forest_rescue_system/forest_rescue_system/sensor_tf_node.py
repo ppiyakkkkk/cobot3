@@ -4,11 +4,12 @@
 
 from geometry_msgs.msg import TransformStamped
 import rclpy
-from rclpy.node import Node
 from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
 
+from forest_rescue_system.log_utils import TimestampedNode
 
-class SensorTfNode(Node):
+
+class SensorTfNode(TimestampedNode):
     def __init__(self):
         super().__init__("sensor_tf_node")
 

@@ -63,6 +63,7 @@ omni.usd.get_context().new_stage()
 
 # 아래 모듈들은 반드시 SimulationApp과 필요한 extension 생성 이후 import한다.
 import carb
+import omni.graph.core as og
 import omni.timeline
 from omni.isaac.core.world import World
 
@@ -77,6 +78,58 @@ from sim_utils import (
     remove_previous_generated_files,
 )
 from sim_viewports import ViewportManager
+
+
+def create_ros2_clock_graph():
+    """Isaac Sim 시간을 ROS 2의 유일한 /clock 발행원으로 사용한다."""
+    graph_path = "/World/ROS2ClockGraph"
+    stage = omni.usd.get_context().get_stage()
+    if stage.GetPrimAtPath(graph_path).IsValid():
+        print(f"[INFO] ROS 2 clock graph already exists: {graph_path}")
+        return
+
+    og.Controller.edit(
+        {
+            "graph_path": graph_path,
+            "evaluator_name": "execution",
+        },
+        {
+            og.Controller.Keys.CREATE_NODES: [
+                ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
+                ("Context", "isaacsim.ros2.bridge.ROS2Context"),
+                (
+                    "ReadSimTime",
+                    "isaacsim.core.nodes.IsaacReadSimulationTime",
+                ),
+                (
+                    "PublishClock",
+                    "isaacsim.ros2.bridge.ROS2PublishClock",
+                ),
+            ],
+            og.Controller.Keys.CONNECT: [
+                (
+                    "OnPlaybackTick.outputs:tick",
+                    "PublishClock.inputs:execIn",
+                ),
+                (
+                    "ReadSimTime.outputs:simulationTime",
+                    "PublishClock.inputs:timeStamp",
+                ),
+                (
+                    "Context.outputs:context",
+                    "PublishClock.inputs:context",
+                ),
+            ],
+            og.Controller.Keys.SET_VALUES: [
+                ("PublishClock.inputs:topicName", "/clock"),
+                # 현재 프로젝트의 ROS_DOMAIN_ID=143 환경 변수를 그대로 쓴다.
+                ("Context.inputs:useDomainIDEnvVar", True),
+                # Stop/Play만으로 시간이 0으로 되감기지 않게 한다.
+                ("ReadSimTime.inputs:resetOnStop", False),
+            ],
+        },
+    )
+    print("[OK] ROS 2 simulation clock publisher ready: /clock")
 
 
 class ForestRescueSimulation:
@@ -182,6 +235,11 @@ class ForestRescueSimulation:
 
         # 모든 Prim과 센서가 준비된 뒤 물리 World를 한 번 초기화한다.
         self.world.reset()
+        simulation_app.update()
+
+        # 센서 stamp, TF, ROS 타이머와 RViz가 모두 같은 Isaac 시간축을
+        # 사용하도록 센서가 동작하기 전에 /clock 발행 그래프를 만든다.
+        create_ros2_clock_graph()
         simulation_app.update()
 
         # 드론 body 전방과 실제 RGB/Depth 카메라 광축을 수치로 검증한다.

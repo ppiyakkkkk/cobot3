@@ -9,7 +9,6 @@ import time
 from geometry_msgs.msg import Point
 import numpy as np
 import rclpy
-from rclpy.node import Node
 from rclpy.qos import (
     DurabilityPolicy,
     QoSProfile,
@@ -17,8 +16,10 @@ from rclpy.qos import (
 )
 from visualization_msgs.msg import Marker, MarkerArray
 
+from forest_rescue_system.log_utils import TimestampedNode
 
-class RvizVisualizationNode(Node):
+
+class RvizVisualizationNode(TimestampedNode):
     """실제 스폰 정보와 USD 환경 Mesh를 RViz Marker로 변환한다."""
 
     def __init__(self):

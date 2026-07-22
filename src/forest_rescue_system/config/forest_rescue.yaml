@@ -87,7 +87,13 @@ victim_localizer_01:
     roi_center_ratio: 0.50
     minimum_depth_m: 0.20
     maximum_depth_m: 30.0
-    max_depth_detection_time_delta_sec: 0.20
+    depth_buffer_duration_sec: 1.0
+    depth_buffer_max_frames: 40
+    max_depth_detection_time_delta_sec: 0.25
+    # RGB 촬영 시각보다 TF 수신이 수십 ms 늦을 때 콜백을 막지 않고 재시도
+    tf_retry_timeout_sec: 1.0
+    tf_retry_period_sec: 0.02
+    tf_retry_max_points: 40
     log_period_sec: 10.0
 
 sensor_tf_01:
@@ -271,7 +277,12 @@ victim_localizer_02:
     roi_center_ratio: 0.50
     minimum_depth_m: 0.20
     maximum_depth_m: 30.0
-    max_depth_detection_time_delta_sec: 0.20
+    depth_buffer_duration_sec: 1.0
+    depth_buffer_max_frames: 40
+    max_depth_detection_time_delta_sec: 0.25
+    tf_retry_timeout_sec: 1.0
+    tf_retry_period_sec: 0.02
+    tf_retry_max_points: 40
     log_period_sec: 10.0
 
 sensor_tf_02:
@@ -453,7 +464,12 @@ victim_localizer_03:
     roi_center_ratio: 0.50
     minimum_depth_m: 0.20
     maximum_depth_m: 30.0
-    max_depth_detection_time_delta_sec: 0.20
+    depth_buffer_duration_sec: 1.0
+    depth_buffer_max_frames: 40
+    max_depth_detection_time_delta_sec: 0.25
+    tf_retry_timeout_sec: 1.0
+    tf_retry_period_sec: 0.02
+    tf_retry_max_points: 40
     log_period_sec: 10.0
 
 sensor_tf_03:

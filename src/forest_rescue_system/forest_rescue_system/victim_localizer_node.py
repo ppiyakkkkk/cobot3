@@ -4,13 +4,13 @@
 
 import math
 import time
+from collections import OrderedDict, deque
 
 from cv_bridge import CvBridge, CvBridgeError
 from geometry_msgs.msg import PointStamped
 import numpy as np
 import rclpy
 from rclpy.duration import Duration
-from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import String
@@ -20,9 +20,10 @@ from tf2_ros import Buffer, TransformException, TransformListener
 import tf2_geometry_msgs  # noqa: F401
 
 from forest_rescue_interfaces.msg import VictimDetection
+from forest_rescue_system.log_utils import TimestampedNode
 
 
-class VictimLocalizerNode(Node):
+class VictimLocalizerNode(TimestampedNode):
     """사람 영역의 유효 Depth 중앙값으로 위치를 역투영한다."""
 
     def __init__(self):
@@ -54,7 +55,18 @@ class VictimLocalizerNode(Node):
         self.declare_parameter("roi_center_ratio", 0.5)
         self.declare_parameter("minimum_depth_m", 0.2)
         self.declare_parameter("maximum_depth_m", 30.0)
-        self.declare_parameter("max_depth_detection_time_delta_sec", 0.20)
+        # YOLO 추론 결과는 원본 RGB 촬영 시점보다 늦게 도착한다. 최신
+        # Depth 한 장만 사용하지 않고 최근 프레임을 보관한 뒤 RGB stamp와
+        # 가장 가까운 Depth를 선택한다.
+        self.declare_parameter("depth_buffer_duration_sec", 1.0)
+        self.declare_parameter("depth_buffer_max_frames", 40)
+        self.declare_parameter("max_depth_detection_time_delta_sec", 0.25)
+        # Detection 콜백 안에서 TF를 기다리면 단일 실행기가 막혀 TF 수신
+        # 콜백도 처리되지 못한다. 요청 시각의 TF가 조금 늦게 도착하는 경우를
+        # 위해 Point를 잠시 보관하고 별도 타이머에서 비동기로 재시도한다.
+        self.declare_parameter("tf_retry_timeout_sec", 1.0)
+        self.declare_parameter("tf_retry_period_sec", 0.02)
+        self.declare_parameter("tf_retry_max_points", 40)
         self.declare_parameter("log_period_sec", 10.0)
         self.declare_parameter("mission_state_topic", "/mission/state")
 
@@ -63,6 +75,7 @@ class VictimLocalizerNode(Node):
         self.bridge = CvBridge()
         self.latest_depth = None
         self.latest_depth_header = None
+        self.depth_buffer = deque()
         self.camera_info = None
         self.log_period_sec = max(
             0.1,
@@ -71,6 +84,8 @@ class VictimLocalizerNode(Node):
         self.last_log_times = {}
         self.mission_state = "IDLE"
         self.position_locked = False
+        self.pending_tf_points = OrderedDict()
+        self.last_tf_error = None
 
         self.camera_position_publisher = self.create_publisher(
             PointStamped,
@@ -110,6 +125,13 @@ class VictimLocalizerNode(Node):
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.tf_retry_timer = self.create_timer(
+            max(
+                0.01,
+                float(self.get_parameter("tf_retry_period_sec").value),
+            ),
+            self._retry_pending_transforms,
+        )
 
         self.get_logger().info(
             f"{self.drone_id} Depth 기반 조난자 위치 계산 노드 시작"
@@ -119,6 +141,8 @@ class VictimLocalizerNode(Node):
         state = message.data.strip().upper()
         if state == "SEARCHING" and self.mission_state != "SEARCHING":
             self.position_locked = False
+            self.pending_tf_points.clear()
+            self.last_tf_error = None
             self.last_log_times.clear()
             self.get_logger().info(
                 "새 수색 임무 시작: 조난자 위치 고정을 해제합니다."
@@ -136,8 +160,20 @@ class VictimLocalizerNode(Node):
                 self.get_logger().error(f"Depth 변환 실패: {error}")
             return
 
-        self.latest_depth = np.asarray(depth, dtype=np.float32)
+        # CvBridge 결과가 메시지 메모리를 참조할 수 있으므로 버퍼에 넣을
+        # 프레임은 복사해 콜백 종료 후에도 안전하게 유지한다.
+        self.latest_depth = np.asarray(depth, dtype=np.float32).copy()
         self.latest_depth_header = message.header
+        stamp_ns = self._stamp_to_nanoseconds(message.header.stamp)
+
+        # Isaac Sim을 재시작하거나 시뮬레이션 시간이 되감긴 경우에는 이전
+        # 실행의 Depth가 선택되지 않도록 버퍼를 즉시 비운다.
+        if self.depth_buffer and stamp_ns < self.depth_buffer[-1][0]:
+            self.depth_buffer.clear()
+        self.depth_buffer.append(
+            (stamp_ns, self.latest_depth_header, self.latest_depth)
+        )
+        self._prune_depth_buffer(stamp_ns)
 
     def _camera_info_callback(self, message):
         self.camera_info = message
@@ -160,12 +196,15 @@ class VictimLocalizerNode(Node):
                 )
             return
 
-        # RGB bbox와 무관한 과거 Depth를 결합하면 사람의 map 좌표가 크게
-        # 튈 수 있다. 두 영상의 Header stamp가 가까운 경우만 역투영한다.
-        if self.latest_depth_header is None:
+        # YOLO 추론 지연 때문에 콜백 시점의 최신 Depth는 원본 RGB보다 훨씬
+        # 뒤일 수 있다. 최근 버퍼에서 RGB stamp와 가장 가까운 Depth를 찾는다.
+        if not self.depth_buffer:
             return
         detection_stamp_ns = self._stamp_to_nanoseconds(detection.header.stamp)
-        depth_stamp_ns = self._stamp_to_nanoseconds(self.latest_depth_header.stamp)
+        depth_stamp_ns, depth_header, selected_depth = min(
+            self.depth_buffer,
+            key=lambda item: abs(item[0] - detection_stamp_ns),
+        )
         stamp_delta_sec = abs(detection_stamp_ns - depth_stamp_ns) / 1.0e9
         max_delta_sec = float(
             self.get_parameter("max_depth_detection_time_delta_sec").value
@@ -178,7 +217,7 @@ class VictimLocalizerNode(Node):
                 )
             return
 
-        roi, u, v = self._extract_center_roi(detection)
+        roi, u, v = self._extract_center_roi(detection, selected_depth)
         if roi.size == 0:
             if self._should_log("invalid_bbox"):
                 self.get_logger().warning(
@@ -208,7 +247,7 @@ class VictimLocalizerNode(Node):
 
         # CameraInfo가 Depth와 다른 해상도로 발행되면 내부 파라미터도
         # 현재 Depth 영상 크기에 맞춰 스케일링한다.
-        depth_height, depth_width = self.latest_depth.shape[:2]
+        depth_height, depth_width = selected_depth.shape[:2]
         info_width = int(self.camera_info.width) or depth_width
         info_height = int(self.camera_info.height) or depth_height
         scale_x = depth_width / float(info_width)
@@ -232,8 +271,8 @@ class VictimLocalizerNode(Node):
         )
         if frame_override:
             point.header.frame_id = frame_override
-        elif not point.header.frame_id and self.latest_depth_header:
-            point.header.frame_id = self.latest_depth_header.frame_id
+        elif not point.header.frame_id and depth_header:
+            point.header.frame_id = depth_header.frame_id
 
         point.point.x = (u - cx) * depth_m / fx
         point.point.y = (v - cy) * depth_m / fy
@@ -269,8 +308,27 @@ class VictimLocalizerNode(Node):
     def _stamp_to_nanoseconds(stamp):
         return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
 
-    def _extract_center_roi(self, detection):
-        height, width = self.latest_depth.shape[:2]
+    def _prune_depth_buffer(self, newest_stamp_ns):
+        """설정 시간과 최대 프레임 수를 넘은 Depth를 제거한다."""
+        duration_sec = max(
+            0.1,
+            float(self.get_parameter("depth_buffer_duration_sec").value),
+        )
+        maximum_frames = max(
+            2,
+            int(self.get_parameter("depth_buffer_max_frames").value),
+        )
+        oldest_allowed_ns = newest_stamp_ns - int(duration_sec * 1.0e9)
+        while (
+            self.depth_buffer
+            and self.depth_buffer[0][0] < oldest_allowed_ns
+        ):
+            self.depth_buffer.popleft()
+        while len(self.depth_buffer) > maximum_frames:
+            self.depth_buffer.popleft()
+
+    def _extract_center_roi(self, detection, depth_image):
+        height, width = depth_image.shape[:2]
 
         # Detection 좌표는 RGB 기준이므로 실제 Depth 해상도로 변환한다.
         source_width = int(detection.image_width) or width
@@ -307,7 +365,7 @@ class VictimLocalizerNode(Node):
         roi_x_max = min(width, int(math.ceil(center_x + half_width)))
         roi_y_min = max(0, int(math.floor(center_y - half_height)))
         roi_y_max = min(height, int(math.ceil(center_y + half_height)))
-        roi = self.latest_depth[
+        roi = depth_image[
             roi_y_min:roi_y_max,
             roi_x_min:roi_x_max,
         ]
@@ -315,28 +373,95 @@ class VictimLocalizerNode(Node):
 
     def _publish_map_position(self, camera_point):
         map_frame = str(self.get_parameter("map_frame").value)
-        # Isaac Sim 영상 stamp와 ROS 노드의 wall time이 다를 수 있으므로
-        # 기본 시스템에서는 가장 최근 TF를 사용한다.
+        # YOLO가 처리한 원본 RGB 촬영 시각을 그대로 사용한다. 최신 TF를
+        # 사용하면 추론 지연 동안 이동한 드론 위치가 적용되어 오차가 난다.
         point_for_tf = PointStamped()
-        point_for_tf.header.frame_id = camera_point.header.frame_id
+        point_for_tf.header = camera_point.header
         point_for_tf.point = camera_point.point
         try:
             map_point = self.tf_buffer.transform(
                 point_for_tf,
                 map_frame,
-                timeout=Duration(seconds=0.1),
+                # 여기서 기다리면 같은 실행기의 TF 수신 콜백도 막힌다.
+                # 즉시 확인하고 아직 없으면 아래 재시도 큐로 넘긴다.
+                timeout=Duration(seconds=0.0),
             )
         except TransformException as error:
-            if self._should_log("tf_warning"):
-                self.get_logger().warning(
-                    "Camera→map TF가 아직 없어 map 위치를 발행하지 "
-                    f"못했습니다: {error}"
-                )
+            self.last_tf_error = str(error)
+            self._queue_tf_retry(point_for_tf)
             return False
 
-        # TF 조회에는 최신 변환을 사용했지만, 결과가 어느 RGB bbox에서
-        # 계산됐는지 Mission Manager가 대조할 수 있도록 원래 stamp를 복원한다.
-        map_point.header.stamp = camera_point.header.stamp
+        self._publish_transformed_map_point(map_point)
+        return True
+
+    def _queue_tf_retry(self, camera_point):
+        """동일 촬영 시각 Point를 중복 없이 TF 재시도 큐에 보관한다."""
+        stamp_ns = self._stamp_to_nanoseconds(camera_point.header.stamp)
+        if stamp_ns not in self.pending_tf_points:
+            self.pending_tf_points[stamp_ns] = (
+                camera_point,
+                time.monotonic(),
+            )
+
+        maximum_points = max(
+            1,
+            int(self.get_parameter("tf_retry_max_points").value),
+        )
+        while len(self.pending_tf_points) > maximum_points:
+            self.pending_tf_points.popitem(last=False)
+
+    def _retry_pending_transforms(self):
+        """TF 수신 뒤 원본 RGB 촬영 시각으로 변환을 다시 시도한다."""
+        if not self.pending_tf_points:
+            return
+        if self.position_locked:
+            self.pending_tf_points.clear()
+            return
+
+        map_frame = str(self.get_parameter("map_frame").value)
+        timeout_sec = max(
+            0.1,
+            float(self.get_parameter("tf_retry_timeout_sec").value),
+        )
+        now = time.monotonic()
+
+        for stamp_ns, (camera_point, queued_at) in list(
+            self.pending_tf_points.items()
+        ):
+            try:
+                map_point = self.tf_buffer.transform(
+                    camera_point,
+                    map_frame,
+                    timeout=Duration(seconds=0.0),
+                )
+            except TransformException as error:
+                self.last_tf_error = str(error)
+                if now - queued_at < timeout_sec:
+                    continue
+                self.pending_tf_points.pop(stamp_ns, None)
+                if self._should_log("tf_warning"):
+                    self.get_logger().warning(
+                        "Camera→map TF가 재시도 시간 안에 도착하지 않아 "
+                        "map 위치를 발행하지 못했습니다: "
+                        f"{self.last_tf_error}"
+                    )
+                continue
+
+            self.pending_tf_points.pop(stamp_ns, None)
+            self._publish_transformed_map_point(map_point)
+            if self.mission_state in (
+                "VICTIM_DETECTED",
+                "VICTIM_LOCATED",
+            ):
+                self.position_locked = True
+                self.pending_tf_points.clear()
+                self.get_logger().info(
+                    "조난자 위치를 현재 임무의 확정 위치로 고정했습니다."
+                )
+                break
+
+    def _publish_transformed_map_point(self, map_point):
+        """변환 완료된 map 좌표를 발행하고 공통 로그를 출력한다."""
         self.map_position_publisher.publish(map_point)
         if self._should_log("map_position"):
             self.get_logger().info(
@@ -345,7 +470,6 @@ class VictimLocalizerNode(Node):
                 f"y={map_point.point.y:.2f}, "
                 f"z={map_point.point.z:.2f}m"
             )
-        return True
 
 
 def main(args=None):

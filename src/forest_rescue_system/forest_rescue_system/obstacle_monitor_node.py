@@ -9,14 +9,15 @@ import time
 import numpy as np
 from geometry_msgs.msg import Vector3Stamped
 import rclpy
-from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Bool, Float32, String
 
+from forest_rescue_system.log_utils import TimestampedNode
 
-class ObstacleMonitorNode(Node):
+
+class ObstacleMonitorNode(TimestampedNode):
     def __init__(self):
         super().__init__("obstacle_monitor_node")
 
@@ -210,10 +211,13 @@ class ObstacleMonitorNode(Node):
     def _point_cloud_callback(self, message):
         if not self.monitoring_enabled:
             return
-        now = time.monotonic()
-        if now - self.last_processing_time < self.processing_period_sec:
+        # CPU 처리량 제한은 실제 시간, 경로 재계획과 회피 방향 유지시간은
+        # LiDAR가 측정된 Isaac Sim 시간으로 각각 분리한다.
+        wall_now = time.monotonic()
+        if wall_now - self.last_processing_time < self.processing_period_sec:
             return
-        self.last_processing_time = now
+        self.last_processing_time = wall_now
+        measurement_time = self._stamp_to_seconds(message.header.stamp)
 
         try:
             points = point_cloud2.read_points_numpy(
@@ -289,7 +293,12 @@ class ObstacleMonitorNode(Node):
             recommended_direction_rad,
             recommended_clearance_m,
             recommended_valid,
-        ) = self._select_avoidance_direction(angles, distances, center)
+        ) = self._select_avoidance_direction(
+            angles,
+            distances,
+            center,
+            measurement_time,
+        )
         safety_distance = float(
             self.get_parameter("safety_distance_m").value
         )
@@ -318,7 +327,10 @@ class ObstacleMonitorNode(Node):
             planner_period = float(
                 self.get_parameter("local_planner_period_sec").value
             )
-            if now - self.last_local_plan_time >= planner_period:
+            if measurement_time < self.last_local_plan_time:
+                # Isaac 재시작 등으로 시간이 되감기면 이전 실행의 제한값을 폐기한다.
+                self.last_local_plan_time = float("-inf")
+            if measurement_time - self.last_local_plan_time >= planner_period:
                 (
                     self.local_detour_x_m,
                     self.local_detour_y_m,
@@ -328,7 +340,7 @@ class ObstacleMonitorNode(Node):
                     y[height_mask],
                     center,
                 )
-                self.last_local_plan_time = now
+                self.last_local_plan_time = measurement_time
         else:
             self.local_detour_valid = False
 
@@ -460,7 +472,13 @@ class ObstacleMonitorNode(Node):
             return False
         return self.last_blocked
 
-    def _select_avoidance_direction(self, angles, distances, target_center):
+    def _select_avoidance_direction(
+        self,
+        angles,
+        distances,
+        target_center,
+        measurement_time,
+    ):
         """목표 진행성과 좌우 일관성을 포함해 VFH 후보를 고른다.
 
         후보는 목표 방향을 중심으로 평가한다. 뒤쪽에 가까운 큰 회전은
@@ -494,7 +512,7 @@ class ObstacleMonitorNode(Node):
         max_offset_deg = abs(
             float(self.get_parameter("candidate_max_offset_deg").value)
         )
-        now = time.monotonic()
+        now = measurement_time
         side_hold_active = (
             self.preferred_avoidance_side != 0
             and now < self.preferred_avoidance_side_until
@@ -566,6 +584,10 @@ class ObstacleMonitorNode(Node):
             self.preferred_avoidance_side_until = now + hold_sec
 
         return float(best[1]), float(best[2]), True
+
+    @staticmethod
+    def _stamp_to_seconds(stamp):
+        return float(stamp.sec) + float(stamp.nanosec) / 1.0e9
 
     def _plan_local_detour(self, obstacle_x, obstacle_y, target_angle):
         """팽창된 로컬 격자에서 목표 방향까지 A* 우회점을 구한다."""

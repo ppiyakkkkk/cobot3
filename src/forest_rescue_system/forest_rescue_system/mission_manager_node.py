@@ -8,14 +8,14 @@ import time
 
 from geometry_msgs.msg import PointStamped
 import rclpy
-from rclpy.node import Node
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
 from forest_rescue_interfaces.msg import VictimDetection
+from forest_rescue_system.log_utils import TimestampedNode
 
 
-class MissionManagerNode(Node):
+class MissionManagerNode(TimestampedNode):
     """탐지 드론은 Hover, 나머지 드론은 자동 복귀·착륙시킨다."""
 
     def __init__(self):
@@ -146,7 +146,7 @@ class MissionManagerNode(Node):
             return response
 
         self._reset_detection_state()
-        self.search_started_at = time.monotonic()
+        self.search_started_at = self._sim_time_sec()
         self.last_detection_delay_log_at = 0.0
         self._publish_state("SEARCHING")
         self._send_all("START_SEARCH")
@@ -273,7 +273,7 @@ class MissionManagerNode(Node):
             self.get_parameter("detection_start_delay_sec").value
         )
         elapsed = (
-            time.monotonic() - self.search_started_at
+            self._sim_time_sec() - self.search_started_at
             if self.search_started_at is not None
             else 0.0
         )
@@ -291,14 +291,20 @@ class MissionManagerNode(Node):
             return
 
         if not detection.detected:
-            self._register_detection_miss(drone_id)
+            self._register_detection_miss(
+                drone_id,
+                self._stamp_to_seconds(detection.header.stamp),
+            )
             return
 
         minimum_confidence = float(
             self.get_parameter("minimum_detection_confidence").value
         )
         if float(detection.confidence) < minimum_confidence:
-            self._register_detection_miss(drone_id)
+            self._register_detection_miss(
+                drone_id,
+                self._stamp_to_seconds(detection.header.stamp),
+            )
             return
 
         # Detection callback과 Localizer callback은 서로 다른 구독이다.
@@ -307,7 +313,10 @@ class MissionManagerNode(Node):
         # 도착할 때까지 이번 양성 탐지를 보류한다.
         stamp_ns = self._stamp_to_nanoseconds(detection.header.stamp)
         now = time.monotonic()
-        self._prune_detection_window(drone_id, now)
+        self._prune_detection_window(
+            drone_id,
+            self._stamp_to_seconds(detection.header.stamp),
+        )
         self.detection_miss_counts[drone_id] = 0
         pending = self.pending_detection_stamps[drone_id]
         pending[stamp_ns] = (
@@ -408,8 +417,8 @@ class MissionManagerNode(Node):
                 self.last_zone_log_at[drone_id] = now
             return
 
-        now = time.monotonic()
-        self._prune_detection_window(drone_id, now)
+        measurement_time = self._stamp_to_seconds(message.header.stamp)
+        self._prune_detection_window(drone_id, measurement_time)
         sequence = self.confirmed_map_sequences[drone_id]
         consistency_radius = float(
             self.get_parameter(
@@ -432,9 +441,9 @@ class MissionManagerNode(Node):
                 )
                 sequence.clear()
 
-        # (수신시각, x, y, z) 형태로 저장하여 최근 시간창 안의
-        # 위치 일치 양성 탐지만 확정 횟수에 포함한다.
-        sequence.append((now, x, y, z))
+        # (RGB 촬영시각, x, y, z) 형태로 저장한다. 처리 부하나 YOLO
+        # 추론 지연이 아니라 실제 영상 간 시각 차이로 2초 창을 판정한다.
+        sequence.append((measurement_time, x, y, z))
         self.detection_miss_counts[drone_id] = 0
         required = int(
             self.get_parameter("required_detection_frames").value
@@ -482,11 +491,14 @@ class MissionManagerNode(Node):
     def _prune_detection_window(self, drone_id, now=None):
         """설정된 시간창 밖의 양성 탐지를 누적 목록에서 제거한다."""
         if now is None:
-            now = time.monotonic()
+            now = self._sim_time_sec()
         window_sec = max(0.1, float(
             self.get_parameter("detection_window_sec").value
         ))
         sequence = self.confirmed_map_sequences[drone_id]
+        if any(record[0] > now for record in sequence):
+            # 시뮬레이션 시간이 되감긴 경우 이전 실행의 탐지 기록을 폐기한다.
+            sequence.clear()
         sequence[:] = [
             record for record in sequence
             if now - record[0] <= window_sec
@@ -495,10 +507,9 @@ class MissionManagerNode(Node):
         if not sequence:
             self.detection_miss_counts[drone_id] = 0
 
-    def _register_detection_miss(self, drone_id):
+    def _register_detection_miss(self, drone_id, measurement_time=None):
         """중간 미탐은 허용하되, 너무 많이 연속되면 누적을 해제한다."""
-        now = time.monotonic()
-        self._prune_detection_window(drone_id, now)
+        self._prune_detection_window(drone_id, measurement_time)
         sequence = self.confirmed_map_sequences[drone_id]
         if not sequence:
             return
@@ -526,6 +537,14 @@ class MissionManagerNode(Node):
     @staticmethod
     def _stamp_to_nanoseconds(stamp):
         return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
+
+    @staticmethod
+    def _stamp_to_seconds(stamp):
+        return float(stamp.sec) + float(stamp.nanosec) / 1.0e9
+
+    def _sim_time_sec(self):
+        """use_sim_time 적용 시 /clock 기준 현재 시각을 초로 반환한다."""
+        return self.get_clock().now().nanoseconds / 1.0e9
 
     def _try_complete_mission(self):
         if self.finder_drone is None or self.state == "COMPLETE":
