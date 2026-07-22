@@ -14,8 +14,12 @@ from pathlib import Path
 # 카메라 및 센서 설정
 # ---------------------------------------------------------------------------
 CAMERA_FOCAL_LENGTH_MM = 10.0
-CAMERA_DOWN_TILT_DEG = 30.0
-CAMERA_RESOLUTION = [640, 480]
+# 드론 body에 고정된 RGB/Depth 카메라의 하향각이다.
+# 0도는 기체 정면, 90도는 수직으로 지면을 바라본다.
+# 산림 수색에서 전방과 지면을 함께 담도록 40도로 설정한다.
+CAMERA_DOWN_TILT_DEG = 40.0
+# 작은 원거리 사람의 픽셀 크기를 확보하기 위해 4:3 비율을 유지하며 상향한다.
+CAMERA_RESOLUTION = [960, 720]
 
 # 왼쪽 메인 Viewport가 따라갈 드론과 3인칭 추적 카메라 설정이다.
 # 추적 대상을 바꾸려면 quadrotor_01을 quadrotor_02 또는 03으로 변경한다.
@@ -27,7 +31,9 @@ FOLLOW_CAMERA_PRIM_PATH = "/World/FollowCamera"
 FOLLOW_CAMERA_BACK_DISTANCE_M = 12.0
 FOLLOW_CAMERA_HEIGHT_M = 7.0
 FOLLOW_CAMERA_LOOK_AHEAD_M = 10.0
-FOLLOW_CAMERA_TARGET_HEIGHT_M = -1.0
+# 드론 높이를 기준으로 추적 카메라가 바라볼 목표점의 상대 Z이다.
+# 음수 절댓값이 커질수록 왼쪽 Viewport가 지면을 더 내려다본다.
+FOLLOW_CAMERA_TARGET_HEIGHT_M = -4.0
 
 # 위치 변화가 이 값보다 클 때만 실제 이동방향을 새로 계산한다.
 # 정지 중에는 드론 body의 전방축을 사용한다.
@@ -98,7 +104,14 @@ SEARCH_CLEARANCE_M = 6.0
 # 두 Waypoint 사이의 직선 구간도 지형과 충돌하지 않도록 1 m 간격으로
 # 지형 최고점을 검사한다. 끝점만 검사하면 구간 중간 봉우리와 충돌할 수 있다.
 SEARCH_TERRAIN_PROFILE_SPACING_M = 1.0
-SAFE_RETURN_CLEARANCE_M = 12.0
+
+# 복귀 고도는 더 이상 지도 전체 최고점으로 고정하지 않는다. ROS 2
+# 컨트롤러가 RETURN_HOME 수신 시점의 실제 위치부터 홈까지 지형만 검사하고,
+# 그 구간의 최고 지형보다 아래 여유 높이만큼 높은 고도를 선택한다.
+RETURN_PATH_CLEARANCE_M = 8.0
+RETURN_PATH_SAMPLE_SPACING_M = 1.0
+RETURN_PATH_CORRIDOR_RADIUS_M = 2.0
+RETURN_OBSTACLE_CLEARANCE_M = 3.0
 
 
 # ---------------------------------------------------------------------------

@@ -32,6 +32,10 @@ class MissionManagerNode(Node):
         self.declare_parameter("start_exclusion_radius_m", 15.0)
         self.declare_parameter("detection_position_consistency_radius_m", 4.0)
         self.declare_parameter("detection_position_timeout_sec", 1.0)
+        # 완전히 연속된 프레임만 요구하지 않고, 짧은 시간창 안에서
+        # 위치가 일치하는 양성 탐지를 누적한다.
+        self.declare_parameter("detection_window_sec", 1.5)
+        self.declare_parameter("maximum_missed_detections", 2)
         self.declare_parameter("victim_approach_height_m", 7.0)
         self.declare_parameter(
             "search_zone_bounds_xy",
@@ -53,6 +57,9 @@ class MissionManagerNode(Node):
         self.command_publishers = {}
         self.drone_status = {drone_id: "UNKNOWN" for drone_id in self.drone_ids}
         self.detection_counts = {drone_id: 0 for drone_id in self.drone_ids}
+        self.detection_miss_counts = {
+            drone_id: 0 for drone_id in self.drone_ids
+        }
         self.search_finished = set()
         self.failed_drones = set()
         self.latest_camera_positions = {}
@@ -165,6 +172,7 @@ class MissionManagerNode(Node):
         self.latest_map_positions.clear()
         for drone_id in self.drone_ids:
             self.detection_counts[drone_id] = 0
+            self.detection_miss_counts[drone_id] = 0
             self.pending_detection_stamps[drone_id].clear()
             self.confirmed_map_sequences[drone_id].clear()
             self.recent_map_positions[drone_id].clear()
@@ -283,14 +291,14 @@ class MissionManagerNode(Node):
             return
 
         if not detection.detected:
-            self._reset_drone_detection_sequence(drone_id)
+            self._register_detection_miss(drone_id)
             return
 
         minimum_confidence = float(
             self.get_parameter("minimum_detection_confidence").value
         )
         if float(detection.confidence) < minimum_confidence:
-            self._reset_drone_detection_sequence(drone_id)
+            self._register_detection_miss(drone_id)
             return
 
         # Detection callback과 Localizer callback은 서로 다른 구독이다.
@@ -299,6 +307,8 @@ class MissionManagerNode(Node):
         # 도착할 때까지 이번 양성 탐지를 보류한다.
         stamp_ns = self._stamp_to_nanoseconds(detection.header.stamp)
         now = time.monotonic()
+        self._prune_detection_window(drone_id, now)
+        self.detection_miss_counts[drone_id] = 0
         pending = self.pending_detection_stamps[drone_id]
         pending[stamp_ns] = (
             now,
@@ -398,6 +408,8 @@ class MissionManagerNode(Node):
                 self.last_zone_log_at[drone_id] = now
             return
 
+        now = time.monotonic()
+        self._prune_detection_window(drone_id, now)
         sequence = self.confirmed_map_sequences[drone_id]
         consistency_radius = float(
             self.get_parameter(
@@ -405,9 +417,9 @@ class MissionManagerNode(Node):
             ).value
         )
         if sequence:
-            center_x = sum(point[0] for point in sequence) / len(sequence)
-            center_y = sum(point[1] for point in sequence) / len(sequence)
-            center_z = sum(point[2] for point in sequence) / len(sequence)
+            center_x = sum(record[1] for record in sequence) / len(sequence)
+            center_y = sum(record[2] for record in sequence) / len(sequence)
+            center_z = sum(record[3] for record in sequence) / len(sequence)
             position_error = math.sqrt(
                 (x - center_x) ** 2
                 + (y - center_y) ** 2
@@ -416,28 +428,35 @@ class MissionManagerNode(Node):
             if position_error > consistency_radius:
                 self.get_logger().warning(
                     f"{drone_id} 탐지 위치 불일치: {position_error:.2f}m "
-                    "→ 연속 탐지 재시작"
+                    "→ 시간창 탐지 누적 재시작"
                 )
                 sequence.clear()
 
-        sequence.append((x, y, z))
+        # (수신시각, x, y, z) 형태로 저장하여 최근 시간창 안의
+        # 위치 일치 양성 탐지만 확정 횟수에 포함한다.
+        sequence.append((now, x, y, z))
+        self.detection_miss_counts[drone_id] = 0
         required = int(
             self.get_parameter("required_detection_frames").value
         )
         if len(sequence) > required:
             del sequence[:-required]
         self.detection_counts[drone_id] = len(sequence)
+        window_sec = float(
+            self.get_parameter("detection_window_sec").value
+        )
         self.get_logger().info(
-            f"{drone_id} 위치 일치 조난자 탐지: "
+            f"{drone_id} 시간창 위치 일치 조난자 탐지: "
             f"{len(sequence)}/{required}, conf={confidence:.2f}, "
-            f"bbox={bbox}, map=({x:.2f}, {y:.2f}, {z:.2f})"
+            f"window={window_sec:.1f}s, bbox={bbox}, "
+            f"map=({x:.2f}, {y:.2f}, {z:.2f})"
         )
         if len(sequence) < required:
             return
 
-        victim_x = sum(point[0] for point in sequence) / len(sequence)
-        victim_y = sum(point[1] for point in sequence) / len(sequence)
-        victim_z = sum(point[2] for point in sequence) / len(sequence)
+        victim_x = sum(record[1] for record in sequence) / len(sequence)
+        victim_y = sum(record[2] for record in sequence) / len(sequence)
+        victim_z = sum(record[3] for record in sequence) / len(sequence)
         approach_z = victim_z + float(
             self.get_parameter("victim_approach_height_m").value
         )
@@ -460,8 +479,46 @@ class MissionManagerNode(Node):
             "나머지 드론은 자동 복귀"
         )
 
+    def _prune_detection_window(self, drone_id, now=None):
+        """설정된 시간창 밖의 양성 탐지를 누적 목록에서 제거한다."""
+        if now is None:
+            now = time.monotonic()
+        window_sec = max(0.1, float(
+            self.get_parameter("detection_window_sec").value
+        ))
+        sequence = self.confirmed_map_sequences[drone_id]
+        sequence[:] = [
+            record for record in sequence
+            if now - record[0] <= window_sec
+        ]
+        self.detection_counts[drone_id] = len(sequence)
+        if not sequence:
+            self.detection_miss_counts[drone_id] = 0
+
+    def _register_detection_miss(self, drone_id):
+        """중간 미탐은 허용하되, 너무 많이 연속되면 누적을 해제한다."""
+        now = time.monotonic()
+        self._prune_detection_window(drone_id, now)
+        sequence = self.confirmed_map_sequences[drone_id]
+        if not sequence:
+            return
+
+        self.detection_miss_counts[drone_id] += 1
+        maximum_misses = max(0, int(
+            self.get_parameter("maximum_missed_detections").value
+        ))
+        if self.detection_miss_counts[drone_id] <= maximum_misses:
+            return
+
+        self.get_logger().info(
+            f"{drone_id} 탐지 미확인 {self.detection_miss_counts[drone_id]}회 "
+            f"> 허용 {maximum_misses}회: 시간창 누적 초기화"
+        )
+        self._reset_drone_detection_sequence(drone_id)
+
     def _reset_drone_detection_sequence(self, drone_id):
         self.detection_counts[drone_id] = 0
+        self.detection_miss_counts[drone_id] = 0
         self.pending_detection_stamps[drone_id].clear()
         self.confirmed_map_sequences[drone_id].clear()
         self.recent_map_positions[drone_id].clear()

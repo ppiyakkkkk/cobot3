@@ -9,6 +9,7 @@ from pathlib import Path
 import threading
 import time
 
+import numpy as np
 from geometry_msgs.msg import (
     PointStamped,
     PoseStamped,
@@ -46,11 +47,25 @@ class DroneControllerNode(Node):
         self.declare_parameter("waypoint_altitude_tolerance_m", 0.8)
         self.declare_parameter("waypoint_timeout_sec", 75.0)
         self.declare_parameter("return_timeout_sec", 120.0)
+        self.declare_parameter(
+            "terrain_mesh_path",
+            "~/b3_cobot3_ws/isaac_sim/generated_terrain_mesh.npz",
+        )
+        self.declare_parameter(
+            "environment_mesh_path",
+            "~/b3_cobot3_ws/isaac_sim/generated_environment_meshes.npz",
+        )
+        self.declare_parameter("return_path_clearance_m", 8.0)
+        self.declare_parameter("return_path_corridor_radius_m", 2.0)
+        self.declare_parameter("return_obstacle_clearance_m", 3.0)
 
         # 복귀 후 높은 안전고도에서 바로 LAND하지 않고 홈 상공의 낮은
         # 접근고도까지 Offboard로 정밀 하강한 뒤 착륙한다.
         self.declare_parameter("landing_approach_altitude_m", 3.0)
         self.declare_parameter("landing_approach_timeout_sec", 45.0)
+        self.declare_parameter("landing_descent_start_timeout_sec", 8.0)
+        self.declare_parameter("landing_min_descent_progress_m", 0.30)
+        self.declare_parameter("landing_fallback_to_px4_land", True)
         self.declare_parameter("landing_xy_tolerance_m", 0.35)
         self.declare_parameter("landing_altitude_tolerance_m", 0.30)
         self.declare_parameter("landing_stopped_speed_m_s", 0.40)
@@ -87,8 +102,24 @@ class DroneControllerNode(Node):
         self.declare_parameter("avoidance_direction_attempts", 4)
         self.declare_parameter("avoidance_vector_max_age_sec", 1.2)
         self.declare_parameter("local_detour_max_age_sec", 1.2)
-        self.declare_parameter("local_detour_hard_stop_distance_m", 0.8)
+        self.declare_parameter("local_detour_hard_stop_distance_m", 0.9)
+        # 짧은 로컬 우회에서는 body 기준 경로가 바뀌지 않도록 현재 Yaw를
+        # 유지한다. 이동 직후 센서 방향이 안정될 때까지 일반 차단 판정은
+        # 잠시 유예하고, 이후에도 일정 시간 연속 차단일 때만 재계획한다.
+        self.declare_parameter("avoidance_keep_yaw_during_detour", True)
+        self.declare_parameter("avoidance_commit_sec", 0.70)
+        self.declare_parameter("avoidance_block_confirm_sec", 0.35)
         self.declare_parameter("victim_approach_timeout_sec", 120.0)
+
+        # 수평 이동 전에 기체 전방과 RGB 카메라가 목표 진행방향을
+        # 바라보도록 Yaw를 먼저 정렬한다. 별도 패치 실행 없이 이 노드가
+        # 시작될 때부터 모든 수색·우회·접근·복귀 이동에 적용된다.
+        self.declare_parameter("direction_yaw_enabled", True)
+        self.declare_parameter("direction_yaw_min_distance_m", 0.50)
+        self.declare_parameter("direction_yaw_tolerance_deg", 6.0)
+        self.declare_parameter("direction_yaw_timeout_sec", 8.0)
+        self.declare_parameter("direction_yaw_stable_samples", 2)
+        self.declare_parameter("direction_yaw_settle_sec", 0.20)
         self.declare_parameter(
             "search_plan_path",
             "~/b3_cobot3_ws/isaac_sim/generated_search_plan.json",
@@ -134,6 +165,11 @@ class DroneControllerNode(Node):
         )
         self.search_waypoints = []
         self._load_search_plan()
+        self.return_terrain_xy = None
+        self.return_terrain_z = None
+        self.return_obstacle_xy = None
+        self.return_obstacle_z = None
+        self._load_return_terrain()
 
         self.status_publisher = self.create_publisher(
             String,
@@ -254,9 +290,40 @@ class DroneControllerNode(Node):
                     float(value)
                     for value in drone_plan["home_world_enu"]
                 ]
-                self.safe_return_down_m = float(
-                    drone_plan["safe_return_down_m"]
-                )
+                # format_version 2 계획과의 호환용이다. 새 계획(v3)은 지도
+                # 전체 최고점 기반 safe_return_down_m을 저장하지 않는다.
+                if "safe_return_down_m" in drone_plan:
+                    self.safe_return_down_m = float(
+                        drone_plan["safe_return_down_m"]
+                    )
+                if "return_path_clearance_m" in plan:
+                    self.return_path_clearance_m = float(
+                        plan["return_path_clearance_m"]
+                    )
+                else:
+                    self.return_path_clearance_m = float(
+                        self.get_parameter("return_path_clearance_m").value
+                    )
+                if "return_path_corridor_radius_m" in plan:
+                    self.return_path_corridor_radius_m = float(
+                        plan["return_path_corridor_radius_m"]
+                    )
+                else:
+                    self.return_path_corridor_radius_m = float(
+                        self.get_parameter(
+                            "return_path_corridor_radius_m"
+                        ).value
+                    )
+                if "return_obstacle_clearance_m" in plan:
+                    self.return_obstacle_clearance_m = float(
+                        plan["return_obstacle_clearance_m"]
+                    )
+                else:
+                    self.return_obstacle_clearance_m = float(
+                        self.get_parameter(
+                            "return_obstacle_clearance_m"
+                        ).value
+                    )
                 self.search_waypoints = [
                     (
                         float(item["north_m"]),
@@ -274,6 +341,167 @@ class DroneControllerNode(Node):
         self.search_waypoints = self._parse_waypoints(
             str(self.get_parameter("search_waypoints").value)
         )
+
+    def _load_return_terrain(self):
+        """Isaac Sim이 내보낸 Terrain 표면을 복귀 경로 계산용으로 읽는다."""
+        if not hasattr(self, "return_path_clearance_m"):
+            self.return_path_clearance_m = float(
+                self.get_parameter("return_path_clearance_m").value
+            )
+        if not hasattr(self, "return_path_corridor_radius_m"):
+            self.return_path_corridor_radius_m = float(
+                self.get_parameter("return_path_corridor_radius_m").value
+            )
+        if not hasattr(self, "return_obstacle_clearance_m"):
+            self.return_obstacle_clearance_m = float(
+                self.get_parameter("return_obstacle_clearance_m").value
+            )
+
+        mesh_path = Path(
+            str(self.get_parameter("terrain_mesh_path").value)
+        ).expanduser()
+        try:
+            with np.load(mesh_path, allow_pickle=False) as mesh:
+                vertices = np.asarray(mesh["vertices"], dtype=np.float64)
+            if vertices.ndim != 2 or vertices.shape[1] != 3:
+                raise ValueError(f"vertices shape={vertices.shape}")
+            self.return_terrain_xy = vertices[:, :2]
+            self.return_terrain_z = vertices[:, 2]
+            self.get_logger().info(
+                "복귀 경로 Terrain 로드: "
+                f"{mesh_path}, vertices={len(vertices)}"
+            )
+        except (OSError, KeyError, ValueError) as error:
+            self.get_logger().warning(
+                "복귀 Terrain 로드 실패, 기존 안전고도를 대체값으로 사용: "
+                f"{mesh_path}: {error}"
+            )
+
+        environment_path = Path(
+            str(self.get_parameter("environment_mesh_path").value)
+        ).expanduser()
+        try:
+            vertex_groups = []
+            with np.load(environment_path, allow_pickle=False) as meshes:
+                for key in meshes.files:
+                    if not key.endswith("_vertices"):
+                        continue
+                    vertices = np.asarray(meshes[key], dtype=np.float64)
+                    if vertices.ndim == 2 and vertices.shape[1] == 3:
+                        vertex_groups.append(vertices)
+            if not vertex_groups:
+                raise ValueError("환경 vertices 배열이 없습니다.")
+            vertices = np.concatenate(vertex_groups, axis=0)
+            self.return_obstacle_xy = vertices[:, :2]
+            self.return_obstacle_z = vertices[:, 2]
+            self.get_logger().info(
+                "복귀 경로 환경 Mesh 로드: "
+                f"{environment_path}, vertices={len(vertices)}"
+            )
+        except (OSError, KeyError, ValueError) as error:
+            self.get_logger().warning(
+                "복귀 환경 Mesh 로드 실패, Terrain만 사용: "
+                f"{environment_path}: {error}"
+            )
+
+    @staticmethod
+    def _distance_to_segment(points_xy, start_xy, end_xy):
+        """여러 XY 점과 유한 선분 사이의 최단거리를 계산한다."""
+        segment = end_xy - start_xy
+        length_squared = float(np.dot(segment, segment))
+        if length_squared < 1.0e-6:
+            return np.linalg.norm(points_xy - end_xy, axis=1)
+        relative = points_xy - start_xy
+        ratios = np.clip(
+            (relative @ segment) / length_squared,
+            0.0,
+            1.0,
+        )
+        closest = start_xy + ratios[:, None] * segment
+        return np.linalg.norm(points_xy - closest, axis=1)
+
+    def _calculate_return_down_m(self):
+        """현재 위치~홈 회랑의 최고 지형을 이용해 이번 복귀 고도를 정한다."""
+        if self.return_terrain_xy is None or self.return_terrain_z is None:
+            fallback_down = min(
+                float(self.latest_down_m),
+                float(self.safe_return_down_m),
+            )
+            self.get_logger().warning(
+                "Terrain이 없어 기존 안전 복귀고도를 사용: "
+                f"target_D={fallback_down:.2f}"
+            )
+            return fallback_down
+
+        start_xy = np.asarray(
+            [
+                self.home_world_enu[0] + self.latest_east_m,
+                self.home_world_enu[1] + self.latest_north_m,
+            ],
+            dtype=np.float64,
+        )
+        home_xy = np.asarray(self.home_world_enu[:2], dtype=np.float64)
+        distance_to_path = self._distance_to_segment(
+            self.return_terrain_xy,
+            start_xy,
+            home_xy,
+        )
+
+        corridor_radius = max(0.5, self.return_path_corridor_radius_m)
+        corridor_mask = distance_to_path <= corridor_radius
+        if np.any(corridor_mask):
+            terrain_max_z = float(np.max(self.return_terrain_z[corridor_mask]))
+        else:
+            terrain_max_z = float(
+                self.return_terrain_z[int(np.argmin(distance_to_path))]
+            )
+
+        clearance = max(3.0, self.return_path_clearance_m)
+        terrain_safe_z = terrain_max_z + clearance
+        obstacle_max_z = None
+        obstacle_safe_z = float("-inf")
+        if self.return_obstacle_xy is not None:
+            obstacle_distance = self._distance_to_segment(
+                self.return_obstacle_xy,
+                start_xy,
+                home_xy,
+            )
+            obstacle_mask = obstacle_distance <= corridor_radius
+            if np.any(obstacle_mask):
+                obstacle_max_z = float(
+                    np.max(self.return_obstacle_z[obstacle_mask])
+                )
+                obstacle_safe_z = obstacle_max_z + max(
+                    1.0,
+                    self.return_obstacle_clearance_m,
+                )
+
+        required_world_z = max(terrain_safe_z, obstacle_safe_z)
+        required_down_m = -(
+            required_world_z - float(self.home_world_enu[2])
+        )
+
+        # 현재 고도가 이미 안전고도보다 높으면 더 상승시키지 않는다.
+        # 현재 고도를 유지한 채 곧바로 홈 방향 수평 복귀를 시작한다.
+        selected_down_m = min(float(self.latest_down_m), required_down_m)
+        current_world_z = (
+            float(self.home_world_enu[2]) - float(self.latest_down_m)
+        )
+        selected_world_z = (
+            float(self.home_world_enu[2]) - selected_down_m
+        )
+        self.get_logger().info(
+            "동적 복귀 고도 계산: "
+            f"path_terrain_max_Z={terrain_max_z:.2f}m, "
+            f"clearance={clearance:.2f}m, "
+            f"path_obstacle_max_Z="
+            f"{obstacle_max_z if obstacle_max_z is not None else 'NONE'}, "
+            f"required_Z={required_world_z:.2f}m, "
+            f"current_Z={current_world_z:.2f}m, "
+            f"selected_Z={selected_world_z:.2f}m "
+            f"(target_D={selected_down_m:.2f})"
+        )
+        return selected_down_m
 
     def _run_async_loop(self):
         asyncio.set_event_loop(self.async_loop)
@@ -551,6 +779,158 @@ class DroneControllerNode(Node):
             # 즉시 끝낸다. 취소는 오류가 아니다.
             return
 
+    @staticmethod
+    def _normalize_angle_deg(angle_deg):
+        """각도를 -180~180도 범위로 정규화한다."""
+        return (float(angle_deg) + 180.0) % 360.0 - 180.0
+
+    def _target_yaw_deg(self, target_north_m, target_east_m):
+        """현재 위치에서 목표점으로 향하는 PX4 NED Yaw를 계산한다."""
+        delta_north = float(target_north_m) - self.latest_north_m
+        delta_east = float(target_east_m) - self.latest_east_m
+        horizontal_distance = math.hypot(delta_north, delta_east)
+
+        minimum_distance = max(
+            0.0,
+            float(
+                self.get_parameter(
+                    "direction_yaw_min_distance_m"
+                ).value
+            ),
+        )
+        if horizontal_distance < minimum_distance:
+            return None
+
+        # PX4 Local NED에서 Yaw 0도는 North, +90도는 East이다.
+        return math.degrees(math.atan2(delta_east, delta_north))
+
+    async def _align_yaw_to_target(
+        self,
+        target_north_m,
+        target_east_m,
+        fallback_yaw_deg,
+    ):
+        """현재 위치를 유지한 채 목표 진행방향으로 먼저 회전한다.
+
+        드론이 자동차처럼 진행방향을 바라본 뒤 이동하게 하여, body에
+        고정된 RGB/Depth 카메라 영상에서도 양옆 구조물이 뒤로 흐르는
+        형태가 되도록 한다. 수평 이동이 거의 없으면 현재 Yaw를 유지한다.
+        """
+        enabled = bool(
+            self.get_parameter("direction_yaw_enabled").value
+        )
+        target_yaw_deg = self._target_yaw_deg(
+            target_north_m,
+            target_east_m,
+        )
+
+        if not enabled:
+            return float(fallback_yaw_deg)
+        if target_yaw_deg is None:
+            return float(self.latest_yaw_deg)
+
+        tolerance_deg = max(
+            0.5,
+            float(
+                self.get_parameter(
+                    "direction_yaw_tolerance_deg"
+                ).value
+            ),
+        )
+        timeout_sec = max(
+            0.5,
+            float(
+                self.get_parameter(
+                    "direction_yaw_timeout_sec"
+                ).value
+            ),
+        )
+        required_stable_samples = max(
+            1,
+            int(
+                self.get_parameter(
+                    "direction_yaw_stable_samples"
+                ).value
+            ),
+        )
+        settle_sec = max(
+            0.0,
+            float(
+                self.get_parameter(
+                    "direction_yaw_settle_sec"
+                ).value
+            ),
+        )
+
+        initial_error_deg = self._normalize_angle_deg(
+            target_yaw_deg - self.latest_yaw_deg
+        )
+        if abs(initial_error_deg) <= tolerance_deg:
+            return float(target_yaw_deg)
+
+        # 회전 중에는 현재 위치와 고도를 유지한다. 위치 이동 명령과 Yaw
+        # 회전을 동시에 보내지 않아 옆걸음처럼 보이는 구간을 최소화한다.
+        hold_north_m = float(self.latest_north_m)
+        hold_east_m = float(self.latest_east_m)
+        hold_down_m = float(self.latest_down_m)
+
+        self.get_logger().info(
+            f"진행방향 Yaw 정렬: current={self.latest_yaw_deg:.1f}°, "
+            f"target={target_yaw_deg:.1f}°, "
+            f"error={initial_error_deg:.1f}°"
+        )
+
+        deadline = time.monotonic() + timeout_sec
+        stable_samples = 0
+
+        while time.monotonic() < deadline:
+            self._publish_movement_direction(
+                target_north_m,
+                target_east_m,
+            )
+            await self.drone.offboard.set_position_ned(
+                PositionNedYaw(
+                    hold_north_m,
+                    hold_east_m,
+                    hold_down_m,
+                    float(target_yaw_deg),
+                )
+            )
+
+            yaw_error_deg = abs(
+                self._normalize_angle_deg(
+                    target_yaw_deg - self.latest_yaw_deg
+                )
+            )
+            if yaw_error_deg <= tolerance_deg:
+                stable_samples += 1
+                if stable_samples >= required_stable_samples:
+                    if settle_sec > 0.0:
+                        await asyncio.sleep(settle_sec)
+                    self.get_logger().info(
+                        "진행방향 Yaw 정렬 완료: "
+                        f"yaw={self.latest_yaw_deg:.1f}°, "
+                        f"target={target_yaw_deg:.1f}°"
+                    )
+                    return float(target_yaw_deg)
+            else:
+                stable_samples = 0
+
+            await asyncio.sleep(0.1)
+
+        # 회전이 조금 늦더라도 목표 Yaw가 포함된 이동 Setpoint를 계속
+        # 사용하므로 임무 전체를 정지시키지 않는다.
+        remaining_error_deg = self._normalize_angle_deg(
+            target_yaw_deg - self.latest_yaw_deg
+        )
+        self.get_logger().warning(
+            "진행방향 Yaw 정렬 시간 초과, 목표 Yaw를 유지하며 이동: "
+            f"current={self.latest_yaw_deg:.1f}°, "
+            f"target={target_yaw_deg:.1f}°, "
+            f"error={remaining_error_deg:.1f}°"
+        )
+        return float(target_yaw_deg)
+
     async def _go_to_setpoint(
         self,
         north_m,
@@ -577,6 +957,11 @@ class DroneControllerNode(Node):
                     self.get_parameter("avoidance_max_climb_m").value
                 ),
             )
+        command_yaw_deg = await self._align_yaw_to_target(
+            north_m,
+            east_m,
+            yaw_deg,
+        )
         self._publish_movement_direction(north_m, east_m)
         # 새 이동 방향이 LiDAR 필터에 반영되기 전에 고속 이동 명령을
         # 보내지 않는다. 첫 PointCloud 판정을 기다린 뒤 경로가 열려
@@ -585,7 +970,12 @@ class DroneControllerNode(Node):
             await asyncio.sleep(0.35)
         if not (allow_avoidance and self.obstacle_blocked):
             await self.drone.offboard.set_position_ned(
-                PositionNedYaw(north_m, east_m, commanded_down_m, yaw_deg)
+                PositionNedYaw(
+                    north_m,
+                    east_m,
+                    commanded_down_m,
+                    command_yaw_deg,
+                )
             )
         deadline = time.monotonic() + timeout_sec
         while time.monotonic() < deadline:
@@ -597,7 +987,7 @@ class DroneControllerNode(Node):
                 avoided_horizontally = await self._perform_horizontal_avoidance(
                     north_m,
                     east_m,
-                    yaw_deg,
+                    command_yaw_deg,
                     resume_status,
                 )
                 if avoided_horizontally is None:
@@ -662,13 +1052,21 @@ class DroneControllerNode(Node):
                 # 장애물 회피에 사용한 시간은 Waypoint 이동 제한시간에서
                 # 제외한다. 드론 정지가 아니라 타이머만 연장하는 처리다.
                 deadline += time.monotonic() - avoidance_started
+
+                # 수평 우회 중에는 임시점 방향을 바라본다. 우회가 끝나면
+                # 원래 Waypoint 방향으로 다시 회전한 뒤 수색을 재개한다.
+                command_yaw_deg = await self._align_yaw_to_target(
+                    north_m,
+                    east_m,
+                    command_yaw_deg,
+                )
                 self._publish_movement_direction(north_m, east_m)
                 await self.drone.offboard.set_position_ned(
                     PositionNedYaw(
                         north_m,
                         east_m,
                         commanded_down_m,
-                        yaw_deg,
+                        command_yaw_deg,
                     )
                 )
 
@@ -701,7 +1099,7 @@ class DroneControllerNode(Node):
                         north_m,
                         east_m,
                         commanded_down_m,
-                        yaw_deg,
+                        command_yaw_deg,
                     )
                 )
                 await asyncio.sleep(0.1)
@@ -860,16 +1258,49 @@ class DroneControllerNode(Node):
                 f"임시점 N={detour_north:.1f}, E={detour_east:.1f}, "
                 f"D={detour_down:.1f}"
             )
+
+            # 로컬 A*/VFH 결과는 현재 body frame을 기준으로 계산됐다.
+            # 여기서 임시점 방향으로 Yaw를 먼저 돌리면 센서 기준과 경로가
+            # 함께 회전해 방금 안전하다고 계산한 우회가 무효가 된다. 따라서
+            # 짧은 우회 동안에는 현재 Yaw를 유지하고 위치만 이동한다.
+            keep_yaw = bool(
+                self.get_parameter(
+                    "avoidance_keep_yaw_during_detour"
+                ).value
+            )
+            detour_yaw_deg = (
+                float(self.latest_yaw_deg)
+                if keep_yaw
+                else await self._align_yaw_to_target(
+                    detour_north,
+                    detour_east,
+                    yaw_deg,
+                )
+            )
             await self.drone.offboard.set_position_ned(
                 PositionNedYaw(
                     detour_north,
                     detour_east,
                     detour_down,
-                    yaw_deg,
+                    detour_yaw_deg,
                 )
             )
 
-            deadline = time.monotonic() + float(
+            movement_started_at = time.monotonic()
+            blocked_since = None
+            commit_sec = max(
+                0.0,
+                float(self.get_parameter("avoidance_commit_sec").value),
+            )
+            block_confirm_sec = max(
+                0.0,
+                float(
+                    self.get_parameter(
+                        "avoidance_block_confirm_sec"
+                    ).value
+                ),
+            )
+            deadline = movement_started_at + float(
                 self.get_parameter("avoidance_xy_timeout_sec").value
             )
             while time.monotonic() < deadline:
@@ -888,21 +1319,39 @@ class DroneControllerNode(Node):
                         "local_detour_hard_stop_distance_m"
                     ).value
                 )
-                path_is_blocked = (
+                now = time.monotonic()
+                emergency_blocked = (
                     self.local_detour_nearest_360_m < hard_stop
-                    or (
-                        math.isfinite(self.front_clearance_m)
-                        and self.front_clearance_m
-                        < float(
-                            self.get_parameter(
-                                "avoidance_front_clearance_m"
-                            ).value
-                        )
+                )
+                front_blocked = (
+                    math.isfinite(self.front_clearance_m)
+                    and self.front_clearance_m
+                    < float(
+                        self.get_parameter(
+                            "avoidance_front_clearance_m"
+                        ).value
                     )
                 )
-                if path_is_blocked:
+
+                # 360° 최소거리가 hard stop보다 작으면 즉시 정지한다.
+                # 그 외 전방 차단은 이동 시작 직후 센서 전환 시간을 제외하고
+                # 일정 시간 연속될 때만 실제 새 장애물로 확정한다.
+                confirmed_blocked = emergency_blocked
+                if (
+                    not emergency_blocked
+                    and now - movement_started_at >= commit_sec
+                    and front_blocked
+                ):
+                    if blocked_since is None:
+                        blocked_since = now
+                    elif now - blocked_since >= block_confirm_sec:
+                        confirmed_blocked = True
+                else:
+                    blocked_since = None
+
+                if confirmed_blocked:
                     self.get_logger().warning(
-                        "추천 우회 중 새 장애물 감지 → 즉시 감속·재탐색"
+                        "추천 우회 중 지속 장애물 감지 → 감속·재탐색"
                     )
                     await self._brake_before_avoidance()
                     break
@@ -1193,7 +1642,7 @@ class DroneControllerNode(Node):
         self.approach_task = None
 
     async def _return_home(self):
-        """공통 안전고도 복귀 후 홈 상공 3m에서 안정화하고 착륙한다."""
+        """현재~홈 경로의 지형 안전고도로 복귀한 뒤 자동 착륙한다."""
         try:
             await self._ensure_offboard()
             self._publish_status("RETURNING")
@@ -1201,21 +1650,29 @@ class DroneControllerNode(Node):
                 self.get_parameter("return_timeout_sec").value
             )
 
-            # 1. 현재 XY에서 산 전체보다 높은 공통 안전고도로 상승한다.
-            if not await self._go_to_setpoint(
-                self.latest_north_m,
-                self.latest_east_m,
-                self.safe_return_down_m,
-                self.latest_yaw_deg,
-                timeout,
-            ):
-                return
+            return_down_m = self._calculate_return_down_m()
 
-            # 2. 안전고도를 유지하며 자기 PX4 Local NED 홈으로 이동한다.
+            # 1. 경로 안전고도보다 낮을 때만 현재 XY에서 필요한 만큼
+            # 상승한다. 이미 충분히 높으면 이 단계를 건너뛴다.
+            if return_down_m < self.latest_down_m - 0.3:
+                if not await self._go_to_setpoint(
+                    self.latest_north_m,
+                    self.latest_east_m,
+                    return_down_m,
+                    self.latest_yaw_deg,
+                    timeout,
+                ):
+                    return
+            else:
+                self.get_logger().info(
+                    "현재 고도가 복귀 경로 안전고도 이상: 추가 상승 없이 복귀"
+                )
+
+            # 2. 선택된 안전고도를 유지하며 PX4 Local NED 홈으로 이동한다.
             if not await self._go_to_setpoint(
                 0.0,
                 0.0,
-                self.safe_return_down_m,
+                return_down_m,
                 self.latest_yaw_deg,
                 timeout,
             ):
@@ -1237,6 +1694,21 @@ class DroneControllerNode(Node):
                 approach_down,
                 self.latest_yaw_deg,
             ):
+                # 홈 XY에는 이미 도착한 상태다. Offboard 고도 setpoint가
+                # PX4에서 적용되지 않더라도 공중 Hover로 임무를 끝내지
+                # 않고, PX4 자체 LAND 모드가 하강과 접지를 맡도록 한다.
+                if bool(
+                    self.get_parameter(
+                        "landing_fallback_to_px4_land"
+                    ).value
+                ):
+                    self.get_logger().warning(
+                        "착륙 접근 하강 실패, 홈 상공에서 PX4 LAND로 전환"
+                    )
+                    self._publish_status("LANDING_APPROACH_FALLBACK")
+                    await self._land()
+                    return
+
                 self._publish_status("ERROR_LANDING_APPROACH")
                 return
 
@@ -1278,6 +1750,23 @@ class DroneControllerNode(Node):
             self.get_parameter("landing_stopped_speed_m_s").value
         )
         deadline = time.monotonic() + timeout
+        descent_start_deadline = time.monotonic() + max(
+            1.0,
+            float(
+                self.get_parameter(
+                    "landing_descent_start_timeout_sec"
+                ).value
+            ),
+        )
+        initial_down_m = float(self.latest_down_m)
+        minimum_progress_m = max(
+            0.05,
+            float(
+                self.get_parameter(
+                    "landing_min_descent_progress_m"
+                ).value
+            ),
+        )
         stable_samples = 0
 
         while time.monotonic() < deadline:
@@ -1320,6 +1809,21 @@ class DroneControllerNode(Node):
                     return True
             else:
                 stable_samples = 0
+
+            # 접근 고도 명령 후에도 실제 D가 전혀 증가하지 않으면 남은
+            # 전체 타임아웃을 기다리지 않고 PX4 LAND 대체 경로로 넘긴다.
+            if (
+                time.monotonic() >= descent_start_deadline
+                and target_down_m > initial_down_m
+                and self.latest_down_m - initial_down_m < minimum_progress_m
+            ):
+                self.get_logger().warning(
+                    "착륙 접근 하강이 시작되지 않음: "
+                    f"initial_D={initial_down_m:.2f}, "
+                    f"current_D={self.latest_down_m:.2f}, "
+                    f"target_D={target_down_m:.2f}"
+                )
+                return False
 
             # PX4가 setpoint를 놓치지 않도록 같은 목표를 계속 갱신한다.
             await self.drone.offboard.set_position_ned(

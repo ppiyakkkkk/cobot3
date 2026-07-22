@@ -184,7 +184,7 @@ class ForestRescueSimulation:
         self.world.reset()
         simulation_app.update()
 
-        # 드론 body 전방과 실제 카메라 광축 방향을 수치로 확인한다.
+        # 드론 body 전방과 실제 RGB/Depth 카메라 광축을 수치로 검증한다.
         print_camera_direction_debug()
 
         # ------------------------------------------------------------------

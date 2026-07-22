@@ -19,7 +19,10 @@ from sim_config import (
     GENERATED_GROUND_TRUTH_PATH,
     GENERATED_SEARCH_PLAN_PATH,
     PERSON_GROUND_CLEARANCE_M,
-    SAFE_RETURN_CLEARANCE_M,
+    RETURN_PATH_CLEARANCE_M,
+    RETURN_PATH_CORRIDOR_RADIUS_M,
+    RETURN_PATH_SAMPLE_SPACING_M,
+    RETURN_OBSTACLE_CLEARANCE_M,
     SEARCH_AREA_MARGIN_M,
     SEARCH_CLEARANCE_M,
     SEARCH_LANE_SPACING_M,
@@ -37,7 +40,12 @@ class SearchPlanGenerator:
 
     @staticmethod
     def _sample_axis(start, stop, spacing):
-        """양 끝점을 포함하도록 일정 간격의 좌표 목록을 만든다."""
+        """양 끝점을 포함하도록 일정 간격의 좌표 목록을 만든다.
+
+        인스턴스 상태를 사용하지 않는 계산 함수이므로 ``@staticmethod``로
+        선언한다. 이 데코레이터가 없으면 ``self``가 자동 전달되어 인자 수
+        불일치(TypeError)가 발생한다.
+        """
         distance = abs(float(stop) - float(start))
         count = max(2, int(math.ceil(distance / float(spacing))) + 1)
         return [
@@ -57,11 +65,8 @@ class SearchPlanGenerator:
 
         # 그림과 같이 위·가운데·아래의 가로 구역 3개로 균등 분할한다.
         y_edges = np.linspace(y_low, y_high, 4)
-        safe_return_world_z = (
-            self.terrain.z_max + SAFE_RETURN_CLEARANCE_M
-        )
         plan = {
-            "format_version": 2,
+            "format_version": 3,
             "map_frame": "map",
             "coordinate_convention": "world_enu_and_local_ned",
             "terrain_bounds": {
@@ -73,7 +78,13 @@ class SearchPlanGenerator:
                 "z_max": self.terrain.z_max,
             },
             "search_clearance_m": SEARCH_CLEARANCE_M,
-            "safe_return_world_z": safe_return_world_z,
+            # 실제 복귀 목표 고도는 드론의 현재 위치가 정해지는
+            # RETURN_HOME 시점에 ROS 2 컨트롤러가 계산한다.
+            "return_height_mode": "current_to_home_terrain_profile",
+            "return_path_clearance_m": RETURN_PATH_CLEARANCE_M,
+            "return_path_sample_spacing_m": RETURN_PATH_SAMPLE_SPACING_M,
+            "return_path_corridor_radius_m": RETURN_PATH_CORRIDOR_RADIUS_M,
+            "return_obstacle_clearance_m": RETURN_OBSTACLE_CLEARANCE_M,
             "test_victim_spawn": None,
             "drones": {},
         }
@@ -156,9 +167,12 @@ class SearchPlanGenerator:
             zone_min_y = float(y_edges[zone_index])
             zone_max_y = float(y_edges[zone_index + 1])
 
-            # 모든 드론이 시작 지점에 가까운 높은 Y쪽부터 수색한다.
+            # 시작점이 담당 구역 안에 있으면 현재 Y에서 바로 수색을
+            # 시작한다. 특히 quadrotor_01은 zone_max_y로 0.67m 이동했다가
+            # 다시 꺾는 불필요한 초기 동작 없이 곧바로 왼쪽으로 진입한다.
+            entry_y = min(max(home_y, zone_min_y), zone_max_y)
             rows = self._sample_axis(
-                zone_max_y,
+                entry_y,
                 zone_min_y,
                 SEARCH_LANE_SPACING_M,
             )
@@ -180,27 +194,34 @@ class SearchPlanGenerator:
             # 출발점도 경로에 넣어 첫 이동 구간의 지형 최고점을 검사한다.
             append_route_point(home_x, home_y)
 
-            # 세 드론이 출발 직후 같은 (-40.67, 40.0) 지점으로 합류하지
-            # 않도록, 각자의 시작 X 통로에서 담당 구역 Y까지 먼저 분리
-            # 이동한다. 그 다음 담당 구역의 Y를 유지하면서 왼쪽 경계로
-            # 진입한다. 이렇게 하면 초기 경로가 서로 겹치지 않는다.
-            ingress_y = min(max(home_y, y_low), y_high)
-            target_ingress_y = min(max(zone_max_y, y_low), y_high)
+            # 각 드론은 자기 X 통로를 유지한 채 담당 구역의 첫 행으로
+            # 이동한다. 그 뒤 첫 행의 양 끝 중 현재 위치에서 가까운 쪽으로
+            # 진입해 불필요하게 반대쪽으로 갔다가 되돌아오는 동작을 줄인다.
             for world_y in self._sample_axis(
-                ingress_y,
-                target_ingress_y,
+                home_y,
+                entry_y,
                 SEARCH_SAMPLE_SPACING_M,
             )[1:]:
                 append_route_point(home_x, world_y)
+
+            left_distance = abs(home_x - x_low)
+            right_distance = abs(home_x - x_high)
+            first_row_starts_left = left_distance <= right_distance
+            first_entry_x = x_low if first_row_starts_left else x_high
             for world_x in self._sample_axis(
                 home_x,
-                x_low,
+                first_entry_x,
                 SEARCH_SAMPLE_SPACING_M,
             )[1:]:
-                append_route_point(world_x, target_ingress_y)
+                append_route_point(world_x, entry_y)
 
             for row_index, world_y in enumerate(rows):
-                if row_index % 2 == 0:
+                starts_left = (
+                    first_row_starts_left
+                    if row_index % 2 == 0
+                    else not first_row_starts_left
+                )
+                if starts_left:
                     row_x = self._sample_axis(
                         x_low,
                         x_high,
@@ -275,9 +296,6 @@ class SearchPlanGenerator:
                 "home_world_enu": [home_x, home_y, home_z],
                 "zone_y_min": zone_min_y,
                 "zone_y_max": zone_max_y,
-                "safe_return_down_m": -(
-                    safe_return_world_z - home_z
-                ),
                 "waypoints": waypoints,
             }
 

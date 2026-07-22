@@ -7,7 +7,7 @@ import carb
 import numpy as np
 import omni.replicator.core as rep
 import omni.usd
-from pxr import Gf, UsdGeom
+from pxr import Gf, Usd, UsdGeom
 from scipy.spatial.transform import Rotation
 
 from pegasus.simulator.params import ROBOTS
@@ -30,55 +30,44 @@ from sim_config import (
     DRONE_CONFIGS,
 )
 
+
 def print_camera_direction_debug():
-    """드론 전방과 카메라 광축의 방향 차이를 출력한다.
+    """드론 body 전방과 실제 카메라 광축의 방향 차이를 출력한다.
 
-    드론 body의 로컬 +X축을 기체 전방으로 사용한다.
-    USD Camera의 로컬 -Z축을 영상 촬영 방향으로 사용한다.
+    방향 기준
+    ---------
+    - 드론 body local +X: 기체 전방
+    - USD Camera local -Z: 실제 영상 촬영 방향
 
-    heading_error_deg:
-        0도에 가까우면 드론 진행 방향과 카메라 수평 방향이 일치한다.
-        180도에 가까우면 카메라가 뒤를 보고 있다.
-
-    camera_down_tilt_deg:
-        양수이면 카메라가 아래를 보고 있다.
-        약 30도이면 현재 설정한 하향각과 일치한다.
+    Transform 전체를 사용하면 부모 Prim의 Scale이 방향 벡터에 섞일 수
+    있으므로, 여기서는 World Transform에서 회전 성분만 추출해 비교한다.
     """
     stage = omni.usd.get_context().get_stage()
     xform_cache = UsdGeom.XformCache(Usd.TimeCode.Default())
 
     for camera_path in CAMERA_PRIM_PATHS:
         body_path = camera_path.rsplit("/Camera", 1)[0]
-
         camera_prim = stage.GetPrimAtPath(camera_path)
         body_prim = stage.GetPrimAtPath(body_path)
 
         if not camera_prim.IsValid():
-            carb.log_warn(
-                f"카메라 방향 검사 실패: {camera_path}"
-            )
+            carb.log_warn(f"카메라 방향 검사 실패: {camera_path}")
             continue
-
         if not body_prim.IsValid():
-            carb.log_warn(
-                f"드론 body 방향 검사 실패: {body_path}"
-            )
+            carb.log_warn(f"드론 body 방향 검사 실패: {body_path}")
             continue
 
-        camera_world_matrix = (
-            xform_cache.GetLocalToWorldTransform(camera_prim)
-        )
-        body_world_matrix = (
-            xform_cache.GetLocalToWorldTransform(body_prim)
-        )
+        camera_world_matrix = xform_cache.GetLocalToWorldTransform(camera_prim)
+        body_world_matrix = xform_cache.GetLocalToWorldTransform(body_prim)
 
-        # Pegasus 코드에서 드론 body의 +X축을 기체 전방으로 사용한다.
-        body_forward_world = body_world_matrix.TransformDir(
+        # 위치와 Scale을 제외하고 회전 성분만 방향 계산에 사용한다.
+        body_world_rotation = body_world_matrix.ExtractRotation()
+        camera_world_rotation = camera_world_matrix.ExtractRotation()
+
+        body_forward_world = body_world_rotation.TransformDir(
             Gf.Vec3d(1.0, 0.0, 0.0)
         )
-
-        # USD Camera는 로컬 -Z축 방향으로 영상을 촬영한다.
-        camera_forward_world = camera_world_matrix.TransformDir(
+        camera_forward_world = camera_world_rotation.TransformDir(
             Gf.Vec3d(0.0, 0.0, -1.0)
         )
 
@@ -99,30 +88,29 @@ def print_camera_direction_debug():
             dtype=np.float64,
         )
 
+        body_norm = float(np.linalg.norm(body_forward))
+        camera_norm = float(np.linalg.norm(camera_forward))
+        if body_norm < 1.0e-9 or camera_norm < 1.0e-9:
+            carb.log_warn(f"카메라 방향 벡터 계산 실패: {camera_path}")
+            continue
+        body_forward /= body_norm
+        camera_forward /= camera_norm
+
         body_xy = body_forward[:2]
         camera_xy = camera_forward[:2]
-
         body_xy_norm = float(np.linalg.norm(body_xy))
         camera_xy_norm = float(np.linalg.norm(camera_xy))
 
         if body_xy_norm < 1.0e-6 or camera_xy_norm < 1.0e-6:
-            carb.log_warn(
-                f"카메라 수평 방향 계산 불가: {camera_path}"
-            )
+            carb.log_warn(f"카메라 수평 방향 계산 불가: {camera_path}")
             continue
 
         body_xy /= body_xy_norm
         camera_xy /= camera_xy_norm
+        heading_dot = float(np.clip(np.dot(body_xy, camera_xy), -1.0, 1.0))
+        heading_error_deg = math.degrees(math.acos(heading_dot))
 
-        # 수평면에서 드론 전방과 카메라 전방 사이의 각도를 계산한다.
-        heading_dot = float(
-            np.clip(np.dot(body_xy, camera_xy), -1.0, 1.0)
-        )
-        heading_error_deg = math.degrees(
-            math.acos(heading_dot)
-        )
-
-        # ENU 좌표에서 Z가 위쪽이므로 -Z 성분이 클수록 아래를 본다.
+        # World ENU에서 +Z는 위쪽이다. 따라서 -Z 성분이 하향 성분이다.
         camera_down_tilt_deg = math.degrees(
             math.atan2(
                 -float(camera_forward[2]),
@@ -143,6 +131,7 @@ def print_camera_direction_debug():
             f"  heading_error={heading_error_deg:.2f} deg\n"
             f"  camera_down_tilt={camera_down_tilt_deg:.2f} deg"
         )
+
 
 class NamespacedLidar(Lidar):
     """드론마다 독립된 ROS 2 PointCloud2 토픽을 발행하는 LiDAR."""
@@ -293,7 +282,7 @@ class DroneManager:
         translate_op.Set(zero)
 
     def configure_drone_cameras(self):
-        """세 카메라의 초점거리와 body 기준 상대 위치를 동일하게 설정한다."""
+        """세 카메라를 기체 전방에서 지정 각도만큼 아래로 향하게 한다."""
         stage = omni.usd.get_context().get_stage()
 
         for camera_path in CAMERA_PRIM_PATHS:
@@ -320,7 +309,6 @@ class DroneManager:
             xformable = UsdGeom.Xformable(camera_prim)
             self._set_camera_translation_zero(xformable)
 
-            # 기존 카메라 자세를 유지하면서 아래쪽 30도 회전을 추가한다.
             orient_op = next(
                 (
                     op
@@ -332,33 +320,39 @@ class DroneManager:
 
             if orient_op is None:
                 carb.log_warn(
-                    f"Camera orient op가 없어 하향각을 적용하지 못했습니다: "
+                    f"Camera orient op가 없어 방향을 적용하지 못했습니다: "
                     f"{camera_path}"
                 )
             else:
-                current_quaternion = orient_op.Get()
-                imaginary = current_quaternion.GetImaginary()
-                current_rotation = Rotation.from_quat(
-                    [
-                        float(imaginary[0]),
-                        float(imaginary[1]),
-                        float(imaginary[2]),
-                        float(current_quaternion.GetReal()),
-                    ]
+                # Iris USD에 저장된 기존 카메라 방향은 사용하지 않는다.
+                # USD Camera의 local -Z 광축을 드론 body +X 전방에 맞춘다.
+                # local +Y는 body +Z가 되어 영상의 위쪽도 정상 유지된다.
+                camera_forward_rotation = Rotation.from_matrix(
+                    np.array(
+                        [
+                            [0.0, 0.0, -1.0],
+                            [-1.0, 0.0, 0.0],
+                            [0.0, 1.0, 0.0],
+                        ],
+                        dtype=np.float64,
+                    )
                 )
+
+                # 전방 기준으로 카메라를 아래쪽으로 기울인다.
                 down_rotation = Rotation.from_euler(
                     "X",
                     -CAMERA_DOWN_TILT_DEG,
                     degrees=True,
                 )
                 configured_xyzw = (
-                    current_rotation * down_rotation
+                    camera_forward_rotation * down_rotation
                 ).as_quat()
                 x, y, z, w = [
                     float(value)
                     for value in configured_xyzw
                 ]
 
+                # 기존 USD Orient 속성의 Quaternion 자료형을 유지한다.
                 attribute_type = str(
                     orient_op.GetAttr().GetTypeName()
                 )
@@ -383,5 +377,6 @@ class DroneManager:
                 f"[INFO] Camera configured: {camera_path}, "
                 f"local_translate=(0, 0, 0), "
                 f"focal={CAMERA_FOCAL_LENGTH_MM:.1f}mm, "
+                f"down_tilt={CAMERA_DOWN_TILT_DEG:.1f}deg, "
                 f"horizontal_fov≈{horizontal_fov_deg:.1f}deg"
             )

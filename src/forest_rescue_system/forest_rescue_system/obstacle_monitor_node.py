@@ -65,14 +65,23 @@ class ObstacleMonitorNode(Node):
         self.declare_parameter("candidate_sector_half_angle_deg", 15.0)
         self.declare_parameter("candidate_min_clearance_m", 3.5)
         self.declare_parameter("candidate_score_distance_cap_m", 15.0)
-        self.declare_parameter("candidate_turn_penalty", 1.5)
+        self.declare_parameter("candidate_turn_penalty", 1.2)
+        # 빈 공간만 넓다고 원래 목표에서 멀어지는 방향을 고르지 않도록
+        # 목표 진행 성분과 이전 회피 방향 유지 성향을 점수에 반영한다.
+        self.declare_parameter("candidate_forward_progress_weight", 3.0)
+        self.declare_parameter("candidate_side_switch_penalty", 4.0)
+        self.declare_parameter("candidate_side_hold_sec", 2.0)
+        self.declare_parameter("candidate_max_offset_deg", 80.0)
         self.declare_parameter("local_grid_size_m", 24.0)
         self.declare_parameter("local_grid_resolution_m", 0.25)
         self.declare_parameter("obstacle_inflation_radius_m", 1.0)
         self.declare_parameter("local_planner_goal_distance_m", 8.0)
         self.declare_parameter("local_planner_lookahead_m", 3.0)
         self.declare_parameter("local_planner_period_sec", 0.40)
-        self.declare_parameter("planner_start_release_radius_m", 0.60)
+        self.declare_parameter("planner_start_release_radius_m", 0.50)
+        # A* 경로의 첫 구간이 목표 반대편으로 과도하게 후퇴하면
+        # 로컬 우회점으로 사용하지 않는다. 0은 측면 이동까지 허용한다.
+        self.declare_parameter("local_planner_min_forward_progress_m", -0.10)
         self.declare_parameter(
             "active_mission_states",
             [
@@ -142,6 +151,10 @@ class ObstacleMonitorNode(Node):
         self.local_detour_x_m = 0.0
         self.local_detour_y_m = 0.0
         self.local_detour_valid = False
+        # VFH가 매 스캔마다 좌우를 바꾸지 않도록 최근 회피 측을 기억한다.
+        # +1은 목표 방향 기준 왼쪽, -1은 오른쪽이다.
+        self.preferred_avoidance_side = 0
+        self.preferred_avoidance_side_until = float("-inf")
         self.processing_period_sec = max(
             0.02,
             float(self.get_parameter("processing_period_sec").value),
@@ -178,6 +191,8 @@ class ObstacleMonitorNode(Node):
         self.last_blocked = False
         self.blocked_scan_count = 0
         self.clear_scan_count = 0
+        self.preferred_avoidance_side = 0
+        self.preferred_avoidance_side_until = float("-inf")
         if enabled:
             self.get_logger().info(
                 f"LiDAR 장애물 감시 활성화: mission_state={state}"
@@ -446,7 +461,12 @@ class ObstacleMonitorNode(Node):
         return self.last_blocked
 
     def _select_avoidance_direction(self, angles, distances, target_center):
-        """장애물 여유가 확보된 LiDAR 후보 중 최적 방향을 고른다."""
+        """목표 진행성과 좌우 일관성을 포함해 VFH 후보를 고른다.
+
+        후보는 목표 방향을 중심으로 평가한다. 뒤쪽에 가까운 큰 회전은
+        제외하고, 장애물 여유거리뿐 아니라 목표 방향으로 전진하는 성분과
+        직전 회피 측을 유지하는 정도를 함께 반영한다.
+        """
         offsets_deg = [
             float(value)
             for value in self.get_parameter("candidate_offsets_deg").value
@@ -465,9 +485,25 @@ class ObstacleMonitorNode(Node):
         turn_penalty = float(
             self.get_parameter("candidate_turn_penalty").value
         )
+        forward_weight = float(
+            self.get_parameter("candidate_forward_progress_weight").value
+        )
+        switch_penalty = float(
+            self.get_parameter("candidate_side_switch_penalty").value
+        )
+        max_offset_deg = abs(
+            float(self.get_parameter("candidate_max_offset_deg").value)
+        )
+        now = time.monotonic()
+        side_hold_active = (
+            self.preferred_avoidance_side != 0
+            and now < self.preferred_avoidance_side_until
+        )
 
-        best = None
+        candidates = []
         for offset_deg in offsets_deg:
+            if abs(offset_deg) > max_offset_deg:
+                continue
             offset_rad = math.radians(offset_deg)
             candidate_angle = self._wrap_angle(target_center + offset_rad)
             mask = (
@@ -475,9 +511,6 @@ class ObstacleMonitorNode(Node):
                 <= half_angle
             )
             clearance = self._minimum_distance(distances, mask)
-            # Isaac RTX LiDAR PointCloud에서 해당 섹터에 반환점이 없으면
-            # 측정 범위 안에 장애물이 없는 것으로 취급한다. 기존 코드는
-            # inf를 UNKNOWN으로 버려 열린 숲길에서도 VFH=NONE이 되었다.
             if math.isnan(clearance):
                 continue
             effective_clearance = (
@@ -485,15 +518,53 @@ class ObstacleMonitorNode(Node):
             )
             if effective_clearance < minimum_clearance:
                 continue
+
+            candidate_side = 0
+            if offset_deg > 1.0e-6:
+                candidate_side = 1
+            elif offset_deg < -1.0e-6:
+                candidate_side = -1
+
+            # cos(offset)는 목표 방향으로 실제 전진하는 비율이다.
+            forward_progress = math.cos(offset_rad)
+            side_change_cost = 0.0
+            if (
+                side_hold_active
+                and candidate_side != 0
+                and candidate_side != self.preferred_avoidance_side
+            ):
+                side_change_cost = switch_penalty
+
             score = (
                 min(effective_clearance, score_cap)
+                + forward_weight * forward_progress
                 - turn_penalty * abs(offset_rad)
+                - side_change_cost
             )
-            if best is None or score > best[0]:
-                best = (score, candidate_angle, effective_clearance)
+            candidates.append(
+                (
+                    score,
+                    candidate_angle,
+                    effective_clearance,
+                    candidate_side,
+                    abs(offset_rad),
+                )
+            )
 
-        if best is None:
+        if not candidates:
             return 0.0, 0.0, False
+
+        # 동일 점수면 회전량이 작은 후보를 우선한다.
+        best = max(candidates, key=lambda item: (item[0], -item[4]))
+        selected_side = int(best[3])
+        if selected_side != 0:
+            hold_sec = max(
+                0.0,
+                float(self.get_parameter("candidate_side_hold_sec").value),
+            )
+            self.preferred_avoidance_side = selected_side
+            self.preferred_avoidance_side_until = now + hold_sec
+
         return float(best[1]), float(best[2]), True
 
     def _plan_local_detour(self, obstacle_x, obstacle_y, target_angle):
@@ -592,7 +663,11 @@ class ObstacleMonitorNode(Node):
             resolution,
             float(self.get_parameter("local_planner_lookahead_m").value),
         )
-        selected = path[-1]
+
+        # A*의 꺾인 경로에서 단순히 몇 번째 셀을 Position setpoint로
+        # 보내면 PX4는 그 셀까지 직선으로 가면서 장애물 모서리를 자를 수
+        # 있다. 시작 셀에서 직선 가시성이 확인되는 가장 먼 셀만 선택한다.
+        selected = path[1]
         traveled = 0.0
         previous = path[0]
         for cell in path[1:]:
@@ -600,16 +675,47 @@ class ObstacleMonitorNode(Node):
                 cell[0] - previous[0],
                 cell[1] - previous[1],
             ) * resolution
-            selected = cell
-            if traveled >= lookahead:
+            if traveled > lookahead + 1.0e-9:
                 break
+            if self._grid_line_is_free(occupied, start, cell):
+                selected = cell
             previous = cell
 
         detour_x = (selected[1] - center_cell) * resolution
         detour_y = (center_cell - selected[0]) * resolution
-        if math.hypot(detour_x, detour_y) < 0.5:
+        detour_distance = math.hypot(detour_x, detour_y)
+        if detour_distance < 0.5:
             return 0.0, 0.0, False
+
+        target_forward_progress = (
+            detour_x * math.cos(target_angle)
+            + detour_y * math.sin(target_angle)
+        )
+        minimum_progress = float(
+            self.get_parameter(
+                "local_planner_min_forward_progress_m"
+            ).value
+        )
+        if target_forward_progress < minimum_progress:
+            return 0.0, 0.0, False
+
         return float(detour_x), float(detour_y), True
+
+    @staticmethod
+    def _grid_line_is_free(occupied, start, end):
+        """두 격자 셀 사이 직선이 팽창 장애물을 지나지 않는지 검사한다."""
+        row_delta = int(end[0]) - int(start[0])
+        col_delta = int(end[1]) - int(start[1])
+        step_count = max(abs(row_delta), abs(col_delta)) * 2 + 1
+        rows, columns = occupied.shape
+        for ratio in np.linspace(0.0, 1.0, max(2, step_count)):
+            row = int(round(start[0] + row_delta * ratio))
+            col = int(round(start[1] + col_delta * ratio))
+            if not (0 <= row < rows and 0 <= col < columns):
+                return False
+            if occupied[row, col]:
+                return False
+        return True
 
     @staticmethod
     def _inflate_grid(occupied, radius_cells):

@@ -39,6 +39,9 @@ class HumanDetectorNode(Node):
         self.declare_parameter("person_class_id", 0)
         self.declare_parameter("confidence_threshold", 0.25)
         self.declare_parameter("inference_period_sec", 0.2)
+        # 작은 원거리 사람 탐지를 위해 YOLO 내부 입력 크기를 조절한다.
+        # 값은 Ultralytics stride에 맞는 32의 배수 사용을 권장한다.
+        self.declare_parameter("inference_image_size", 960)
         self.declare_parameter("mission_state_topic", "/mission/state")
         # 시작 지점의 구조자를 조난자로 확정하지 않도록, 수색 시작 후
         # 일정 시간 동안 실제/Mock 탐지를 모두 비활성화한다.
@@ -62,6 +65,9 @@ class HumanDetectorNode(Node):
         self.inference_period_sec = float(
             self.get_parameter("inference_period_sec").value
         )
+        self.inference_image_size = max(320, int(
+            self.get_parameter("inference_image_size").value
+        ))
         self.mock_delay_sec = float(
             self.get_parameter("mock_delay_sec").value
         )
@@ -111,7 +117,8 @@ class HumanDetectorNode(Node):
 
         self.get_logger().info(
             f"{self.drone_id} 탐지 모드={self.detector_mode}, "
-            f"입력={self.image_topic}"
+            f"입력={self.image_topic}, "
+            f"imgsz={self.inference_image_size}"
         )
         if self.detector_mode == "mock":
             self.get_logger().warning(
@@ -263,6 +270,7 @@ class HumanDetectorNode(Node):
         results = self.model.predict(
             source=image,
             conf=self.confidence_threshold,
+            imgsz=self.inference_image_size,
             verbose=False,
         )
 
