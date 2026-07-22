@@ -46,6 +46,20 @@ class DroneControllerNode(Node):
         self.declare_parameter("waypoint_altitude_tolerance_m", 0.8)
         self.declare_parameter("waypoint_timeout_sec", 75.0)
         self.declare_parameter("return_timeout_sec", 120.0)
+
+        # 복귀 후 높은 안전고도에서 바로 LAND하지 않고 홈 상공의 낮은
+        # 접근고도까지 Offboard로 정밀 하강한 뒤 착륙한다.
+        self.declare_parameter("landing_approach_altitude_m", 3.0)
+        self.declare_parameter("landing_approach_timeout_sec", 45.0)
+        self.declare_parameter("landing_xy_tolerance_m", 0.35)
+        self.declare_parameter("landing_altitude_tolerance_m", 0.30)
+        self.declare_parameter("landing_stopped_speed_m_s", 0.40)
+        self.declare_parameter("landing_settle_sec", 2.0)
+        self.declare_parameter("landing_timeout_sec", 35.0)
+        self.declare_parameter("post_touchdown_settle_sec", 1.0)
+        self.declare_parameter("disarm_timeout_sec", 8.0)
+        self.declare_parameter("landing_command_retries", 2)
+
         # PX4 Position Offboard 모드의 이동 제한값이다. Position setpoint에는
         # 속도 필드가 없으므로 PX4 파라미터를 통해 실제 비행 속도를 정한다.
         self.declare_parameter("search_horizontal_speed_m_s", 2.0)
@@ -188,6 +202,7 @@ class DroneControllerNode(Node):
         self.search_task = None
         self.approach_task = None
         self.return_task = None
+        self.landing_in_progress = False
         self.stop_search_event = None
         self.latest_north_m = 0.0
         self.latest_east_m = 0.0
@@ -1178,12 +1193,15 @@ class DroneControllerNode(Node):
         self.approach_task = None
 
     async def _return_home(self):
+        """공통 안전고도 복귀 후 홈 상공 3m에서 안정화하고 착륙한다."""
         try:
             await self._ensure_offboard()
             self._publish_status("RETURNING")
-            timeout = float(self.get_parameter("return_timeout_sec").value)
+            timeout = float(
+                self.get_parameter("return_timeout_sec").value
+            )
 
-            # 먼저 지역 최고점보다 높은 공통 안전고도로 상승한다.
+            # 1. 현재 XY에서 산 전체보다 높은 공통 안전고도로 상승한다.
             if not await self._go_to_setpoint(
                 self.latest_north_m,
                 self.latest_east_m,
@@ -1192,7 +1210,8 @@ class DroneControllerNode(Node):
                 timeout,
             ):
                 return
-            # 안전고도에서 각 PX4의 Local NED 원점(자기 홈)으로 이동한다.
+
+            # 2. 안전고도를 유지하며 자기 PX4 Local NED 홈으로 이동한다.
             if not await self._go_to_setpoint(
                 0.0,
                 0.0,
@@ -1201,32 +1220,255 @@ class DroneControllerNode(Node):
                 timeout,
             ):
                 return
+
+            # 3. 홈 XY를 유지한 채 지면 위 낮은 접근고도까지 정밀 하강한다.
+            approach_altitude = max(
+                1.5,
+                float(
+                    self.get_parameter(
+                        "landing_approach_altitude_m"
+                    ).value
+                ),
+            )
+            approach_down = -approach_altitude
+            self._publish_status("LANDING_APPROACH")
+
+            if not await self._go_to_landing_approach(
+                approach_down,
+                self.latest_yaw_deg,
+            ):
+                self._publish_status("ERROR_LANDING_APPROACH")
+                return
+
             self._publish_status("HOME_REACHED")
             await self._land()
         except OffboardError as error:
             self.get_logger().error(f"자동 복귀 실패: {error}")
             self._publish_status("ERROR_RETURN_HOME")
+        except asyncio.CancelledError:
+            return
+        finally:
+            self.return_task = None
+
+    async def _go_to_landing_approach(self, target_down_m, yaw_deg):
+        """홈 상공의 낮은 착륙 접근점에서 위치와 속도가 안정될 때까지 기다린다."""
+        await self.drone.offboard.set_position_ned(
+            PositionNedYaw(
+                0.0,
+                0.0,
+                float(target_down_m),
+                float(yaw_deg),
+            )
+        )
+
+        timeout = float(
+            self.get_parameter(
+                "landing_approach_timeout_sec"
+            ).value
+        )
+        xy_tolerance = float(
+            self.get_parameter("landing_xy_tolerance_m").value
+        )
+        altitude_tolerance = float(
+            self.get_parameter(
+                "landing_altitude_tolerance_m"
+            ).value
+        )
+        stopped_speed = float(
+            self.get_parameter("landing_stopped_speed_m_s").value
+        )
+        deadline = time.monotonic() + timeout
+        stable_samples = 0
+
+        while time.monotonic() < deadline:
+            horizontal_error = math.hypot(
+                self.latest_north_m,
+                self.latest_east_m,
+            )
+            altitude_error = abs(
+                self.latest_down_m - target_down_m
+            )
+            total_speed = math.sqrt(
+                self.latest_velocity_north_m_s ** 2
+                + self.latest_velocity_east_m_s ** 2
+                + self.latest_velocity_down_m_s ** 2
+            )
+
+            if (
+                horizontal_error <= xy_tolerance
+                and altitude_error <= altitude_tolerance
+                and total_speed <= stopped_speed
+            ):
+                stable_samples += 1
+                if stable_samples >= 5:
+                    settle_sec = max(
+                        0.0,
+                        float(
+                            self.get_parameter(
+                                "landing_settle_sec"
+                            ).value
+                        ),
+                    )
+                    self.get_logger().info(
+                        "착륙 접근점 안정화 완료: "
+                        f"XY오차={horizontal_error:.2f}m, "
+                        f"고도오차={altitude_error:.2f}m, "
+                        f"속도={total_speed:.2f}m/s, "
+                        f"settle={settle_sec:.1f}s"
+                    )
+                    await asyncio.sleep(settle_sec)
+                    return True
+            else:
+                stable_samples = 0
+
+            # PX4가 setpoint를 놓치지 않도록 같은 목표를 계속 갱신한다.
+            await self.drone.offboard.set_position_ned(
+                PositionNedYaw(
+                    0.0,
+                    0.0,
+                    float(target_down_m),
+                    float(yaw_deg),
+                )
+            )
+            await asyncio.sleep(0.1)
+
+        self.get_logger().error(
+            "착륙 접근점 도달 실패: "
+            f"N={self.latest_north_m:.2f}, "
+            f"E={self.latest_east_m:.2f}, "
+            f"D={self.latest_down_m:.2f}, "
+            f"target_D={target_down_m:.2f}"
+        )
+        return False
 
     async def _land(self):
+        """LAND 명령, 접지, 자동/강제 무장 해제까지 순서대로 확인한다."""
+        if self.current_status == "LANDED":
+            return
+        if self.landing_in_progress:
+            self.get_logger().warning("이미 착륙 절차가 진행 중입니다.")
+            return
+
+        self.landing_in_progress = True
         if self.stop_search_event is not None:
             self.stop_search_event.set()
+
         try:
+            # Offboard stop 실패가 실제 LAND 명령을 막지 않도록 분리한다.
             if self.offboard_started:
-                await self.drone.offboard.stop()
-                self.offboard_started = False
-            await self.drone.action.land()
-            self._publish_status("LANDING")
+                try:
+                    await self.drone.offboard.stop()
+                except OffboardError as error:
+                    self.get_logger().warning(
+                        "Offboard stop 실패, PX4 LAND 명령은 계속합니다: "
+                        f"{error}"
+                    )
+                finally:
+                    self.offboard_started = False
 
-            async def wait_until_landed():
-                async for in_air in self.drone.telemetry.in_air():
-                    if not in_air:
-                        return
+            retries = max(
+                1,
+                int(
+                    self.get_parameter(
+                        "landing_command_retries"
+                    ).value
+                ),
+            )
+            landing_timeout = float(
+                self.get_parameter("landing_timeout_sec").value
+            )
+            touchdown_confirmed = False
+            last_error = None
 
-            await asyncio.wait_for(wait_until_landed(), timeout=45.0)
+            for attempt in range(1, retries + 1):
+                try:
+                    await self.drone.action.land()
+                    self._publish_status("LANDING")
+                    self.get_logger().info(
+                        f"PX4 LAND 명령 전송: {attempt}/{retries}"
+                    )
+
+                    await asyncio.wait_for(
+                        self._wait_until_not_in_air(),
+                        timeout=landing_timeout,
+                    )
+                    touchdown_confirmed = True
+                    break
+                except (ActionError, asyncio.TimeoutError) as error:
+                    last_error = error
+                    self.get_logger().warning(
+                        f"착륙 명령 {attempt}/{retries} 실패 또는 시간 초과: "
+                        f"{error}"
+                    )
+                    if attempt < retries:
+                        await asyncio.sleep(1.0)
+
+            if not touchdown_confirmed:
+                raise asyncio.TimeoutError(
+                    f"접지 확인 실패: {last_error}"
+                )
+
+            await asyncio.sleep(
+                max(
+                    0.0,
+                    float(
+                        self.get_parameter(
+                            "post_touchdown_settle_sec"
+                        ).value
+                    ),
+                )
+            )
+
+            # PX4 자동 disarm을 기다리고, 계속 무장 상태면 지상에서만
+            # 명시적 disarm을 한 번 수행한다.
+            disarm_timeout = float(
+                self.get_parameter("disarm_timeout_sec").value
+            )
+            try:
+                await asyncio.wait_for(
+                    self._wait_until_disarmed(),
+                    timeout=disarm_timeout,
+                )
+            except asyncio.TimeoutError:
+                self.get_logger().warning(
+                    "접지는 확인됐지만 자동 무장 해제가 늦어 "
+                    "명시적 DISARM을 수행합니다."
+                )
+                try:
+                    await self.drone.action.disarm()
+                except ActionError as error:
+                    self.get_logger().warning(
+                        f"명시적 DISARM 응답: {error}"
+                    )
+                await asyncio.wait_for(
+                    self._wait_until_disarmed(),
+                    timeout=5.0,
+                )
+
             self._publish_status("LANDED")
-        except (ActionError, OffboardError, asyncio.TimeoutError) as error:
+            self.get_logger().info(
+                "착륙 완료: 접지 및 무장 해제 확인"
+            )
+        except (
+            ActionError,
+            OffboardError,
+            asyncio.TimeoutError,
+            TelemetryError,
+        ) as error:
             self.get_logger().error(f"착륙 실패: {error}")
             self._publish_status("ERROR_LAND")
+        finally:
+            self.landing_in_progress = False
+
+    async def _wait_until_not_in_air(self):
+        async for in_air in self.drone.telemetry.in_air():
+            if not in_air:
+                return
+
+    async def _wait_until_disarmed(self):
+        async for armed in self.drone.telemetry.armed():
+            if not armed:
+                return
 
     @staticmethod
     def _parse_waypoints(value):

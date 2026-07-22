@@ -38,7 +38,15 @@ def generate_launch_description():
             name="mission_manager_node",
             output="screen",
             parameters=[config],
-        )
+        ),
+        # 실제 Start/Victim과 USD Terrain을 RViz에 함께 표시한다.
+        Node(
+            package="forest_rescue_system",
+            executable="rviz_visualization",
+            name="rviz_visualization_node",
+            output="screen",
+            parameters=[config],
+        ),
     ]
 
     for index in range(1, 4):

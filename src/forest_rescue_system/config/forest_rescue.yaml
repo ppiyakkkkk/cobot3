@@ -1,10 +1,35 @@
+rviz_visualization_node:
+  ros__parameters:
+    ground_truth_path: ~/b3_cobot3_ws/isaac_sim/generated_ground_truth.json
+    terrain_mesh_path: ~/b3_cobot3_ws/isaac_sim/generated_terrain_mesh.npz
+    environment_mesh_path: ~/b3_cobot3_ws/isaac_sim/generated_environment_meshes.npz
+    scene_marker_topic: /forest_rescue/scene_markers
+    terrain_marker_topic: /forest_rescue/terrain_mesh
+    environment_marker_topic: /forest_rescue/environment_meshes
+    map_frame: map
+    refresh_period_sec: 0.5
+    # 초록색 반투명 산 표면
+    terrain_color_rgb: [0.10, 0.55, 0.12]
+    terrain_alpha: 0.72
+    terrain_z_offset_m: 0.0
+
+    # 실제 USD 그룹별 표시 색상
+    pineforest_color_rgb: [0.03, 0.28, 0.06]
+    pineforest_alpha: 1.0
+    broadleafforest_color_rgb: [0.12, 0.48, 0.10]
+    broadleafforest_alpha: 1.0
+    bushes_color_rgb: [0.42, 0.68, 0.10]
+    bushes_alpha: 1.0
+    rocks_color_rgb: [0.42, 0.42, 0.45]
+    rocks_alpha: 1.0
+
 mission_manager_node:
   ros__parameters:
     drone_ids: [quadrotor_01, quadrotor_02, quadrotor_03]
-    required_detection_frames: 5
+    required_detection_frames: 3
     minimum_detection_confidence: 0.60
     # 미션 시작 지점에 있는 구조자를 조난자로 확정하지 않는 유예시간
-    detection_start_delay_sec: 60.0
+    detection_start_delay_sec: 5.0
     require_map_position_before_detection: true
     start_exclusion_radius_m: 15.0
     start_exclusion_centers_xy: [-34.0, 40.0, -29.0, 40.0, -39.0, 40.0]
@@ -32,7 +57,7 @@ human_detector_01:
     person_class_id: 0
     confidence_threshold: 0.60
     inference_period_sec: 0.30
-    detection_start_delay_sec: 60.0
+    detection_start_delay_sec: 5.0
     detect_only_while_searching: true
     mock_delay_sec: 8.0
     mock_confidence: 0.95
@@ -133,6 +158,16 @@ drone_controller_01:
     waypoint_altitude_tolerance_m: 0.8
     waypoint_timeout_sec: 75.0
     return_timeout_sec: 120.0
+    landing_approach_altitude_m: 3.0
+    landing_approach_timeout_sec: 45.0
+    landing_xy_tolerance_m: 0.35
+    landing_altitude_tolerance_m: 0.30
+    landing_stopped_speed_m_s: 0.40
+    landing_settle_sec: 2.0
+    landing_timeout_sec: 35.0
+    post_touchdown_settle_sec: 1.0
+    disarm_timeout_sec: 8.0
+    landing_command_retries: 2
     search_horizontal_speed_m_s: 2.0
     search_horizontal_acceleration_m_s2: 2.0
     search_horizontal_position_gain: 0.8
@@ -179,7 +214,7 @@ human_detector_02:
     person_class_id: 0
     confidence_threshold: 0.60
     inference_period_sec: 0.30
-    detection_start_delay_sec: 60.0
+    detection_start_delay_sec: 5.0
     detect_only_while_searching: true
     mock_delay_sec: 8.0
     mock_confidence: 0.95
@@ -278,6 +313,16 @@ drone_controller_02:
     waypoint_altitude_tolerance_m: 0.8
     waypoint_timeout_sec: 75.0
     return_timeout_sec: 120.0
+    landing_approach_altitude_m: 3.0
+    landing_approach_timeout_sec: 45.0
+    landing_xy_tolerance_m: 0.35
+    landing_altitude_tolerance_m: 0.30
+    landing_stopped_speed_m_s: 0.40
+    landing_settle_sec: 2.0
+    landing_timeout_sec: 35.0
+    post_touchdown_settle_sec: 1.0
+    disarm_timeout_sec: 8.0
+    landing_command_retries: 2
     search_horizontal_speed_m_s: 2.0
     search_horizontal_acceleration_m_s2: 2.0
     search_horizontal_position_gain: 0.8
@@ -324,7 +369,7 @@ human_detector_03:
     person_class_id: 0
     confidence_threshold: 0.60
     inference_period_sec: 0.30
-    detection_start_delay_sec: 60.0
+    detection_start_delay_sec: 5.0
     detect_only_while_searching: true
     mock_delay_sec: 8.0
     mock_confidence: 0.95
@@ -423,6 +468,16 @@ drone_controller_03:
     waypoint_altitude_tolerance_m: 0.8
     waypoint_timeout_sec: 75.0
     return_timeout_sec: 120.0
+    landing_approach_altitude_m: 3.0
+    landing_approach_timeout_sec: 45.0
+    landing_xy_tolerance_m: 0.35
+    landing_altitude_tolerance_m: 0.30
+    landing_stopped_speed_m_s: 0.40
+    landing_settle_sec: 2.0
+    landing_timeout_sec: 35.0
+    post_touchdown_settle_sec: 1.0
+    disarm_timeout_sec: 8.0
+    landing_command_retries: 2
     search_horizontal_speed_m_s: 2.0
     search_horizontal_acceleration_m_s2: 2.0
     search_horizontal_position_gain: 0.8

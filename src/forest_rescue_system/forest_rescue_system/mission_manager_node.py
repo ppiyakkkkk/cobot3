@@ -231,11 +231,20 @@ class MissionManagerNode(Node):
         if status.startswith("ERROR"):
             if drone_id not in self.failed_drones:
                 self.failed_drones.add(drone_id)
-                self._send_command(drone_id, "HOVER")
-                self.get_logger().error(
-                    f"{drone_id} 오류 격리: 해당 드론만 Hover, "
-                    "나머지 드론은 LiDAR 수색 계속"
-                )
+
+                # 착륙 실패 직후 지면 근처 드론에 HOVER를 보내면
+                # 다시 들썩이거나 Offboard가 재시작될 수 있으므로 금지한다.
+                if status == "ERROR_LAND":
+                    self.get_logger().error(
+                        f"{drone_id} 착륙 오류: HOVER 재명령 없이 격리"
+                    )
+                else:
+                    self._send_command(drone_id, "HOVER")
+                    self.get_logger().error(
+                        f"{drone_id} 오류 격리: 해당 드론만 Hover, "
+                        "나머지 드론은 계속 동작"
+                    )
+
             active_drones = [
                 item for item in self.drone_ids
                 if item not in self.failed_drones
@@ -244,6 +253,7 @@ class MissionManagerNode(Node):
                 self._publish_state("MISSION_FAILED")
             else:
                 self._try_finish_search_without_victim()
+                self._try_complete_mission()
 
     def _detection_callback(self, drone_id, detection):
         if self.state != "SEARCHING" or self.finder_drone is not None:
@@ -463,22 +473,39 @@ class MissionManagerNode(Node):
     def _try_complete_mission(self):
         if self.finder_drone is None or self.state == "COMPLETE":
             return
-        other_landed = all(
-            item in self.failed_drones or self.drone_status[item] == "LANDED"
+        return_drone_ids = [
+            item
             for item in self.drone_ids
             if item != self.finder_drone
+        ]
+        returners_resolved = all(
+            item in self.failed_drones
+            or self.drone_status[item] == "LANDED"
+            for item in return_drone_ids
         )
         if (
             self.finder_hovering
             and self.camera_position_received
             and self.map_position_received
-            and other_landed
+            and returners_resolved
         ):
-            self._publish_state("COMPLETE")
-            self.get_logger().info(
-                f"임무 완료: {self.finder_drone}는 조난자 위치 Hover, "
-                "나머지 드론은 홈 착륙 완료"
-            )
+            landing_failures = [
+                item
+                for item in return_drone_ids
+                if self.drone_status[item] != "LANDED"
+            ]
+            if landing_failures:
+                self._publish_state("COMPLETE_WITH_LANDING_ERROR")
+                self.get_logger().error(
+                    "조난자 위치 Hover는 완료했지만 홈 착륙 실패: "
+                    + ", ".join(landing_failures)
+                )
+            else:
+                self._publish_state("COMPLETE")
+                self.get_logger().info(
+                    f"임무 완료: {self.finder_drone}는 조난자 위치 Hover, "
+                    "나머지 드론은 홈 착륙 완료"
+                )
 
     def _is_in_start_exclusion_zone(self, x, y):
         values = [

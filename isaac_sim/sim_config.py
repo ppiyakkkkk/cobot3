@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""산림 구조 시뮬레이션에서 공통으로 사용하는 설정값 모음.
+
+이 파일은 ``SimulationApp`` 생성 전에도 안전하게 import할 수 있도록
+표준 라이브러리 외의 Isaac Sim/Pegasus 모듈을 import하지 않는다.
+경로, 드론 배치, 카메라, 사람 충돌체, 수색 경로 관련 값을 바꾸려면
+우선 이 파일을 수정하면 된다.
+"""
+
+from pathlib import Path
+
+
+# ---------------------------------------------------------------------------
+# 카메라 및 센서 설정
+# ---------------------------------------------------------------------------
+CAMERA_FOCAL_LENGTH_MM = 10.0
+CAMERA_DOWN_TILT_DEG = 30.0
+CAMERA_RESOLUTION = [640, 480]
+
+# 왼쪽 메인 Viewport가 따라갈 드론과 3인칭 추적 카메라 설정이다.
+# 추적 대상을 바꾸려면 quadrotor_01을 quadrotor_02 또는 03으로 변경한다.
+FOLLOW_DRONE_PRIM_PATH = "/World/quadrotor_01/body"
+FOLLOW_CAMERA_PRIM_PATH = "/World/FollowCamera"
+
+# 드론의 실제 진행방향을 기준으로 카메라를 뒤쪽·위쪽에 배치한다.
+# 카메라는 드론보다 앞쪽 지점을 바라보므로 비행 진행방향이 화면에 보인다.
+FOLLOW_CAMERA_BACK_DISTANCE_M = 12.0
+FOLLOW_CAMERA_HEIGHT_M = 7.0
+FOLLOW_CAMERA_LOOK_AHEAD_M = 10.0
+FOLLOW_CAMERA_TARGET_HEIGHT_M = -1.0
+
+# 위치 변화가 이 값보다 클 때만 실제 이동방향을 새로 계산한다.
+# 정지 중에는 드론 body의 전방축을 사용한다.
+FOLLOW_CAMERA_MIN_MOVEMENT_M = 0.01
+
+# 방향 변화가 너무 급하게 화면에 반영되지 않도록 보간한다.
+# 0에 가까울수록 부드럽고, 1에 가까울수록 즉시 방향이 바뀐다.
+FOLLOW_CAMERA_DIRECTION_SMOOTHING = 0.15
+
+
+# ---------------------------------------------------------------------------
+# 드론 및 사람 배치 설정
+# ---------------------------------------------------------------------------
+# 시작 직후 서로의 LiDAR costmap을 점유하지 않도록 5 m 간격으로 배치한다.
+DRONE_CONFIGS = [
+    ("/World/quadrotor_01", 0, [-34.0, 40.0, 31.0]),
+    ("/World/quadrotor_02", 1, [-29.0, 40.0, 31.0]),
+    ("/World/quadrotor_03", 2, [-39.0, 40.0, 31.0]),
+]
+
+CAMERA_PRIM_PATHS = [
+    f"{prim_path}/body/Camera"
+    for prim_path, _, _ in DRONE_CONFIGS
+]
+
+# 일반 실행에서는 아래 후보 좌표 중 한 곳에 조난자를 생성한다.
+VICTIM_SPAWN_POSITIONS = [
+    [33.0, 29.0, 13.7],
+    # [-0.9, -1.8, -0.9],
+    # [33.0, -22.0, 50.6],
+]
+
+# 착륙 복귀 시험용 조난자 위치다.
+# World ENU 기준 (X, Y, Z)를 한 줄에서 직접 지정한다.
+FOR_TEST_VICTIM_SPAWN_ENABLED = True
+FOR_TEST_VICTIM_WORLD_XYZ = (2.0, 38.0, 20.0)
+
+# True이면 X·Y만 그대로 사용하고 Z는 실제 Terrain 표면으로 자동 보정한다.
+# 사람이 경사면 위에서 뜨거나 묻히지 않게 하는 기본 시험 모드다.
+FOR_TEST_VICTIM_KEEP_ON_GROUND = True
+
+# 구조자 충돌체도 초기 LiDAR 팽창영역에 들어오지 않도록 6 m 떨어뜨린다.
+# 구조자의 발 높이는 첫 번째 드론의 초기 World Z와 동일하게 맞춘다.
+RESCUER_XY = (-34.0, 34.0)
+RESCUER_FOOT_Z = float(DRONE_CONFIGS[0][2][2])
+
+# 지형 보간 오차로 발이 지면에 묻히지 않도록 아주 조금 띄운다.
+PERSON_GROUND_CLEARANCE_M = 0.08
+
+# 정지한 사람을 물리 장애물로 취급하기 위한 캡슐 충돌체 크기다.
+# Capsule의 전체 높이 = cylinder height + 2 * radius = 1.8 m이다.
+PERSON_COLLIDER_RADIUS_M = 0.30
+PERSON_COLLIDER_CYLINDER_HEIGHT_M = 1.20
+PERSON_COLLIDER_TOTAL_HEIGHT_M = (
+    PERSON_COLLIDER_CYLINDER_HEIGHT_M
+    + 2.0 * PERSON_COLLIDER_RADIUS_M
+)
+
+
+# ---------------------------------------------------------------------------
+# 수색 경로 설정
+# ---------------------------------------------------------------------------
+SEARCH_AREA_MARGIN_M = 6.0
+SEARCH_LANE_SPACING_M = 7.0
+SEARCH_SAMPLE_SPACING_M = 7.0
+SEARCH_CLEARANCE_M = 6.0
+
+# 두 Waypoint 사이의 직선 구간도 지형과 충돌하지 않도록 1 m 간격으로
+# 지형 최고점을 검사한다. 끝점만 검사하면 구간 중간 봉우리와 충돌할 수 있다.
+SEARCH_TERRAIN_PROFILE_SPACING_M = 1.0
+SAFE_RETURN_CLEARANCE_M = 12.0
+
+
+# ---------------------------------------------------------------------------
+# 입력 USD와 자동 생성 파일 경로
+# ---------------------------------------------------------------------------
+SCRIPT_DIR = Path(__file__).resolve().parent
+FOREST_WORLD_PATH = SCRIPT_DIR / "worlds" / "my_forest.usd"
+GENERATED_SEARCH_PLAN_PATH = SCRIPT_DIR / "generated_search_plan.json"
+GENERATED_GROUND_TRUTH_PATH = SCRIPT_DIR / "generated_ground_truth.json"
+GENERATED_TERRAIN_MESH_PATH = SCRIPT_DIR / "generated_terrain_mesh.npz"
+GENERATED_ENVIRONMENT_MESH_PATH = (
+    SCRIPT_DIR / "generated_environment_meshes.npz"
+)
+
+# RViz 지형은 실제 USD Terrain 높이를 이 간격으로 샘플링한다.
+# 값이 작을수록 산이 부드럽지만 Marker 메시지가 커진다.
+RVIZ_TERRAIN_SAMPLE_SPACING_M = 1.5
+
+# RViz에 실제 형상으로 내보낼 USD 그룹이다.
+# Stage 경로의 어느 조상 Prim 이름이라도 아래 이름과 일치하면 분류한다.
+RVIZ_ENVIRONMENT_GROUPS = {
+    "pineforest": ("pineforest",),
+    "broadleafforest": ("broadleafforest",),
+    "bushes": ("bushes",),
+    "rocks": ("rocks",),
+}
+
+# TRIANGLE_LIST 메시지가 지나치게 커지는 것을 방지하는 그룹별 상한이다.
+# 원본 삼각형 수가 이 값을 넘을 때만 균일하게 일부 면을 선택한다.
+RVIZ_ENVIRONMENT_MAX_TRIANGLES_PER_GROUP = 120_000

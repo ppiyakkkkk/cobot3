@@ -12,6 +12,22 @@
   },
   "search_clearance_m": 6.0,
   "safe_return_world_z": 74.326865234375,
+  "test_victim_spawn": {
+    "enabled": true,
+    "selection": "hardcoded_xyz",
+    "z_mode": "terrain_snap",
+    "configured_world_enu": [
+      3.5,
+      40.0,
+      20.0
+    ],
+    "terrain_z": 12.04732698991806,
+    "world_enu": [
+      3.5,
+      40.0,
+      12.12732698991806
+    ]
+  },
   "drones": {
     "quadrotor_01": {
       "vehicle_id": 0,
