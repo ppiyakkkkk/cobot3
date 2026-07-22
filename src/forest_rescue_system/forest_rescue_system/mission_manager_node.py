@@ -25,8 +25,8 @@ class MissionManagerNode(Node):
             "drone_ids",
             ["quadrotor_01", "quadrotor_02", "quadrotor_03"],
         )
-        self.declare_parameter("required_detection_frames", 5)
-        self.declare_parameter("minimum_detection_confidence", 0.60)
+        self.declare_parameter("required_detection_frames", 3)
+        self.declare_parameter("minimum_detection_confidence", 0.40)
         self.declare_parameter("detection_start_delay_sec", 60.0)
         self.declare_parameter("require_map_position_before_detection", True)
         self.declare_parameter("start_exclusion_radius_m", 15.0)
@@ -34,7 +34,7 @@ class MissionManagerNode(Node):
         self.declare_parameter("detection_position_timeout_sec", 1.0)
         # 완전히 연속된 프레임만 요구하지 않고, 짧은 시간창 안에서
         # 위치가 일치하는 양성 탐지를 누적한다.
-        self.declare_parameter("detection_window_sec", 1.5)
+        self.declare_parameter("detection_window_sec", 2.0)
         self.declare_parameter("maximum_missed_detections", 2)
         self.declare_parameter("victim_approach_height_m", 7.0)
         self.declare_parameter(

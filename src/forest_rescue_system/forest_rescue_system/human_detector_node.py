@@ -3,6 +3,7 @@
 """RGB 영상에서 조난자 후보를 찾는 교체 가능한 탐지 노드."""
 
 import time
+from datetime import datetime
 from pathlib import Path
 
 import cv2
@@ -37,12 +38,21 @@ class HumanDetectorNode(Node):
             "~/b3_cobot3_ws/models/yolo11s.pt",
         )
         self.declare_parameter("person_class_id", 0)
-        self.declare_parameter("confidence_threshold", 0.25)
+        # 수색 중 짧게 보이는 원거리 사람도 후보로 유지한다.
+        # 최종 확정은 mission_manager의 3회/시간창 검증에서 수행한다.
+        self.declare_parameter("confidence_threshold", 0.40)
         self.declare_parameter("inference_period_sec", 0.2)
         # 작은 원거리 사람 탐지를 위해 YOLO 내부 입력 크기를 조절한다.
         # 값은 Ultralytics stride에 맞는 32의 배수 사용을 권장한다.
         self.declare_parameter("inference_image_size", 960)
         self.declare_parameter("mission_state_topic", "/mission/state")
+        self.declare_parameter("finder_drone_topic", "/mission/finder_drone")
+        self.declare_parameter("save_confirmed_image", True)
+        self.declare_parameter(
+            "detected_images_dir",
+            "~/b3_cobot3_ws/detected_images",
+        )
+        self.declare_parameter("saved_image_jpeg_quality", 95)
         # 시작 지점의 구조자를 조난자로 확정하지 않도록, 수색 시작 후
         # 일정 시간 동안 실제/Mock 탐지를 모두 비활성화한다.
         self.declare_parameter("detection_start_delay_sec", 60.0)
@@ -84,6 +94,14 @@ class HumanDetectorNode(Node):
         self.mission_state = "IDLE"
         self.search_started_at = None
         self.delay_notice_printed = False
+        self.latest_detected_image = None
+        self.latest_detection_stamp_ns = None
+        self.confirmed_image_saved = False
+        self.detected_images_dir = Path(
+            str(self.get_parameter("detected_images_dir").value)
+        ).expanduser()
+        if bool(self.get_parameter("save_confirmed_image").value):
+            self.detected_images_dir.mkdir(parents=True, exist_ok=True)
 
         self.detection_publisher = self.create_publisher(
             VictimDetection,
@@ -105,6 +123,12 @@ class HumanDetectorNode(Node):
             String,
             str(self.get_parameter("mission_state_topic").value),
             self._mission_state_callback,
+            10,
+        )
+        self.create_subscription(
+            String,
+            str(self.get_parameter("finder_drone_topic").value),
+            self._finder_drone_callback,
             10,
         )
 
@@ -131,6 +155,9 @@ class HumanDetectorNode(Node):
         if state == "SEARCHING" and self.mission_state != "SEARCHING":
             self.search_started_at = time.monotonic()
             self.delay_notice_printed = False
+            self.latest_detected_image = None
+            self.latest_detection_stamp_ns = None
+            self.confirmed_image_saved = False
             self.get_logger().info(
                 "SEARCHING 진입: "
                 f"{self.detection_start_delay_sec:.1f}초 후 사람 탐지를 시작합니다."
@@ -139,6 +166,38 @@ class HumanDetectorNode(Node):
             self.search_started_at = None
             self.delay_notice_printed = False
         self.mission_state = state
+
+    def _finder_drone_callback(self, message):
+        """3회 검증으로 확정된 자기 드론의 최근 탐지 이미지를 저장한다."""
+        finder_drone = message.data.strip()
+        if finder_drone != self.drone_id or self.confirmed_image_saved:
+            return
+        if not bool(self.get_parameter("save_confirmed_image").value):
+            return
+        if self.latest_detected_image is None:
+            self.get_logger().warning(
+                "조난자 확정 신호를 받았지만 저장할 탐지 이미지가 없습니다."
+            )
+            return
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+        output_path = self.detected_images_dir / (
+            f"victim_{self.drone_id}_{timestamp}.jpg"
+        )
+        quality = min(100, max(1, int(
+            self.get_parameter("saved_image_jpeg_quality").value
+        )))
+        saved = cv2.imwrite(
+            str(output_path),
+            self.latest_detected_image,
+            [cv2.IMWRITE_JPEG_QUALITY, quality],
+        )
+        if not saved:
+            self.get_logger().error(f"조난자 탐지 이미지 저장 실패: {output_path}")
+            return
+
+        self.confirmed_image_saved = True
+        self.get_logger().warning(f"조난자 탐지 이미지 저장 완료: {output_path}")
 
     def _load_yolo_model(self):
         """Ultralytics 모델을 지연 없이 한 번만 불러온다."""
@@ -192,6 +251,13 @@ class HumanDetectorNode(Node):
         annotated = image.copy()
         if detection.detected:
             self._draw_detection(annotated, detection)
+            # detection 메시지를 발행하기 전에 보관해야 mission_manager가
+            # finder 신호를 즉시 반환해도 최종 탐지 프레임을 저장할 수 있다.
+            self.latest_detected_image = annotated.copy()
+            self.latest_detection_stamp_ns = (
+                int(message.header.stamp.sec) * 1_000_000_000
+                + int(message.header.stamp.nanosec)
+            )
 
         self.detection_publisher.publish(detection)
 
@@ -271,6 +337,8 @@ class HumanDetectorNode(Node):
             source=image,
             conf=self.confidence_threshold,
             imgsz=self.inference_image_size,
+            classes=[person_class_id],
+            max_det=1,
             verbose=False,
         )
 
