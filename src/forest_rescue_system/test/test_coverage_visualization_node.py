@@ -22,6 +22,19 @@ class _StubTfBuffer:
         return stamped
 
 
+class _RecordingTfBuffer:
+    """lookup_transform 호출 시 (target_frame, source_frame) 인자를 기록하는 테스트용 TF 버퍼."""
+
+    def __init__(self):
+        self.calls = []
+
+    def lookup_transform(self, target_frame, source_frame, time, timeout=None):
+        self.calls.append((target_frame, source_frame))
+        stamped = TransformStamped()
+        stamped.transform.rotation.w = 1.0
+        return stamped
+
+
 @pytest.fixture
 def rclpy_context():
     rclpy.init()
@@ -248,6 +261,52 @@ def test_constructor_leaves_scene_none_when_mesh_files_are_missing(
     try:
         assert node.scene is None
         assert node.ownership is None
+    finally:
+        node.destroy_node()
+
+
+def test_process_drone_looks_up_transform_with_correct_frame_order(
+    rclpy_context, tmp_path
+):
+    node = _make_node(rclpy_context, tmp_path)
+    try:
+        node.scene, node.ownership = _synthetic_scene_and_ownership()
+        recording_tf_buffer = _RecordingTfBuffer()
+        node.tf_buffer = recording_tf_buffer
+        node.camera_info_by_drone["quadrotor_01"] = _camera_info()
+        depth_image = np.zeros((100, 100), dtype=np.float32)
+        depth_image[50, 50] = 5.0
+        node.depth_by_drone["quadrotor_01"] = depth_image
+
+        node._process_drone(0, "quadrotor_01")
+
+        assert recording_tf_buffer.calls == [
+            ("quadrotor_01/camera_optical_frame", node.map_frame)
+        ]
+    finally:
+        node.destroy_node()
+
+
+def test_refresh_coverage_first_seen_wins_across_drones_same_cycle(
+    rclpy_context, tmp_path
+):
+    node = _make_node(rclpy_context, tmp_path)
+    try:
+        assert node.drone_ids[0] == "quadrotor_01"
+        assert node.drone_ids[1] == "quadrotor_02"
+
+        node.scene, node.ownership = _synthetic_scene_and_ownership()
+        node.tf_buffer = _StubTfBuffer()
+
+        depth_image = np.zeros((100, 100), dtype=np.float32)
+        depth_image[50, 50] = 5.0
+        for drone_id in ("quadrotor_01", "quadrotor_02"):
+            node.camera_info_by_drone[drone_id] = _camera_info()
+            node.depth_by_drone[drone_id] = depth_image.copy()
+
+        node._refresh_coverage()
+
+        assert node.ownership.owner_ids[0] == 0
     finally:
         node.destroy_node()
 
