@@ -35,6 +35,7 @@ setup(
             "sensor_tf = forest_rescue_system.sensor_tf_node:main",
             "obstacle_monitor = forest_rescue_system.obstacle_monitor_node:main",
             "rviz_visualization = forest_rescue_system.rviz_visualization_node:main",
+            "coverage_visualization = forest_rescue_system.coverage_visualization_node:main",
         ],
     },
 )

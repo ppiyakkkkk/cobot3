@@ -23,6 +23,24 @@ rviz_visualization_node:
     rocks_color_rgb: [0.42, 0.42, 0.45]
     rocks_alpha: 1.0
 
+coverage_visualization_node:
+  ros__parameters:
+    drone_ids: [quadrotor_01, quadrotor_02, quadrotor_03]
+    terrain_mesh_path: ~/b3_cobot3_ws/isaac_sim/generated_terrain_mesh.npz
+    environment_mesh_path: ~/b3_cobot3_ws/isaac_sim/generated_environment_meshes.npz
+    coverage_marker_topic: /forest_rescue/coverage_markers
+    coverage_area_topic: /forest_rescue/coverage_area_m2
+    map_frame: map
+    refresh_period_sec: 1.0
+    area_publish_period_sec: 1.0
+    visibility_tolerance_m: 0.5
+    minimum_depth_m: 0.20
+    maximum_depth_m: 30.0
+    coverage_z_offset_m: 0.05
+    drone_01_color_rgb: [0.55, 0.0, 0.85]
+    drone_02_color_rgb: [0.73, 0.33, 0.83]
+    drone_03_color_rgb: [0.60, 0.0, 0.50]
+
 mission_manager_node:
   ros__parameters:
     drone_ids: [quadrotor_01, quadrotor_02, quadrotor_03]

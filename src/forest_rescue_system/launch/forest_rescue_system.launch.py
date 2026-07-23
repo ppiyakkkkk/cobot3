@@ -48,6 +48,14 @@ def generate_launch_description():
             output="screen",
             parameters=[config, {"use_sim_time": use_sim_time}],
         ),
+        # 드론 카메라가 실제로 확인한 지형/식생을 보라색으로 누적 표시한다.
+        Node(
+            package="forest_rescue_system",
+            executable="coverage_visualization",
+            name="coverage_visualization_node",
+            output="screen",
+            parameters=[config, {"use_sim_time": use_sim_time}],
+        ),
     ]
 
     for index in range(1, 4):
