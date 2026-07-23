@@ -60,3 +60,39 @@ def assemble_scene(groups):
         centroids=triangle_centroids(triangle_positions),
         areas=triangle_areas(triangle_positions),
     )
+
+
+def scaled_intrinsics(k, info_width, info_height, depth_width, depth_height):
+    effective_width = info_width or depth_width
+    effective_height = info_height or depth_height
+    scale_x = depth_width / float(effective_width)
+    scale_y = depth_height / float(effective_height)
+    fx = float(k[0]) * scale_x
+    fy = float(k[4]) * scale_y
+    cx = float(k[2]) * scale_x
+    cy = float(k[5]) * scale_y
+    return fx, fy, cx, cy
+
+
+def transform_matrix_from_tf(translation, quaternion):
+    x, y, z, w = quaternion
+    matrix = np.eye(4)
+    matrix[0, 0] = 1 - 2 * (y * y + z * z)
+    matrix[0, 1] = 2 * (x * y - w * z)
+    matrix[0, 2] = 2 * (x * z + w * y)
+    matrix[1, 0] = 2 * (x * y + w * z)
+    matrix[1, 1] = 1 - 2 * (x * x + z * z)
+    matrix[1, 2] = 2 * (y * z - w * x)
+    matrix[2, 0] = 2 * (x * z - w * y)
+    matrix[2, 1] = 2 * (y * z + w * x)
+    matrix[2, 2] = 1 - 2 * (x * x + y * y)
+    matrix[0, 3], matrix[1, 3], matrix[2, 3] = translation
+    return matrix
+
+
+def apply_transform(points, matrix):
+    points = np.asarray(points, dtype=np.float64)
+    homogeneous = np.concatenate(
+        [points, np.ones((len(points), 1))], axis=1
+    )
+    return (homogeneous @ matrix.T)[:, :3]

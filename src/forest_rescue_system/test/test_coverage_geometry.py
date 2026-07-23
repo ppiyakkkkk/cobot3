@@ -41,3 +41,29 @@ def test_assemble_scene_concatenates_groups_in_insertion_order():
     assert scene.centroids.shape == (2, 3)
     assert scene.areas.shape == (2,)
     assert scene.triangle_positions.shape == (2, 3, 3)
+
+
+def test_scaled_intrinsics_scales_when_depth_resolution_differs():
+    k = [100.0, 0.0, 50.0, 0.0, 100.0, 40.0, 0.0, 0.0, 1.0]
+    fx, fy, cx, cy = coverage_geometry.scaled_intrinsics(
+        k, info_width=200, info_height=160, depth_width=100, depth_height=80
+    )
+    assert (fx, fy, cx, cy) == (50.0, 50.0, 25.0, 20.0)
+
+
+def test_transform_matrix_from_tf_applies_translation_with_identity_rotation():
+    matrix = coverage_geometry.transform_matrix_from_tf(
+        translation=(1.0, 2.0, 3.0), quaternion=(0.0, 0.0, 0.0, 1.0)
+    )
+    points = coverage_geometry.apply_transform(np.array([[0.0, 0.0, 0.0]]), matrix)
+    np.testing.assert_allclose(points, [[1.0, 2.0, 3.0]])
+
+
+def test_transform_matrix_from_tf_rotates_90_degrees_about_z():
+    half_angle = np.pi / 4.0
+    quaternion = (0.0, 0.0, np.sin(half_angle), np.cos(half_angle))
+    matrix = coverage_geometry.transform_matrix_from_tf(
+        translation=(0.0, 0.0, 0.0), quaternion=quaternion
+    )
+    points = coverage_geometry.apply_transform(np.array([[1.0, 0.0, 0.0]]), matrix)
+    np.testing.assert_allclose(points, [[0.0, 1.0, 0.0]], atol=1e-9)
