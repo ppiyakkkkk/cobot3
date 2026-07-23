@@ -139,3 +139,31 @@ def visibility_mask(
     )
     result[candidate_idx[close_enough]] = True
     return result
+
+
+def triangle_sample_points(triangle_positions):
+    centroids = triangle_centroids(triangle_positions)
+    return np.concatenate(
+        [triangle_positions, centroids[:, np.newaxis, :]], axis=1
+    )
+
+
+def visibility_mask_multi_sample(
+    sample_points_camera,
+    fx,
+    fy,
+    cx,
+    cy,
+    depth_image,
+    tolerance_m,
+    min_depth_m,
+    max_depth_m,
+):
+    sample_points_camera = np.asarray(sample_points_camera, dtype=np.float64)
+    triangle_count, samples_per_triangle, _ = sample_points_camera.shape
+    flat_points = sample_points_camera.reshape(-1, 3)
+    flat_visible = visibility_mask(
+        flat_points, fx, fy, cx, cy, depth_image,
+        tolerance_m, min_depth_m, max_depth_m,
+    )
+    return flat_visible.reshape(triangle_count, samples_per_triangle).any(axis=1)

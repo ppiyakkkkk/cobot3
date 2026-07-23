@@ -132,3 +132,43 @@ def test_visibility_mask_samples_depth_image_as_row_v_col_u():
         tolerance_m=0.5, min_depth_m=0.2, max_depth_m=30.0,
     )
     np.testing.assert_array_equal(mask, [True])
+
+
+def test_triangle_sample_points_returns_vertices_plus_centroid():
+    positions = np.array([[[0.0, 0.0, 0.0], [3.0, 0.0, 0.0], [0.0, 3.0, 0.0]]])
+    samples = coverage_geometry.triangle_sample_points(positions)
+    assert samples.shape == (1, 4, 3)
+    np.testing.assert_allclose(samples[0, :3], positions[0])
+    np.testing.assert_allclose(samples[0, 3], [1.0, 1.0, 0.0])
+
+
+def test_visibility_mask_multi_sample_true_if_any_sample_visible():
+    # centroid는 가려진 픽셀(깊이 불일치)에 투영되지만, 정점 하나는
+    # depth_image와 일치하는 픽셀에 투영된다 -> 무게중심만 보던 기존
+    # 방식이라면 놓쳤을 삼각형을 다중 샘플링은 잡아내야 한다.
+    sample_points_camera = np.array(
+        [[[0.0, 0.0, 5.0], [10.0, 0.0, 5.0], [0.0, 10.0, 5.0], [3.0, 3.0, 5.0]]]
+    )
+    depth_image = np.zeros((20, 20), dtype=np.float32)
+    depth_image[5, 5] = 5.0  # 정점 (0,0,5) -> u=v=5
+    mask = coverage_geometry.visibility_mask_multi_sample(
+        sample_points_camera,
+        fx=10.0, fy=10.0, cx=5.0, cy=5.0,
+        depth_image=depth_image,
+        tolerance_m=0.5, min_depth_m=0.2, max_depth_m=30.0,
+    )
+    np.testing.assert_array_equal(mask, [True])
+
+
+def test_visibility_mask_multi_sample_false_if_all_samples_occluded():
+    sample_points_camera = np.array(
+        [[[0.0, 0.0, 20.0], [10.0, 0.0, 20.0], [0.0, 10.0, 20.0], [3.0, 3.0, 20.0]]]
+    )
+    depth_image = np.full((20, 20), 5.0, dtype=np.float32)
+    mask = coverage_geometry.visibility_mask_multi_sample(
+        sample_points_camera,
+        fx=10.0, fy=10.0, cx=5.0, cy=5.0,
+        depth_image=depth_image,
+        tolerance_m=0.5, min_depth_m=0.2, max_depth_m=30.0,
+    )
+    np.testing.assert_array_equal(mask, [False])

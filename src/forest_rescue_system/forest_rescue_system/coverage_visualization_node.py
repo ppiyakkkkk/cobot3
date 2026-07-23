@@ -63,7 +63,7 @@ class CoverageVisualizationNode(TimestampedNode):
         self.declare_parameter("area_publish_period_sec", 1.0)
         self.declare_parameter("visibility_tolerance_m", 0.5)
         self.declare_parameter("minimum_depth_m", 0.20)
-        self.declare_parameter("maximum_depth_m", 30.0)
+        self.declare_parameter("maximum_depth_m", 20.0)
         self.declare_parameter("coverage_z_offset_m", 0.05)
         self.declare_parameter("drone_01_color_rgb", [0.55, 0.0, 0.85])
         self.declare_parameter("drone_02_color_rgb", [0.73, 0.33, 0.83])
@@ -241,9 +241,12 @@ class CoverageVisualizationNode(TimestampedNode):
                 transform_stamped.transform.rotation.w,
             ),
         )
-        points_camera = coverage_geometry.apply_transform(
-            self.scene.centroids[candidate_indices], matrix
+        sample_points = coverage_geometry.triangle_sample_points(
+            self.scene.triangle_positions[candidate_indices]
         )
+        sample_points_camera = coverage_geometry.apply_transform(
+            sample_points.reshape(-1, 3), matrix
+        ).reshape(sample_points.shape)
 
         depth_height, depth_width = depth_image.shape[:2]
         info_width = int(camera_info.width) or depth_width
@@ -252,8 +255,8 @@ class CoverageVisualizationNode(TimestampedNode):
             camera_info.k, info_width, info_height, depth_width, depth_height
         )
 
-        visible = coverage_geometry.visibility_mask(
-            points_camera,
+        visible = coverage_geometry.visibility_mask_multi_sample(
+            sample_points_camera,
             fx,
             fy,
             cx,

@@ -131,6 +131,36 @@ def test_process_drone_claims_visible_triangle_and_rejects_occluded_one(
         node.destroy_node()
 
 
+def test_process_drone_claims_triangle_whose_centroid_is_occluded_but_a_vertex_is_visible(
+    rclpy_context, tmp_path
+):
+    # 삼각형 중 정점 하나(0,0,5)만 depth_image와 일치하는 픽셀에 투영되고,
+    # 무게중심(0.667,0.667,5)은 안 보이는(불일치) 픽셀에 투영된다.
+    # 무게중심 1점만 보던 기존 방식이라면 이 삼각형을 놓쳐야 정상이지만,
+    # 다중 샘플링 적용 후에는 claim되어야 한다.
+    node = _make_node(rclpy_context, tmp_path)
+    try:
+        vertices = np.array(
+            [[0.0, 0.0, 5.0], [2.0, 0.0, 5.0], [0.0, 2.0, 5.0]]
+        )
+        triangles = np.array([[0, 1, 2]])
+        node.scene = coverage_geometry.assemble_scene(
+            {"synthetic": (vertices, triangles)}
+        )
+        node.ownership = TriangleOwnership(len(node.scene.centroids))
+        node.tf_buffer = _StubTfBuffer()
+        node.camera_info_by_drone["quadrotor_01"] = _camera_info()
+        depth_image = np.zeros((100, 100), dtype=np.float32)
+        depth_image[50, 50] = 5.0
+        node.depth_by_drone["quadrotor_01"] = depth_image
+
+        node._process_drone(0, "quadrotor_01")
+
+        np.testing.assert_array_equal(node.ownership.owner_ids, [0])
+    finally:
+        node.destroy_node()
+
+
 def test_process_drone_does_not_overwrite_existing_owner(rclpy_context, tmp_path):
     node = _make_node(rclpy_context, tmp_path)
     try:

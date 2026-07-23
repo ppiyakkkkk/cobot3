@@ -35,7 +35,7 @@ coverage_visualization_node:
     area_publish_period_sec: 1.0
     visibility_tolerance_m: 0.5
     minimum_depth_m: 0.20
-    maximum_depth_m: 30.0
+    maximum_depth_m: 20.0
     coverage_z_offset_m: 0.05
     drone_01_color_rgb: [0.55, 0.0, 0.85]
     drone_02_color_rgb: [0.73, 0.33, 0.83]
@@ -104,7 +104,7 @@ victim_localizer_01:
     map_frame: map
     roi_center_ratio: 0.50
     minimum_depth_m: 0.20
-    maximum_depth_m: 30.0
+    maximum_depth_m: 15.0
     depth_buffer_duration_sec: 1.0
     depth_buffer_max_frames: 40
     max_depth_detection_time_delta_sec: 0.25
@@ -294,7 +294,7 @@ victim_localizer_02:
     map_frame: map
     roi_center_ratio: 0.50
     minimum_depth_m: 0.20
-    maximum_depth_m: 30.0
+    maximum_depth_m: 15.0
     depth_buffer_duration_sec: 1.0
     depth_buffer_max_frames: 40
     max_depth_detection_time_delta_sec: 0.25
@@ -481,7 +481,7 @@ victim_localizer_03:
     map_frame: map
     roi_center_ratio: 0.50
     minimum_depth_m: 0.20
-    maximum_depth_m: 30.0
+    maximum_depth_m: 15.0
     depth_buffer_duration_sec: 1.0
     depth_buffer_max_frames: 40
     max_depth_detection_time_delta_sec: 0.25

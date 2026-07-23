@@ -128,7 +128,10 @@ GENERATED_ENVIRONMENT_MESH_PATH = (
 
 # RViz 지형은 실제 USD Terrain 높이를 이 간격으로 샘플링한다.
 # 값이 작을수록 산이 부드럽지만 Marker 메시지가 커진다.
-RVIZ_TERRAIN_SAMPLE_SPACING_M = 1.5
+# 커버리지 시각화가 같은 mesh를 쓰는데, 간격이 넓으면(예: 1.5m) 삼각형이
+# 커져서 무게중심 기반 가시성 판정이 나무 사이로 보이는 지면 일부를
+# 자주 놓친다. environment mesh 삼각형 크기(~0.17~0.6㎡)에 맞춰 낮췄다.
+RVIZ_TERRAIN_SAMPLE_SPACING_M = 0.5
 
 # RViz에 실제 형상으로 내보낼 USD 그룹이다.
 # Stage 경로의 어느 조상 Prim 이름이라도 아래 이름과 일치하면 분류한다.

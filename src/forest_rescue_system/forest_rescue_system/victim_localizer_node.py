@@ -54,7 +54,7 @@ class VictimLocalizerNode(TimestampedNode):
         self.declare_parameter("map_frame", "map")
         self.declare_parameter("roi_center_ratio", 0.5)
         self.declare_parameter("minimum_depth_m", 0.2)
-        self.declare_parameter("maximum_depth_m", 30.0)
+        self.declare_parameter("maximum_depth_m", 15.0)
         # YOLO 추론 결과는 원본 RGB 촬영 시점보다 늦게 도착한다. 최신
         # Depth 한 장만 사용하지 않고 최근 프레임을 보관한 뒤 RGB stamp와
         # 가장 가까운 Depth를 선택한다.
