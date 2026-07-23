@@ -5,8 +5,12 @@ import math
 
 import carb
 import numpy as np
+import omni.graph.core as og
 import omni.replicator.core as rep
 import omni.usd
+from isaacsim.core.utils import stage
+from isaacsim.core.utils.prims import set_targets
+from omni.isaac.sensor import IMUSensor
 from pxr import Gf, Usd, UsdGeom
 from scipy.spatial.transform import Rotation
 
@@ -15,7 +19,7 @@ from pegasus.simulator.logic.backends.px4_mavlink_backend import (
     PX4MavlinkBackend,
     PX4MavlinkBackendConfig,
 )
-from pegasus.simulator.logic.graphs import ROS2CameraGraph
+from pegasus.simulator.logic.graphs import Graph, ROS2CameraGraph
 from pegasus.simulator.logic.graphical_sensors.lidar import Lidar
 from pegasus.simulator.logic.vehicles.multirotor import (
     Multirotor,
@@ -170,6 +174,76 @@ class NamespacedLidar(Lidar):
         self._writer.attach([self._render_product])
 
 
+class ROS2ImuGraph(Graph):
+    """드론 body에 IMU 센서를 붙이고 sensor_msgs/Imu로 발행하는 OmniGraph.
+
+    LIO-SAM(imageProjection.cpp)이 IMU 데이터가 전혀 없으면 point cloud를
+    계속 버리기만 해서(맵이 안 만들어짐), IMU 토픽 발행이 반드시 필요하다.
+    Pegasus에는 카메라용 ROS2CameraGraph만 있고 IMU 그래프가 없어서
+    ROS2CameraGraph와 동일한 패턴(isaacsim.ros2.bridge OmniGraph 노드 직접 연결)으로
+    새로 만든다.
+    """
+
+    def __init__(self, imu_prim_path, config=None):
+        super().__init__(graph_type="ROS2ImuGraph")
+        config = config or {}
+        self._imu_prim_path = imu_prim_path
+        self._frequency = config.get("frequency", 100)
+        self._namespace = config.get("namespace", "")
+        self._topic = config.get("topic", "imu/data")
+        self._frame_id = config.get("frame_id", "")
+
+    def initialize(self, vehicle):
+        if self._namespace == "":
+            self._namespace = f"/{vehicle.vehicle_name}"
+        if self._frame_id == "":
+            self._frame_id = self._imu_prim_path.rpartition("/")[-1]
+
+        prim_path = self._imu_prim_path
+        if prim_path[0] != "/":
+            prim_path = f"{vehicle.prim_path}/{prim_path}"
+
+        # IMU 센서 prim이 없으면 새로 만들어준다 (imu_sensor.py의 동작).
+        IMUSensor(prim_path=prim_path, frequency=self._frequency)
+
+        graph_path = f"{prim_path}_pub"
+        keys = og.Controller.Keys
+        graph_config = {
+            keys.CREATE_NODES: [
+                ("on_tick", "omni.graph.action.OnTick"),
+                ("read_imu", "isaacsim.sensors.physics.IsaacReadIMU"),
+                ("read_sim_time", "isaacsim.core.nodes.IsaacReadSimulationTime"),
+                ("publish_imu", "isaacsim.ros2.bridge.ROS2PublishImu"),
+            ],
+            keys.CONNECT: [
+                ("on_tick.outputs:tick", "read_imu.inputs:execIn"),
+                ("read_imu.outputs:execOut", "publish_imu.inputs:execIn"),
+                ("read_imu.outputs:linAcc", "publish_imu.inputs:linearAcceleration"),
+                ("read_imu.outputs:angVel", "publish_imu.inputs:angularVelocity"),
+                ("read_imu.outputs:orientation", "publish_imu.inputs:orientation"),
+                ("read_sim_time.outputs:simulationTime", "publish_imu.inputs:timeStamp"),
+            ],
+            keys.SET_VALUES: [
+                ("publish_imu.inputs:nodeNamespace", self._namespace),
+                ("publish_imu.inputs:frameId", self._frame_id),
+                ("publish_imu.inputs:topicName", self._topic),
+            ],
+        }
+
+        (graph, _, _, _) = og.Controller.edit(
+            {"graph_path": graph_path, "evaluator_name": "execution"},
+            graph_config,
+        )
+
+        set_targets(
+            prim=stage.get_current_stage().GetPrimAtPath(f"{graph_path}/read_imu"),
+            attribute="inputs:imuPrim",
+            target_prim_paths=[prim_path],
+        )
+
+        og.Controller.evaluate_sync(graph)
+
+
 class DroneManager:
     """세 대의 Iris 생성과 기체 카메라 설정을 담당한다."""
 
@@ -214,7 +288,16 @@ class DroneManager:
                             f"{drone_name}/camera_optical_frame"
                         ),
                     },
-                )
+                ),
+                ROS2ImuGraph(
+                    "body/Imu",
+                    config={
+                        "namespace": f"/{drone_name}",
+                        "topic": "imu/data",
+                        "frame_id": f"{drone_name}/imu_link",
+                        "frequency": 100,
+                    },
+                ),
             ]
 
             # 세 드론에 LiDAR를 각각 하나씩 장착하고 토픽을 분리한다.

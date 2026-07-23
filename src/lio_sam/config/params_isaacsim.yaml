@@ -1,0 +1,100 @@
+/**:
+  ros__parameters:
+
+    # Topics
+    # ring_filler_node의 출력(output_topic)을 여기로 맞춘다. 드론을 한 대씩
+    # 순차적으로 테스트하는 동안은 항상 /points 하나만 사용한다.
+    pointCloudTopic: "/points"                   # Point cloud data
+    imuTopic: "/quadrotor_01/imu/data"           # IMU data (ROS2ImuGraph가 드론별 네임스페이스로 발행)
+    odomTopic: "odometry/imu"                    # IMU pre-preintegration odometry, same frequency as IMU
+    gpsTopic: "odometry/gpsz"                    # GPS odometry topic from navsat, see module_navsat.launch file
+
+    # Frames
+    # lidarFrame != baselinkFrame로 두면 imuPreintegration.cpp의
+    # TransformFusion이 매 프레임 lidar_link<->base_link TF를 조회하는데,
+    # 이 경로가 불안정해서(원인 불명) 특정 시점에 조회가 영구적으로 멈춰버리고
+    # TF가 "두 개의 분리된 트리"로 갈라지는 문제가 재현됐다(IMU 데이터 자체는
+    # 그 시점에 정상이었음, 즉 데이터 문제가 아니라 이 조회 자체의 문제).
+    # 라이다-본체 물리적 차이가 Z축 15cm뿐이라 정확도 손실은 미미하므로,
+    # 두 값을 같게 둬서 이 조회를 아예 안 타게 우회한다.
+    lidarFrame: "lidar_link"
+    baselinkFrame: "lidar_link"
+    odometryFrame: "odom"
+    mapFrame: "map"
+
+    # GPS Settings
+    useImuHeadingInitialization: false
+    useGpsElevation: false
+    gpsCovThreshold: 2.0
+    poseCovThreshold: 25.0
+
+    # Export settings
+    savePCD: false
+    savePCDDirectory: "/Downloads/LOAM/"
+
+    # Sensor Settings
+    # Example_Rotary.json 기준: 32개 고유 elevation 채널(ring_filler_node가 채우는 값과 동일).
+    # Horizon_SCAN은 /points 실측치(꽉 찬 채널의 채널당 포인트 수 2400개)로 확정.
+    # 1024로 두면 채널당 실제론 2400포인트가 들어오는데 그리드가 1024칸뿐이라
+    # 절반 이상이 겹쳐써져 소실되고, edge/planar 특징이 거의 안 나왔었음.
+    sensor: velodyne
+    N_SCAN: 32
+    Horizon_SCAN: 2400
+    downsampleRate: 1
+    lidarMinRange: 1.0
+    lidarMaxRange: 200.0                          # Example_Rotary.json farRangeM과 일치
+
+    # IMU Settings (IMU 퍼블리셔 추가 후 실측치로 교체 필요, 우선 기본값 유지)
+    imuAccNoise: 3.9939570888238808e-03
+    imuGyrNoise: 1.5636343949698187e-03
+    imuAccBiasN: 6.4356659353532566e-05
+    imuGyrBiasN: 3.5640318696367613e-05
+
+    imuGravity: 9.80511
+    imuRPYWeight: 0.01
+
+    # IMU-라이다 외참: 아직 IMU 프레임이 정의되지 않아 identity로 둔다.
+    # IMU 퍼블리셔를 추가하면 sim_drone.py의 lidar position([0,0,0.15])과
+    # IMU 장착 위치 차이를 반영해 실제 값으로 교체해야 한다.
+    extrinsicTrans: [0.0, 0.0, 0.0]
+    extrinsicRot: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    extrinsicRPY: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+
+    # LOAM feature threshold
+    edgeThreshold: 1.0
+    surfThreshold: 0.1
+    edgeFeatureMinValidNum: 10
+    surfFeatureMinValidNum: 100
+
+    # voxel filter paprams
+    odometrySurfLeafSize: 0.4
+    mappingCornerLeafSize: 0.2
+    mappingSurfLeafSize: 0.4
+
+    # robot motion constraint (in case you are using a 2D robot)
+    z_tollerance: 1000.0
+    rotation_tollerance: 1000.0
+
+    # CPU Params
+    numberOfCores: 4
+    mappingProcessInterval: 0.15
+
+    # Surrounding map
+    surroundingkeyframeAddingDistThreshold: 1.0
+    surroundingkeyframeAddingAngleThreshold: 0.2
+    surroundingKeyframeDensity: 2.0
+    surroundingKeyframeSearchRadius: 50.0
+
+    # Loop closure
+    loopClosureEnableFlag: true
+    loopClosureFrequency: 1.0
+    surroundingKeyframeSize: 50
+    historyKeyframeSearchRadius: 15.0
+    historyKeyframeSearchTimeDiff: 30.0
+    historyKeyframeSearchNum: 25
+    historyKeyframeFitnessScore: 0.3
+
+    # Visualization
+    globalMapVisualizationSearchRadius: 1000.0
+    globalMapVisualizationPoseDensity: 10.0
+    globalMapVisualizationLeafSize: 1.0

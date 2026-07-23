@@ -87,3 +87,6 @@ Thumbs.db
 
 # Model weights
 models/
+
+# CLAUDE
+CLAUDE.md

@@ -17,6 +17,7 @@ from sim_config import (
     PERSON_GROUND_CLEARANCE_M,
     RESCUER_FOOT_Z,
     RESCUER_XY,
+    VICTIM_SPAWN_ENABLED,
     VICTIM_SPAWN_POSITIONS,
 )
 from sim_utils import write_ground_truth
@@ -50,7 +51,9 @@ class PeopleManager:
                 f"Using {selected_asset} instead."
             )
 
-        if FOR_TEST_VICTIM_SPAWN_ENABLED:
+        if not VICTIM_SPAWN_ENABLED:
+            print("[INFO] VICTIM_SPAWN_ENABLED=False, 조난자 생성을 건너뜁니다.")
+        elif FOR_TEST_VICTIM_SPAWN_ENABLED:
             victim_position = getattr(
                 self,
                 "test_victim_spawn_world_enu",
@@ -88,27 +91,28 @@ class PeopleManager:
             ]
             spawn_description = f"candidate {victim_index + 1}"
 
-        # Person을 실제로 생성할 때 사용하는 좌표를 그대로 RViz용
-        # Ground Truth 파일에 기록한다.
-        write_ground_truth(victim_position, victim_index)
+        if VICTIM_SPAWN_ENABLED:
+            # Person을 실제로 생성할 때 사용하는 좌표를 그대로 RViz용
+            # Ground Truth 파일에 기록한다.
+            write_ground_truth(victim_position, victim_index)
 
-        self.victim = Person(
-            "victim_01",
-            selected_asset,
-            init_pos=victim_position,
-            init_yaw=0.0,
-        )
-        self._create_person_physics_proxy(
-            "victim_01",
-            self.victim,
-            victim_position,
-        )
-        print(
-            f"[INFO] Spawned victim at {spawn_description}: "
-            f"({victim_position[0]:.3f}, "
-            f"{victim_position[1]:.3f}, "
-            f"{victim_position[2]:.3f})"
-        )
+            self.victim = Person(
+                "victim_01",
+                selected_asset,
+                init_pos=victim_position,
+                init_yaw=0.0,
+            )
+            self._create_person_physics_proxy(
+                "victim_01",
+                self.victim,
+                victim_position,
+            )
+            print(
+                f"[INFO] Spawned victim at {spawn_description}: "
+                f"({victim_position[0]:.3f}, "
+                f"{victim_position[1]:.3f}, "
+                f"{victim_position[2]:.3f})"
+            )
 
         rescuer_x, rescuer_y = RESCUER_XY
         rescuer_position = [

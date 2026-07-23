@@ -59,6 +59,10 @@ CAMERA_PRIM_PATHS = [
     for prim_path, _, _ in DRONE_CONFIGS
 ]
 
+# False면 조난자를 아예 생성하지 않는다(구조자는 그대로 생성됨).
+# 임무 전체 구간을 다 수색하게 만들어 지도 커버리지를 검증할 때 끈다.
+VICTIM_SPAWN_ENABLED = False
+
 # 일반 실행에서는 아래 후보 좌표 중 한 곳에 조난자를 생성한다.
 VICTIM_SPAWN_POSITIONS = [
     [33.0, 29.0, 13.7],
