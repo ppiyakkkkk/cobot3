@@ -96,3 +96,46 @@ def apply_transform(points, matrix):
         [points, np.ones((len(points), 1))], axis=1
     )
     return (homogeneous @ matrix.T)[:, :3]
+
+
+def visibility_mask(
+    points_camera,
+    fx,
+    fy,
+    cx,
+    cy,
+    depth_image,
+    tolerance_m,
+    min_depth_m,
+    max_depth_m,
+):
+    points_camera = np.asarray(points_camera, dtype=np.float64)
+    result = np.zeros(len(points_camera), dtype=bool)
+    if len(points_camera) == 0:
+        return result
+
+    x = points_camera[:, 0]
+    y = points_camera[:, 1]
+    z = points_camera[:, 2]
+
+    in_front = z > 0.0
+    in_range = (z >= min_depth_m) & (z <= max_depth_m)
+
+    safe_z = np.where(in_front, z, 1.0)
+    u = np.round((x * fx / safe_z) + cx).astype(np.int64)
+    v = np.round((y * fy / safe_z) + cy).astype(np.int64)
+
+    height, width = depth_image.shape[:2]
+    in_bounds = (u >= 0) & (u < width) & (v >= 0) & (v < height)
+
+    candidate = in_front & in_range & in_bounds
+    candidate_idx = np.where(candidate)[0]
+    if candidate_idx.size == 0:
+        return result
+
+    sampled_depth = depth_image[v[candidate_idx], u[candidate_idx]]
+    close_enough = np.isfinite(sampled_depth) & (
+        np.abs(sampled_depth - z[candidate_idx]) < tolerance_m
+    )
+    result[candidate_idx[close_enough]] = True
+    return result

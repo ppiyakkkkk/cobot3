@@ -67,3 +67,68 @@ def test_transform_matrix_from_tf_rotates_90_degrees_about_z():
     )
     points = coverage_geometry.apply_transform(np.array([[1.0, 0.0, 0.0]]), matrix)
     np.testing.assert_allclose(points, [[0.0, 1.0, 0.0]], atol=1e-9)
+
+
+def test_visibility_mask_accepts_point_matching_depth_image():
+    points_camera = np.array([[0.0, 0.0, 5.0]])
+    depth_image = np.full((10, 10), 100.0, dtype=np.float32)
+    depth_image[5, 5] = 5.0
+    mask = coverage_geometry.visibility_mask(
+        points_camera,
+        fx=10.0, fy=10.0, cx=5.0, cy=5.0,
+        depth_image=depth_image,
+        tolerance_m=0.5, min_depth_m=0.2, max_depth_m=30.0,
+    )
+    np.testing.assert_array_equal(mask, [True])
+
+
+def test_visibility_mask_rejects_occluded_point_behind_closer_surface():
+    points_camera = np.array([[0.0, 0.0, 20.0]])
+    depth_image = np.full((10, 10), 5.0, dtype=np.float32)
+    mask = coverage_geometry.visibility_mask(
+        points_camera,
+        fx=10.0, fy=10.0, cx=5.0, cy=5.0,
+        depth_image=depth_image,
+        tolerance_m=0.5, min_depth_m=0.2, max_depth_m=30.0,
+    )
+    np.testing.assert_array_equal(mask, [False])
+
+
+def test_visibility_mask_rejects_point_outside_max_depth_range():
+    points_camera = np.array([[0.0, 0.0, 50.0]])
+    depth_image = np.full((10, 10), 50.0, dtype=np.float32)
+    mask = coverage_geometry.visibility_mask(
+        points_camera,
+        fx=10.0, fy=10.0, cx=5.0, cy=5.0,
+        depth_image=depth_image,
+        tolerance_m=0.5, min_depth_m=0.2, max_depth_m=30.0,
+    )
+    np.testing.assert_array_equal(mask, [False])
+
+
+def test_visibility_mask_rejects_point_projecting_outside_image_bounds():
+    points_camera = np.array([[1000.0, 0.0, 5.0]])
+    depth_image = np.full((10, 10), 5.0, dtype=np.float32)
+    mask = coverage_geometry.visibility_mask(
+        points_camera,
+        fx=10.0, fy=10.0, cx=5.0, cy=5.0,
+        depth_image=depth_image,
+        tolerance_m=0.5, min_depth_m=0.2, max_depth_m=30.0,
+    )
+    np.testing.assert_array_equal(mask, [False])
+
+
+def test_visibility_mask_samples_depth_image_as_row_v_col_u():
+    # u=2, v=0으로 서로 다른 값이 나오게 만들어, depth_image 인덱싱이
+    # [v, u](row=height, col=width) 순서인지 실제로 구분되게 한다.
+    # 만약 구현이 실수로 [u, v]로 뒤집히면 이 테스트는 실패해야 한다.
+    points_camera = np.array([[2.0, 0.0, 10.0]])
+    depth_image = np.zeros((5, 10), dtype=np.float32)
+    depth_image[0, 2] = 10.0
+    mask = coverage_geometry.visibility_mask(
+        points_camera,
+        fx=10.0, fy=20.0, cx=0.0, cy=0.0,
+        depth_image=depth_image,
+        tolerance_m=0.5, min_depth_m=0.2, max_depth_m=30.0,
+    )
+    np.testing.assert_array_equal(mask, [True])
