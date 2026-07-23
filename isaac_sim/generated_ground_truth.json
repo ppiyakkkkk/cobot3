@@ -1,5 +1,14 @@
 {
-  "format_version": 1,
+  "format_version": 2,
+  "operation_mode": "mapping_3d",
+  "people_spawned": false,
+  "drone_count": 4,
+  "drone_ids": [
+    "quadrotor_01",
+    "quadrotor_02",
+    "quadrotor_03",
+    "quadrotor_04"
+  ],
   "map_frame": "map",
   "coordinate_convention": "world_enu",
   "drone_starts": [
@@ -29,15 +38,16 @@
         40.0,
         31.0
       ]
+    },
+    {
+      "drone_id": "quadrotor_04",
+      "vehicle_id": 3,
+      "world_enu": [
+        -34.0,
+        45.0,
+        31.0
+      ]
     }
   ],
-  "victim": {
-    "victim_id": "victim_01",
-    "spawn_candidate_index": -1,
-    "world_enu": [
-      2.0,
-      38.0,
-      13.712933424981191
-    ]
-  }
+  "victim": null
 }

@@ -2,11 +2,12 @@
 
 """Start, Victim, 산과 식생·바위를 RViz에 함께 표시한다."""
 
+from functools import partial
 import json
 from pathlib import Path
 import time
 
-from geometry_msgs.msg import Point
+from geometry_msgs.msg import Point, PointStamped
 import numpy as np
 import rclpy
 from rclpy.qos import (
@@ -50,6 +51,15 @@ class RvizVisualizationNode(TimestampedNode):
             "/forest_rescue/environment_meshes",
         )
         self.declare_parameter("map_frame", "map")
+        self.declare_parameter("operation_mode", "rescue_search")
+        self.declare_parameter(
+            "drone_ids",
+            ["quadrotor_01", "quadrotor_02", "quadrotor_03"],
+        )
+        self.declare_parameter(
+            "drone_marker_topic",
+            "/forest_rescue/drone_markers",
+        )
         self.declare_parameter("refresh_period_sec", 0.5)
         self.declare_parameter("terrain_color_rgb", [0.10, 0.55, 0.12])
         self.declare_parameter("terrain_alpha", 0.72)
@@ -95,6 +105,19 @@ class RvizVisualizationNode(TimestampedNode):
         self.environment_marker_topic = str(
             self.get_parameter("environment_marker_topic").value
         )
+        self.operation_mode = str(
+            self.get_parameter("operation_mode").value
+        ).strip().lower()
+        self.drone_ids = [
+            str(value) for value in self.get_parameter("drone_ids").value
+        ]
+        if not self.drone_ids:
+            raise RuntimeError("RViz drone_ids가 비어 있습니다.")
+        self.drone_marker_topic = str(
+            self.get_parameter("drone_marker_topic").value
+        )
+        self.drone_home_positions = {}
+        self.latest_drone_local_positions = {}
 
         qos = QoSProfile(depth=1)
         qos.reliability = ReliabilityPolicy.RELIABLE
@@ -115,6 +138,18 @@ class RvizVisualizationNode(TimestampedNode):
             self.environment_marker_topic,
             qos,
         )
+        self.drone_publisher = self.create_publisher(
+            MarkerArray,
+            self.drone_marker_topic,
+            qos,
+        )
+        for index, drone_id in enumerate(self.drone_ids, start=1):
+            self.create_subscription(
+                PointStamped,
+                f"/drone_{index:02d}/local_position_ned",
+                partial(self._drone_position_callback, drone_id),
+                10,
+            )
 
         self.scene_signature = None
         self.terrain_signature = None
@@ -142,11 +177,15 @@ class RvizVisualizationNode(TimestampedNode):
             "RViz 시각화 노드 시작: "
             f"scene={self.scene_marker_topic}, "
             f"terrain={self.terrain_marker_topic}, "
-            f"environment={self.environment_marker_topic}"
+            f"environment={self.environment_marker_topic}, "
+            f"drones={self.drone_marker_topic}, "
+            f"operation_mode={self.operation_mode}, "
+            f"drone_ids={self.drone_ids}"
         )
 
     def _refresh_visualization(self):
         self._refresh_scene_markers()
+        self._refresh_drone_markers()
         self._refresh_terrain_marker()
         self._refresh_environment_markers()
 
@@ -154,8 +193,10 @@ class RvizVisualizationNode(TimestampedNode):
         if not self.ground_truth_path.is_file():
             if self.scene_published:
                 self._clear_scene_markers()
+                self._clear_drone_markers()
                 self.scene_published = False
                 self.scene_signature = None
+                self.drone_home_positions = {}
 
             now = time.monotonic()
             if now - self.last_scene_wait_log_at >= 5.0:
@@ -175,6 +216,15 @@ class RvizVisualizationNode(TimestampedNode):
             payload = json.loads(
                 self.ground_truth_path.read_text(encoding="utf-8")
             )
+            payload_mode = str(
+                payload.get("operation_mode", "rescue_search")
+            ).strip().lower()
+            if payload_mode != self.operation_mode:
+                raise ValueError(
+                    "Ground Truth와 ROS operation_mode이 다릅니다: "
+                    f"ground_truth={payload_mode}, "
+                    f"launch={self.operation_mode}"
+                )
             marker_array = self._build_scene_marker_array(payload)
         except (
             OSError,
@@ -192,11 +242,19 @@ class RvizVisualizationNode(TimestampedNode):
         self.scene_signature = signature
         self.scene_published = True
 
-        victim = payload["victim"]["world_enu"]
+        victim = payload.get("victim")
+        victim_text = "NONE"
+        if isinstance(victim, dict) and "world_enu" in victim:
+            position = victim["world_enu"]
+            victim_text = (
+                f"({position[0]:.2f}, "
+                f"{position[1]:.2f}, {position[2]:.2f})"
+            )
         self.get_logger().info(
             "RViz Scene Marker 발행: "
-            f"Start=1, Victim=({victim[0]:.2f}, "
-            f"{victim[1]:.2f}, {victim[2]:.2f})"
+            f"operation_mode={self.operation_mode}, "
+            f"Start={len(self.drone_home_positions)}, "
+            f"Victim={victim_text}"
         )
 
     def _refresh_terrain_marker(self):
@@ -511,7 +569,7 @@ class RvizVisualizationNode(TimestampedNode):
         return marker, len(vertices), len(triangles)
 
     def _build_scene_marker_array(self, payload):
-        """Start 구역 하나와 사람 형태의 실제 조난자 Marker를 만든다."""
+        """현재 N대의 시작점과 실제 조난자 Marker를 만든다."""
         map_frame = str(
             payload.get(
                 "map_frame",
@@ -519,235 +577,359 @@ class RvizVisualizationNode(TimestampedNode):
             )
         )
         drone_starts = payload["drone_starts"]
-        victim = payload["victim"]
+        victim = payload.get("victim")
 
         if not isinstance(drone_starts, list) or not drone_starts:
             raise ValueError("drone_starts 목록이 비어 있습니다.")
 
+        start_by_id = {
+            str(item.get("drone_id", "")): item
+            for item in drone_starts
+            if isinstance(item, dict)
+        }
+        missing = [
+            drone_id for drone_id in self.drone_ids
+            if drone_id not in start_by_id
+        ]
+        if missing:
+            raise ValueError(
+                f"Ground Truth에 현재 함대 시작점이 없습니다: {missing}"
+            )
+
         markers = MarkerArray()
         stamp = self.get_clock().now().to_msg()
+        delete_all = Marker()
+        delete_all.header.frame_id = map_frame
+        delete_all.header.stamp = stamp
+        delete_all.action = Marker.DELETEALL
+        markers.markers.append(delete_all)
 
-        # quadrotor_01 좌표를 세 드론 Start 구역의 대표 중심으로 사용한다.
-        start_item = next(
-            (
-                item
-                for item in drone_starts
-                if str(item.get("drone_id", "")) == "quadrotor_01"
-            ),
-            drone_starts[0],
+        self.drone_home_positions = {}
+        palette = (
+            (1.00, 0.20, 0.20),
+            (0.20, 1.00, 0.25),
+            (0.20, 0.45, 1.00),
+            (1.00, 0.75, 0.10),
         )
-        start_position = self._read_position(start_item["world_enu"])
+        for index, drone_id in enumerate(self.drone_ids):
+            start_item = start_by_id[drone_id]
+            start_position = self._read_position(start_item["world_enu"])
+            self.drone_home_positions[drone_id] = start_position
+            red, green, blue = palette[index % len(palette)]
+            base_id = index * 10
 
-        start_area = self._base_marker(
-            map_frame,
-            stamp,
-            namespace="start_area",
-            marker_id=0,
-            marker_type=Marker.CYLINDER,
-        )
-        start_area.pose.position.x = start_position[0]
-        start_area.pose.position.y = start_position[1]
-        start_area.pose.position.z = start_position[2] + 0.12
-        start_area.scale.x = 18.0
-        start_area.scale.y = 18.0
-        start_area.scale.z = 0.24
-        start_area.color.r = 0.05
-        start_area.color.g = 0.65
-        start_area.color.b = 1.0
-        start_area.color.a = 0.35
-        markers.markers.append(start_area)
+            start_area = self._base_marker(
+                map_frame,
+                stamp,
+                namespace="drone_start_areas",
+                marker_id=base_id,
+                marker_type=Marker.CYLINDER,
+            )
+            start_area.pose.position.x = start_position[0]
+            start_area.pose.position.y = start_position[1]
+            start_area.pose.position.z = start_position[2] + 0.08
+            start_area.scale.x = 3.0
+            start_area.scale.y = 3.0
+            start_area.scale.z = 0.16
+            start_area.color.r = red
+            start_area.color.g = green
+            start_area.color.b = blue
+            start_area.color.a = 0.45
+            markers.markers.append(start_area)
 
-        start_label = self._base_marker(
-            map_frame,
-            stamp,
-            namespace="scene_labels",
-            marker_id=1,
-            marker_type=Marker.TEXT_VIEW_FACING,
-        )
-        start_label.pose.position.x = start_position[0]
-        start_label.pose.position.y = start_position[1]
-        start_label.pose.position.z = start_position[2] + 2.5
-        start_label.scale.z = 2.2
-        start_label.color.r = 1.0
-        start_label.color.g = 1.0
-        start_label.color.b = 1.0
-        start_label.color.a = 1.0
-        start_label.text = "Start"
-        markers.markers.append(start_label)
+            start_label = self._base_marker(
+                map_frame,
+                stamp,
+                namespace="drone_start_labels",
+                marker_id=base_id + 1,
+                marker_type=Marker.TEXT_VIEW_FACING,
+            )
+            start_label.pose.position.x = start_position[0]
+            start_label.pose.position.y = start_position[1]
+            start_label.pose.position.z = start_position[2] + 2.2
+            start_label.scale.z = 1.2
+            start_label.color.r = red
+            start_label.color.g = green
+            start_label.color.b = blue
+            start_label.color.a = 1.0
+            start_label.text = f"Start {index + 1:02d}"
+            markers.markers.append(start_label)
 
-        start_height_line = self._vertical_line_marker(
-            map_frame=map_frame,
-            stamp=stamp,
-            namespace="height_guides",
-            marker_id=2,
-            x=start_position[0],
-            y=start_position[1],
-            z_top=start_position[2],
-            red=0.05,
-            green=0.65,
-            blue=1.0,
-        )
-        markers.markers.append(start_height_line)
+            markers.markers.append(
+                self._vertical_line_marker(
+                    map_frame=map_frame,
+                    stamp=stamp,
+                    namespace="drone_start_height_guides",
+                    marker_id=base_id + 2,
+                    x=start_position[0],
+                    y=start_position[1],
+                    z_top=start_position[2],
+                    red=red,
+                    green=green,
+                    blue=blue,
+                )
+            )
 
-        victim_position = self._read_position(victim["world_enu"])
-        victim_x, victim_y, victim_z = victim_position
+        if victim is not None:
+            if not isinstance(victim, dict) or "world_enu" not in victim:
+                raise ValueError(f"victim 형식이 잘못됐습니다: {victim}")
+            victim_position = self._read_position(victim["world_enu"])
+            victim_x, victim_y, victim_z = victim_position
 
-        # 머리
-        head = self._base_marker(
-            map_frame,
-            stamp,
-            namespace="victim_human",
-            marker_id=100,
-            marker_type=Marker.SPHERE,
-        )
-        head.pose.position.x = victim_x
-        head.pose.position.y = victim_y
-        head.pose.position.z = victim_z + 1.75
-        head.scale.x = 0.70
-        head.scale.y = 0.70
-        head.scale.z = 0.70
-        head.color.r = 1.0
-        head.color.g = 0.28
-        head.color.b = 0.18
-        head.color.a = 1.0
-        markers.markers.append(head)
+            head = self._base_marker(
+                map_frame,
+                stamp,
+                namespace="victim_human",
+                marker_id=100,
+                marker_type=Marker.SPHERE,
+            )
+            head.pose.position.x = victim_x
+            head.pose.position.y = victim_y
+            head.pose.position.z = victim_z + 1.75
+            head.scale.x = 0.70
+            head.scale.y = 0.70
+            head.scale.z = 0.70
+            head.color.r = 1.0
+            head.color.g = 0.28
+            head.color.b = 0.18
+            head.color.a = 1.0
+            markers.markers.append(head)
 
-        # 몸통
-        torso = self._base_marker(
-            map_frame,
-            stamp,
-            namespace="victim_human",
-            marker_id=101,
-            marker_type=Marker.CYLINDER,
-        )
-        torso.pose.position.x = victim_x
-        torso.pose.position.y = victim_y
-        torso.pose.position.z = victim_z + 1.02
-        torso.scale.x = 0.85
-        torso.scale.y = 0.85
-        torso.scale.z = 1.35
-        torso.color.r = 1.0
-        torso.color.g = 0.06
-        torso.color.b = 0.06
-        torso.color.a = 1.0
-        markers.markers.append(torso)
+            torso = self._base_marker(
+                map_frame,
+                stamp,
+                namespace="victim_human",
+                marker_id=101,
+                marker_type=Marker.CYLINDER,
+            )
+            torso.pose.position.x = victim_x
+            torso.pose.position.y = victim_y
+            torso.pose.position.z = victim_z + 1.02
+            torso.scale.x = 0.85
+            torso.scale.y = 0.85
+            torso.scale.z = 1.35
+            torso.color.r = 1.0
+            torso.color.g = 0.06
+            torso.color.b = 0.06
+            torso.color.a = 1.0
+            markers.markers.append(torso)
 
-        # 팔과 다리
-        limbs = self._base_marker(
-            map_frame,
-            stamp,
-            namespace="victim_human",
-            marker_id=102,
-            marker_type=Marker.LINE_LIST,
-        )
-        limbs.scale.x = 0.24
-        limbs.color.r = 1.0
-        limbs.color.g = 0.06
-        limbs.color.b = 0.06
-        limbs.color.a = 1.0
+            limbs = self._base_marker(
+                map_frame,
+                stamp,
+                namespace="victim_human",
+                marker_id=102,
+                marker_type=Marker.LINE_LIST,
+            )
+            limbs.scale.x = 0.24
+            limbs.color.r = 1.0
+            limbs.color.g = 0.06
+            limbs.color.b = 0.06
+            limbs.color.a = 1.0
+            shoulder_z = victim_z + 1.35
+            hip_z = victim_z + 0.55
+            limbs.points = [
+                self._make_point(victim_x, victim_y, shoulder_z),
+                self._make_point(victim_x - 0.70, victim_y, victim_z + 0.85),
+                self._make_point(victim_x, victim_y, shoulder_z),
+                self._make_point(victim_x + 0.70, victim_y, victim_z + 0.85),
+                self._make_point(victim_x - 0.16, victim_y, hip_z),
+                self._make_point(victim_x - 0.35, victim_y, victim_z),
+                self._make_point(victim_x + 0.16, victim_y, hip_z),
+                self._make_point(victim_x + 0.35, victim_y, victim_z),
+            ]
+            markers.markers.append(limbs)
 
-        shoulder_z = victim_z + 1.35
-        hip_z = victim_z + 0.55
-        limbs.points = [
-            self._make_point(victim_x, victim_y, shoulder_z),
-            self._make_point(
-                victim_x - 0.70,
-                victim_y,
-                victim_z + 0.85,
-            ),
-            self._make_point(victim_x, victim_y, shoulder_z),
-            self._make_point(
-                victim_x + 0.70,
-                victim_y,
-                victim_z + 0.85,
-            ),
-            self._make_point(victim_x - 0.16, victim_y, hip_z),
-            self._make_point(victim_x - 0.35, victim_y, victim_z),
-            self._make_point(victim_x + 0.16, victim_y, hip_z),
-            self._make_point(victim_x + 0.35, victim_y, victim_z),
-        ]
-        markers.markers.append(limbs)
+            victim_label = self._base_marker(
+                map_frame,
+                stamp,
+                namespace="scene_labels",
+                marker_id=103,
+                marker_type=Marker.TEXT_VIEW_FACING,
+            )
+            victim_label.pose.position.x = victim_x
+            victim_label.pose.position.y = victim_y
+            victim_label.pose.position.z = victim_z + 9.5
+            victim_label.scale.z = 2.2
+            victim_label.color.r = 1.0
+            victim_label.color.g = 0.20
+            victim_label.color.b = 0.20
+            victim_label.color.a = 1.0
+            victim_label.text = "Victim"
+            markers.markers.append(victim_label)
 
-        victim_label = self._base_marker(
-            map_frame,
-            stamp,
-            namespace="scene_labels",
-            marker_id=103,
-            marker_type=Marker.TEXT_VIEW_FACING,
-        )
-        victim_label.pose.position.x = victim_x
-        victim_label.pose.position.y = victim_y
-        victim_label.pose.position.z = victim_z + 9.5
-        victim_label.scale.z = 2.2
-        victim_label.color.r = 1.0
-        victim_label.color.g = 0.20
-        victim_label.color.b = 0.20
-        victim_label.color.a = 1.0
-        victim_label.text = "Victim"
-        markers.markers.append(victim_label)
+            markers.markers.append(
+                self._vertical_line_marker(
+                    map_frame=map_frame,
+                    stamp=stamp,
+                    namespace="height_guides",
+                    marker_id=104,
+                    x=victim_x,
+                    y=victim_y,
+                    z_top=victim_z,
+                    red=1.0,
+                    green=0.10,
+                    blue=0.10,
+                )
+            )
 
-        victim_height_line = self._vertical_line_marker(
-            map_frame=map_frame,
-            stamp=stamp,
-            namespace="height_guides",
-            marker_id=104,
-            x=victim_x,
-            y=victim_y,
-            z_top=victim_z,
-            red=1.0,
-            green=0.10,
-            blue=0.10,
-        )
-        markers.markers.append(victim_height_line)
+            victim_beacon_line = self._base_marker(
+                map_frame,
+                stamp,
+                namespace="victim_beacon",
+                marker_id=105,
+                marker_type=Marker.LINE_LIST,
+            )
+            victim_beacon_line.scale.x = 0.28
+            victim_beacon_line.color.r = 1.0
+            victim_beacon_line.color.g = 0.05
+            victim_beacon_line.color.b = 0.05
+            victim_beacon_line.color.a = 1.0
+            victim_beacon_line.points = [
+                self._make_point(victim_x, victim_y, victim_z + 1.8),
+                self._make_point(victim_x, victim_y, victim_z + 8.0),
+            ]
+            markers.markers.append(victim_beacon_line)
 
-        # 나무와 산에 가려져도 조난자 위치를 놓치지 않도록,
-        # 실제 사람 위치에서 위로 올라가는 빨간 비콘을 추가한다.
-        victim_beacon_line = self._base_marker(
-            map_frame,
-            stamp,
-            namespace="victim_beacon",
-            marker_id=105,
-            marker_type=Marker.LINE_LIST,
-        )
-        victim_beacon_line.scale.x = 0.28
-        victim_beacon_line.color.r = 1.0
-        victim_beacon_line.color.g = 0.05
-        victim_beacon_line.color.b = 0.05
-        victim_beacon_line.color.a = 1.0
-        victim_beacon_line.points = [
-            self._make_point(
-                victim_x,
-                victim_y,
-                victim_z + 1.8,
-            ),
-            self._make_point(
-                victim_x,
-                victim_y,
-                victim_z + 8.0,
-            ),
-        ]
-        markers.markers.append(victim_beacon_line)
-
-        victim_beacon = self._base_marker(
-            map_frame,
-            stamp,
-            namespace="victim_beacon",
-            marker_id=106,
-            marker_type=Marker.SPHERE,
-        )
-        victim_beacon.pose.position.x = victim_x
-        victim_beacon.pose.position.y = victim_y
-        victim_beacon.pose.position.z = victim_z + 8.0
-        victim_beacon.scale.x = 1.6
-        victim_beacon.scale.y = 1.6
-        victim_beacon.scale.z = 1.6
-        victim_beacon.color.r = 1.0
-        victim_beacon.color.g = 0.08
-        victim_beacon.color.b = 0.05
-        victim_beacon.color.a = 1.0
-        markers.markers.append(victim_beacon)
+            victim_beacon = self._base_marker(
+                map_frame,
+                stamp,
+                namespace="victim_beacon",
+                marker_id=106,
+                marker_type=Marker.SPHERE,
+            )
+            victim_beacon.pose.position.x = victim_x
+            victim_beacon.pose.position.y = victim_y
+            victim_beacon.pose.position.z = victim_z + 8.0
+            victim_beacon.scale.x = 1.6
+            victim_beacon.scale.y = 1.6
+            victim_beacon.scale.z = 1.6
+            victim_beacon.color.r = 1.0
+            victim_beacon.color.g = 0.08
+            victim_beacon.color.b = 0.05
+            victim_beacon.color.a = 1.0
+            markers.markers.append(victim_beacon)
 
         return markers
+
+    def _drone_position_callback(self, drone_id, message):
+        self.latest_drone_local_positions[drone_id] = message
+
+    def _refresh_drone_markers(self):
+        """현재 함대 N대의 실시간 위치를 큰 드론 형태로 표시한다."""
+        if not self.drone_home_positions:
+            return
+
+        marker_array = MarkerArray()
+        map_frame = str(self.get_parameter("map_frame").value)
+        stamp = self.get_clock().now().to_msg()
+        delete_all = Marker()
+        delete_all.header.frame_id = map_frame
+        delete_all.header.stamp = stamp
+        delete_all.action = Marker.DELETEALL
+        marker_array.markers.append(delete_all)
+
+        palette = (
+            (1.00, 0.20, 0.20),
+            (0.20, 1.00, 0.25),
+            (0.20, 0.45, 1.00),
+            (1.00, 0.75, 0.10),
+        )
+        for index, drone_id in enumerate(self.drone_ids):
+            home = self.drone_home_positions.get(drone_id)
+            if home is None:
+                continue
+            local = self.latest_drone_local_positions.get(drone_id)
+            if local is None:
+                world_x, world_y, world_z = home
+            else:
+                world_x = home[0] + float(local.point.y)
+                world_y = home[1] + float(local.point.x)
+                world_z = home[2] - float(local.point.z)
+
+            red, green, blue = palette[index % len(palette)]
+            base_id = index * 20
+
+            body = self._base_marker(
+                map_frame,
+                stamp,
+                namespace="live_drones",
+                marker_id=base_id,
+                marker_type=Marker.CUBE,
+            )
+            body.pose.position.x = world_x
+            body.pose.position.y = world_y
+            body.pose.position.z = world_z
+            body.scale.x = 1.20
+            body.scale.y = 0.75
+            body.scale.z = 0.30
+            body.color.r = red
+            body.color.g = green
+            body.color.b = blue
+            body.color.a = 1.0
+            marker_array.markers.append(body)
+
+            arms = self._base_marker(
+                map_frame,
+                stamp,
+                namespace="live_drone_arms",
+                marker_id=base_id + 1,
+                marker_type=Marker.LINE_LIST,
+            )
+            arms.scale.x = 0.16
+            arms.color.r = red
+            arms.color.g = green
+            arms.color.b = blue
+            arms.color.a = 1.0
+            arms.points = [
+                self._make_point(world_x - 0.75, world_y - 0.75, world_z),
+                self._make_point(world_x + 0.75, world_y + 0.75, world_z),
+                self._make_point(world_x - 0.75, world_y + 0.75, world_z),
+                self._make_point(world_x + 0.75, world_y - 0.75, world_z),
+            ]
+            marker_array.markers.append(arms)
+
+            for rotor_index, (offset_x, offset_y) in enumerate(
+                ((-0.75, -0.75), (-0.75, 0.75), (0.75, -0.75), (0.75, 0.75))
+            ):
+                rotor = self._base_marker(
+                    map_frame,
+                    stamp,
+                    namespace="live_drone_rotors",
+                    marker_id=base_id + 2 + rotor_index,
+                    marker_type=Marker.CYLINDER,
+                )
+                rotor.pose.position.x = world_x + offset_x
+                rotor.pose.position.y = world_y + offset_y
+                rotor.pose.position.z = world_z + 0.05
+                rotor.scale.x = 0.48
+                rotor.scale.y = 0.48
+                rotor.scale.z = 0.08
+                rotor.color.r = 0.10
+                rotor.color.g = 0.10
+                rotor.color.b = 0.10
+                rotor.color.a = 1.0
+                marker_array.markers.append(rotor)
+
+            label = self._base_marker(
+                map_frame,
+                stamp,
+                namespace="live_drone_labels",
+                marker_id=base_id + 10,
+                marker_type=Marker.TEXT_VIEW_FACING,
+            )
+            label.pose.position.x = world_x
+            label.pose.position.y = world_y
+            label.pose.position.z = world_z + 1.8
+            label.scale.z = 1.0
+            label.color.r = red
+            label.color.g = green
+            label.color.b = blue
+            label.color.a = 1.0
+            label.text = drone_id
+            marker_array.markers.append(label)
+
+        self.drone_publisher.publish(marker_array)
 
     def _vertical_line_marker(
         self,
@@ -832,6 +1014,17 @@ class RvizVisualizationNode(TimestampedNode):
         marker.action = Marker.DELETEALL
         marker_array.markers.append(marker)
         self.scene_publisher.publish(marker_array)
+
+    def _clear_drone_markers(self):
+        marker_array = MarkerArray()
+        marker = Marker()
+        marker.header.frame_id = str(
+            self.get_parameter("map_frame").value
+        )
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.action = Marker.DELETEALL
+        marker_array.markers.append(marker)
+        self.drone_publisher.publish(marker_array)
 
     def _clear_environment_markers(self):
         marker_array = MarkerArray()

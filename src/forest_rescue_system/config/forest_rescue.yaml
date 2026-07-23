@@ -7,6 +7,11 @@ rviz_visualization_node:
     terrain_marker_topic: /forest_rescue/terrain_mesh
     environment_marker_topic: /forest_rescue/environment_meshes
     map_frame: map
+    # 실제 값은 launch의 operation_mode가 덮어쓴다.
+    operation_mode: rescue_search
+    # 실제 목록은 launch의 drone_count(1~4)가 덮어쓴다.
+    drone_ids: [quadrotor_01, quadrotor_02, quadrotor_03]
+    drone_marker_topic: /forest_rescue/drone_markers
     refresh_period_sec: 0.5
     # 초록색 반투명 산 표면
     terrain_color_rgb: [0.10, 0.55, 0.12]
@@ -25,14 +30,20 @@ rviz_visualization_node:
 
 mission_manager_node:
   ros__parameters:
+    operation_mode: rescue_search
+    # 실제 목록은 launch의 drone_count(1~4)가 덮어쓴다.
     drone_ids: [quadrotor_01, quadrotor_02, quadrotor_03]
+    search_plan_path: ~/b3_cobot3_ws/isaac_sim/generated_search_plan.json
+    # Isaac Sim과 ROS launch의 drone_count가 다르면 수색 시작을 거부한다.
+    require_search_plan_match: true
+    fallback_search_area_bounds_xy: [-46.7, 46.7, -46.7, 46.7]
     required_detection_frames: 3
     minimum_detection_confidence: 0.40
     # 미션 시작 지점에 있는 구조자를 조난자로 확정하지 않는 유예시간
     detection_start_delay_sec: 5.0
     require_map_position_before_detection: true
     start_exclusion_radius_m: 15.0
-    start_exclusion_centers_xy: [-34.0, 40.0, -29.0, 40.0, -39.0, 40.0]
+    start_exclusion_centers_xy: [-34.0, 40.0, -29.0, 40.0, -39.0, 40.0, -34.0, 45.0]
     # 동일 RGB stamp의 map 위치 3개가 이 반경 안에서 일치해야 확정한다.
     detection_position_consistency_radius_m: 4.0
     detection_position_timeout_sec: 1.0
@@ -40,9 +51,19 @@ mission_manager_node:
     maximum_missed_detections: 2
     # 조난자 바로 위가 아니라 이 높이만큼 위의 안전 지점으로 접근한다.
     victim_approach_height_m: 7.0
-    # [x_min, x_max, y_min, y_max] 순서로 01/02/03 담당 구역
+    # generated_search_plan.json을 우선 사용하며, 아래 값은 V1 호환용이다.
     search_zone_bounds_xy: [-46.7, 46.7, 13.55, 46.7, -46.7, 46.7, -13.55, 13.55, -46.7, 46.7, -46.7, -13.55]
     auto_takeoff_on_connect: true
+
+mapping_manager_node:
+  ros__parameters:
+    operation_mode: mapping_3d
+    # 실제 목록은 launch의 drone_count(1~4)가 덮어쓴다.
+    drone_ids: [quadrotor_01, quadrotor_02, quadrotor_03]
+    # 현재 골격에서도 PX4 연결 후 초기 이륙·Hover까지 검증한다.
+    auto_takeoff_on_connect: true
+    ground_truth_path: ~/b3_cobot3_ws/isaac_sim/generated_ground_truth.json
+    require_simulation_mode_match: true
 
 # ---------------------------------------------------------------------------
 # Drone 01
@@ -102,7 +123,10 @@ sensor_tf_01:
     camera_frame: quadrotor_01/camera_optical_frame
     lidar_frame: quadrotor_01/base_scan
     camera_translation: [0.0, 0.0, 0.0]
-    camera_quaternion_xyzw: [-0.612372, 0.612372, -0.353553, 0.353553]
+    # Isaac sim_config.py의 CAMERA_DOWN_TILT_DEG와 같은 값이다.
+    camera_down_tilt_deg: 40.0
+    derive_camera_quaternion_from_tilt: true
+    camera_quaternion_xyzw: [-0.640856, 0.640856, -0.298836, 0.298836]
     lidar_translation: [0.0, 0.0, 0.15]
     lidar_quaternion_xyzw: [0.0, 0.0, 0.0, 1.0]
 
@@ -291,7 +315,10 @@ sensor_tf_02:
     camera_frame: quadrotor_02/camera_optical_frame
     lidar_frame: quadrotor_02/base_scan
     camera_translation: [0.0, 0.0, 0.0]
-    camera_quaternion_xyzw: [-0.612372, 0.612372, -0.353553, 0.353553]
+    # Isaac sim_config.py의 CAMERA_DOWN_TILT_DEG와 같은 값이다.
+    camera_down_tilt_deg: 40.0
+    derive_camera_quaternion_from_tilt: true
+    camera_quaternion_xyzw: [-0.640856, 0.640856, -0.298836, 0.298836]
     lidar_translation: [0.0, 0.0, 0.15]
     lidar_quaternion_xyzw: [0.0, 0.0, 0.0, 1.0]
 
@@ -478,7 +505,10 @@ sensor_tf_03:
     camera_frame: quadrotor_03/camera_optical_frame
     lidar_frame: quadrotor_03/base_scan
     camera_translation: [0.0, 0.0, 0.0]
-    camera_quaternion_xyzw: [-0.612372, 0.612372, -0.353553, 0.353553]
+    # Isaac sim_config.py의 CAMERA_DOWN_TILT_DEG와 같은 값이다.
+    camera_down_tilt_deg: 40.0
+    derive_camera_quaternion_from_tilt: true
+    camera_quaternion_xyzw: [-0.640856, 0.640856, -0.298836, 0.298836]
     lidar_translation: [0.0, 0.0, 0.15]
     lidar_quaternion_xyzw: [0.0, 0.0, 0.0, 1.0]
 
@@ -540,6 +570,196 @@ drone_controller_03:
     path_topic: /drone_03/search_path
     base_frame: quadrotor_03/base_link
     home_world_enu: [-39.0, 40.0, 31.0]
+    search_plan_path: ~/b3_cobot3_ws/isaac_sim/generated_search_plan.json
+    takeoff_altitude_m: 6.0
+    altitude_acceptance_radius_m: 0.1
+    takeoff_tolerance_m: 0.2
+    search_yaw_deg: 0.0
+    waypoint_hold_seconds: 0.2
+    waypoint_acceptance_radius_m: 0.8
+    waypoint_altitude_tolerance_m: 0.8
+    waypoint_timeout_sec: 75.0
+    return_timeout_sec: 120.0
+    terrain_mesh_path: ~/b3_cobot3_ws/isaac_sim/generated_terrain_mesh.npz
+    environment_mesh_path: ~/b3_cobot3_ws/isaac_sim/generated_environment_meshes.npz
+    return_path_clearance_m: 8.0
+    return_path_corridor_radius_m: 2.0
+    return_obstacle_clearance_m: 3.0
+    landing_approach_altitude_m: 3.0
+    landing_approach_timeout_sec: 45.0
+    landing_descent_start_timeout_sec: 8.0
+    landing_min_descent_progress_m: 0.30
+    landing_fallback_to_px4_land: true
+    landing_xy_tolerance_m: 0.35
+    landing_altitude_tolerance_m: 0.30
+    landing_stopped_speed_m_s: 0.40
+    landing_settle_sec: 2.0
+    landing_timeout_sec: 75.0
+    post_touchdown_settle_sec: 1.0
+    disarm_timeout_sec: 8.0
+    landing_command_retries: 2
+    search_horizontal_speed_m_s: 1.6
+    search_horizontal_acceleration_m_s2: 1.5
+    search_horizontal_position_gain: 0.8
+    search_vertical_speed_up_m_s: 1.5
+    search_vertical_speed_down_m_s: 1.5
+    avoidance_climb_step_m: 1.5
+    avoidance_max_climb_m: 8.0
+    avoidance_settle_sec: 1.0
+    avoidance_climb_timeout_sec: 15.0
+    avoidance_altitude_tolerance_m: 0.5
+    avoidance_climb_step_retries: 2
+    avoidance_replan_attempts: 4
+    avoidance_retry_hover_sec: 2.0
+    avoidance_lateral_offset_m: 5.0
+    avoidance_forward_offset_m: 2.0
+    avoidance_side_clearance_m: 5.0
+    avoidance_xy_timeout_sec: 15.0
+    avoidance_brake_timeout_sec: 8.0
+    avoidance_stopped_speed_m_s: 0.60
+    avoidance_direction_check_sec: 0.5
+    avoidance_front_clearance_m: 2.8
+    avoidance_probe_distance_m: 3.0
+    avoidance_direction_attempts: 3
+    avoidance_vector_max_age_sec: 1.2
+    local_detour_max_age_sec: 1.2
+    local_detour_hard_stop_distance_m: 0.9
+    avoidance_keep_yaw_during_detour: true
+    avoidance_commit_sec: 0.70
+    avoidance_block_confirm_sec: 0.35
+    direction_yaw_enabled: true
+    direction_yaw_min_distance_m: 0.50
+    direction_yaw_tolerance_deg: 6.0
+    direction_yaw_timeout_sec: 8.0
+    direction_yaw_stable_samples: 2
+    direction_yaw_settle_sec: 0.20
+    victim_approach_timeout_sec: 120.0
+    safe_return_down_m: -40.0
+    search_waypoints: "0,0,-6"
+    map_frame: map
+
+# ---------------------------------------------------------------------------
+# Drone 04
+# ---------------------------------------------------------------------------
+human_detector_04:
+  ros__parameters:
+    drone_id: quadrotor_04
+    image_topic: /quadrotor_04/Camera/rgb
+    detection_topic: /drone_04/victim/detection
+    annotated_image_topic: /drone_04/victim/annotated_image
+    mission_state_topic: /mission/state
+    finder_drone_topic: /mission/finder_drone
+    detector_mode: yolo
+    model_path: ~/b3_cobot3_ws/models/yolo11s.pt
+    person_class_id: 0
+    confidence_threshold: 0.40
+    inference_period_sec: 0.05
+    inference_image_size: 960
+    save_confirmed_image: true
+    detected_images_dir: ~/b3_cobot3_ws/detected_images
+    saved_image_jpeg_quality: 95
+    detection_start_delay_sec: 5.0
+    detect_only_while_searching: true
+    mock_delay_sec: 8.0
+    mock_confidence: 0.95
+    mock_x_min_ratio: 0.46
+    mock_y_min_ratio: 0.38
+    mock_x_max_ratio: 0.54
+    mock_y_max_ratio: 0.66
+
+victim_localizer_04:
+  ros__parameters:
+    drone_id: quadrotor_04
+    depth_topic: /quadrotor_04/Camera/depth
+    camera_info_topic: /quadrotor_04/Camera/camera_info
+    detection_topic: /drone_04/victim/detection
+    camera_position_topic: /drone_04/victim/position_camera
+    map_position_topic: /drone_04/victim/position_map
+    mission_state_topic: /mission/state
+    camera_frame_override: quadrotor_04/camera_optical_frame
+    map_frame: map
+    roi_center_ratio: 0.50
+    minimum_depth_m: 0.20
+    maximum_depth_m: 30.0
+    depth_buffer_duration_sec: 1.0
+    depth_buffer_max_frames: 40
+    max_depth_detection_time_delta_sec: 0.25
+    tf_retry_timeout_sec: 1.0
+    tf_retry_period_sec: 0.02
+    tf_retry_max_points: 40
+    log_period_sec: 10.0
+
+sensor_tf_04:
+  ros__parameters:
+    base_frame: quadrotor_04/base_link
+    camera_frame: quadrotor_04/camera_optical_frame
+    lidar_frame: quadrotor_04/base_scan
+    camera_translation: [0.0, 0.0, 0.0]
+    # Isaac sim_config.py의 CAMERA_DOWN_TILT_DEG와 같은 값이다.
+    camera_down_tilt_deg: 40.0
+    derive_camera_quaternion_from_tilt: true
+    camera_quaternion_xyzw: [-0.640856, 0.640856, -0.298836, 0.298836]
+    lidar_translation: [0.0, 0.0, 0.15]
+    lidar_quaternion_xyzw: [0.0, 0.0, 0.0, 1.0]
+
+obstacle_monitor_04:
+  ros__parameters:
+    drone_id: quadrotor_04
+    point_cloud_topic: /quadrotor_04/point_cloud
+    blocked_topic: /drone_04/obstacle/blocked
+    distance_topic: /drone_04/obstacle/min_distance
+    clearances_topic: /drone_04/obstacle/clearances
+    avoidance_vector_topic: /drone_04/obstacle/avoidance_vector
+    local_detour_topic: /drone_04/obstacle/local_detour_body
+    movement_direction_topic: /drone_04/navigation/direction_body_rad
+    mission_state_topic: /mission/state
+    safety_distance_m: 3.2
+    emergency_distance_m: 0.9
+    front_sector_half_angle_deg: 35.0
+    side_sector_offset_deg: 70.0
+    side_sector_half_angle_deg: 30.0
+    minimum_obstacle_points: 3
+    blocked_confirm_scans: 3
+    clear_confirm_scans: 3
+    processing_period_sec: 0.10
+    minimum_height_m: -1.2
+    maximum_height_m: 1.8
+    active_mission_states: [INITIAL_TAKEOFF, INITIAL_HOVER, READY, SEARCHING, VICTIM_DETECTED, RETURNING_NO_VICTIM, COMPLETE, MISSION_FAILED]
+    candidate_offsets_deg: [0.0, -15.0, 15.0, -30.0, 30.0, -45.0, 45.0, -60.0, 60.0, -75.0, 75.0]
+    candidate_sector_half_angle_deg: 12.0
+    candidate_min_clearance_m: 2.8
+    candidate_score_distance_cap_m: 15.0
+    candidate_turn_penalty: 1.2
+    candidate_forward_progress_weight: 3.0
+    candidate_side_switch_penalty: 4.0
+    candidate_side_hold_sec: 2.0
+    candidate_max_offset_deg: 80.0
+    local_grid_size_m: 24.0
+    local_grid_resolution_m: 0.25
+    obstacle_inflation_radius_m: 0.85
+    local_planner_goal_distance_m: 6.0
+    local_planner_lookahead_m: 2.25
+    local_planner_period_sec: 0.40
+    planner_start_release_radius_m: 0.50
+    local_planner_min_forward_progress_m: -0.10
+    warning_period_sec: 5.0
+
+drone_controller_04:
+  ros__parameters:
+    drone_id: quadrotor_04
+    system_address: udpin://0.0.0.0:14543
+    mavsdk_server_port: 50054
+    command_topic: /drone_04/command
+    status_topic: /drone_04/status
+    position_topic: /drone_04/local_position_ned
+    obstacle_topic: /drone_04/obstacle/blocked
+    obstacle_clearances_topic: /drone_04/obstacle/clearances
+    avoidance_vector_topic: /drone_04/obstacle/avoidance_vector
+    local_detour_topic: /drone_04/obstacle/local_detour_body
+    movement_direction_topic: /drone_04/navigation/direction_body_rad
+    path_topic: /drone_04/search_path
+    base_frame: quadrotor_04/base_link
+    home_world_enu: [-34.0, 45.0, 31.0]
     search_plan_path: ~/b3_cobot3_ws/isaac_sim/generated_search_plan.json
     takeoff_altitude_m: 6.0
     altitude_acceptance_radius_m: 0.1

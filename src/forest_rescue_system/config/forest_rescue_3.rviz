@@ -8,11 +8,9 @@ Panels:
     - /Drone 01 Search Path1
     - /Drone 02 Search Path1
     - /Drone 03 Search Path1
-    - /Drone 04 Search Path1
     - /Drone 01 Detection1
     - /Drone 02 Detection1
     - /Drone 03 Detection1
-    - /Drone 04 Detection1
     Splitter Ratio: 0.5
   Tree Height: 161
 - Class: rviz_common/Selection
@@ -67,12 +65,6 @@ Visualization Manager:
         Value: false
       quadrotor_03/camera_optical_frame:
         Value: false
-      quadrotor_04/base_link:
-        Value: true
-      quadrotor_04/base_scan:
-        Value: false
-      quadrotor_04/camera_optical_frame:
-        Value: false
     Marker Scale: 4
     Name: Drone TF
     Show Arrows: true
@@ -89,9 +81,6 @@ Visualization Manager:
         quadrotor_03/base_link:
           quadrotor_03/base_scan: {}
           quadrotor_03/camera_optical_frame: {}
-        quadrotor_04/base_link:
-          quadrotor_04/base_scan: {}
-          quadrotor_04/camera_optical_frame: {}
     Update Interval: 0
     Value: true
   - Alpha: 1
@@ -177,34 +166,6 @@ Visualization Manager:
       History Policy: Keep Last
       Reliability Policy: Reliable
       Value: /drone_03/search_path
-    Value: true
-  - Alpha: 1
-    Buffer Length: 1
-    Class: rviz_default_plugins/Path
-    Color: 255; 200; 40
-    Enabled: true
-    Head Diameter: 0.30000001192092896
-    Head Length: 0.20000000298023224
-    Length: 0.30000001192092896
-    Line Style: Lines
-    Line Width: 0.07999999821186066
-    Name: Drone 04 Search Path
-    Offset:
-      X: 0
-      Y: 0
-      Z: 0
-    Pose Color: 255; 85; 255
-    Pose Style: None
-    Radius: 0.029999999329447746
-    Shaft Diameter: 0.10000000149011612
-    Shaft Length: 0.10000000149011612
-    Topic:
-      Depth: 5
-      Durability Policy: Transient Local
-      Filter size: 10
-      History Policy: Keep Last
-      Reliability Policy: Reliable
-      Value: /drone_04/search_path
     Value: true
   - Class: rviz_default_plugins/MarkerArray
     Enabled: true
@@ -319,40 +280,6 @@ Visualization Manager:
     Use Fixed Frame: true
     Use rainbow: true
     Value: false
-  - Alpha: 1
-    Autocompute Intensity Bounds: true
-    Autocompute Value Bounds:
-      Max Value: -9999
-      Min Value: 9999
-      Value: true
-    Axis: Z
-    Channel Name: intensity
-    Class: rviz_default_plugins/PointCloud2
-    Color: 255; 255; 255
-    Color Transformer: AxisColor
-    Decay Time: 0.5
-    Enabled: false
-    Invert Rainbow: false
-    Max Color: 255; 255; 255
-    Max Intensity: 4096
-    Min Color: 0; 0; 0
-    Min Intensity: 0
-    Name: Drone 04 LiDAR
-    Position Transformer: XYZ
-    Selectable: true
-    Size (Pixels): 2
-    Size (m): 0.009999999776482582
-    Style: Points
-    Topic:
-      Depth: 5
-      Durability Policy: Volatile
-      Filter size: 10
-      History Policy: Keep Last
-      Reliability Policy: Best Effort
-      Value: /quadrotor_04/point_cloud
-    Use Fixed Frame: true
-    Use rainbow: true
-    Value: false
   - Class: rviz_default_plugins/Image
     Enabled: true
     Max Value: 1
@@ -394,20 +321,6 @@ Visualization Manager:
       History Policy: Keep Last
       Reliability Policy: Best Effort
       Value: /drone_03/victim/annotated_image
-    Value: true
-  - Class: rviz_default_plugins/Image
-    Enabled: true
-    Max Value: 1
-    Median window: 5
-    Min Value: 0
-    Name: Drone 04 Detection
-    Normalize Range: true
-    Topic:
-      Depth: 5
-      Durability Policy: Volatile
-      History Policy: Keep Last
-      Reliability Policy: Best Effort
-      Value: /drone_04/victim/annotated_image
     Value: true
   - Class: rviz_default_plugins/MarkerArray
     Enabled: true
@@ -514,6 +427,4 @@ Window Geometry:
   Drone 02 Detection:
     collapsed: false
   Drone 03 Detection:
-    collapsed: false
-  Drone 04 Detection:
     collapsed: false

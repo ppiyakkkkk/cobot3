@@ -164,7 +164,7 @@ class DroneControllerNode(TimestampedNode):
             self.get_parameter("safe_return_down_m").value
         )
         self.search_waypoints = []
-        self._load_search_plan()
+        self.search_plan_loaded = self._load_search_plan(log_failure=True)
         self.return_terrain_xy = None
         self.return_terrain_z = None
         self.return_obstacle_xy = None
@@ -278,53 +278,73 @@ class DroneControllerNode(TimestampedNode):
             f"server_port={server_port}, waypoints={len(self.search_waypoints)}"
         )
 
-    def _load_search_plan(self):
+    def _load_search_plan(self, log_failure=True):
+        """현재 드론의 동적 수색 계획과 홈 좌표를 JSON에서 다시 읽는다."""
         plan_path = Path(
             str(self.get_parameter("search_plan_path").value)
         ).expanduser()
         if plan_path.is_file():
             try:
                 plan = json.loads(plan_path.read_text(encoding="utf-8"))
-                drone_plan = plan["drones"][self.drone_id]
+                drone_plans = plan["drones"]
+                drone_plan = drone_plans[self.drone_id]
+
+                declared_count = int(
+                    plan.get("drone_count", len(drone_plans))
+                )
+                declared_ids = [
+                    str(value)
+                    for value in plan.get("drone_ids", drone_plans.keys())
+                ]
+                if declared_count != len(drone_plans):
+                    raise ValueError(
+                        "drone_count와 drones 항목 수가 다릅니다: "
+                        f"count={declared_count}, entries={len(drone_plans)}"
+                    )
+                if self.drone_id not in declared_ids:
+                    raise KeyError(
+                        f"drone_ids에 {self.drone_id}가 없습니다"
+                    )
+
                 self.home_world_enu = [
                     float(value)
                     for value in drone_plan["home_world_enu"]
                 ]
-                # format_version 2 계획과의 호환용이다. 새 계획(v3)은 지도
+                if len(self.home_world_enu) != 3:
+                    raise ValueError(
+                        f"home_world_enu 형식 오류: {self.home_world_enu}"
+                    )
+
+                # format_version 2 계획과의 호환용이다. 새 계획은 지도
                 # 전체 최고점 기반 safe_return_down_m을 저장하지 않는다.
                 if "safe_return_down_m" in drone_plan:
                     self.safe_return_down_m = float(
                         drone_plan["safe_return_down_m"]
                     )
-                if "return_path_clearance_m" in plan:
-                    self.return_path_clearance_m = float(
-                        plan["return_path_clearance_m"]
+
+                self.return_path_clearance_m = float(
+                    plan.get(
+                        "return_path_clearance_m",
+                        self.get_parameter("return_path_clearance_m").value,
                     )
-                else:
-                    self.return_path_clearance_m = float(
-                        self.get_parameter("return_path_clearance_m").value
-                    )
-                if "return_path_corridor_radius_m" in plan:
-                    self.return_path_corridor_radius_m = float(
-                        plan["return_path_corridor_radius_m"]
-                    )
-                else:
-                    self.return_path_corridor_radius_m = float(
+                )
+                self.return_path_corridor_radius_m = float(
+                    plan.get(
+                        "return_path_corridor_radius_m",
                         self.get_parameter(
                             "return_path_corridor_radius_m"
-                        ).value
+                        ).value,
                     )
-                if "return_obstacle_clearance_m" in plan:
-                    self.return_obstacle_clearance_m = float(
-                        plan["return_obstacle_clearance_m"]
-                    )
-                else:
-                    self.return_obstacle_clearance_m = float(
+                )
+                self.return_obstacle_clearance_m = float(
+                    plan.get(
+                        "return_obstacle_clearance_m",
                         self.get_parameter(
                             "return_obstacle_clearance_m"
-                        ).value
+                        ).value,
                     )
-                self.search_waypoints = [
+                )
+                waypoints = [
                     (
                         float(item["north_m"]),
                         float(item["east_m"]),
@@ -332,15 +352,39 @@ class DroneControllerNode(TimestampedNode):
                     )
                     for item in drone_plan["waypoints"]
                 ]
-                return
-            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-                self.get_logger().warning(
-                    f"수색 계획 파일 파싱 실패, YAML 경로 사용: {error}"
+                if not waypoints:
+                    raise ValueError(f"{self.drone_id} waypoints가 비어 있습니다")
+                self.search_waypoints = waypoints
+                self.search_plan_loaded = True
+                self.get_logger().info(
+                    f"동적 수색 계획 로드: {self.drone_id}, "
+                    f"fleet={declared_count}, waypoints={len(waypoints)}, "
+                    f"home={self.home_world_enu}"
                 )
+                return True
+            except (
+                KeyError,
+                TypeError,
+                ValueError,
+                json.JSONDecodeError,
+            ) as error:
+                if log_failure:
+                    self.get_logger().warning(
+                        "수색 계획 파일 파싱 실패: "
+                        f"{plan_path}: {error}"
+                    )
+        elif log_failure:
+            self.get_logger().warning(
+                f"수색 계획 파일이 아직 없습니다: {plan_path}"
+            )
 
+        # 초기 TF와 안전 대기를 위해 YAML의 한 점 경로는 유지하지만,
+        # 실제 START_SEARCH는 유효한 동적 JSON이 없으면 시작하지 않는다.
         self.search_waypoints = self._parse_waypoints(
             str(self.get_parameter("search_waypoints").value)
         )
+        self.search_plan_loaded = False
+        return False
 
     def _load_return_terrain(self):
         """Isaac Sim이 내보낸 Terrain 표면을 복귀 경로 계산용으로 읽는다."""
@@ -531,7 +575,7 @@ class DroneControllerNode(TimestampedNode):
         asyncio.create_task(self._relative_altitude_loop())
 
     async def _configure_telemetry_rates(self):
-        """3대 동시 운용 시 MAVSDK callback queue가 밀리지 않게 제한한다."""
+        """다중 드론 운용 시 MAVSDK callback queue가 밀리지 않게 제한한다."""
         rate_setters = [
             ("position_velocity_ned", 10.0),
             ("attitude_euler", 5.0),
@@ -739,6 +783,18 @@ class DroneControllerNode(TimestampedNode):
         if self.search_task and not self.search_task.done():
             self.get_logger().warning("이미 수색 경로를 실행 중입니다.")
             return
+
+        # ROS 노드가 Isaac Sim의 JSON 생성보다 먼저 시작될 수 있으므로
+        # 임무 시작 명령을 받을 때 최신 계획을 반드시 다시 읽는다.
+        if not self._load_search_plan(log_failure=True):
+            self.get_logger().error(
+                "동적 수색 계획이 없어 START_SEARCH를 거부합니다. "
+                "Isaac Sim과 ROS launch의 drone_count가 같은지 확인하세요."
+            )
+            self._publish_status("ERROR_SEARCH_PLAN")
+            return
+
+        self._publish_search_path()
         self.stop_search_event.clear()
         self.search_task = asyncio.create_task(self._search_path())
 

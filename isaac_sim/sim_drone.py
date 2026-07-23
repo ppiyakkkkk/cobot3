@@ -171,7 +171,7 @@ class NamespacedLidar(Lidar):
 
 
 class DroneManager:
-    """세 대의 Iris 생성과 기체 카메라 설정을 담당한다."""
+    """설정된 N대의 Iris 생성과 기체 카메라 설정을 담당한다."""
 
     def __init__(self, pegasus_interface):
         self.pg = pegasus_interface
@@ -179,7 +179,7 @@ class DroneManager:
         self.drone = None
 
     def spawn_iris(self):
-        """시작 지점 주변에 카메라가 장착된 Iris 드론 3대를 생성한다."""
+        """시작 지점 주변에 카메라가 장착된 Iris 드론 N대를 생성한다."""
         self.drones = []
 
         for prim_path, vehicle_id, position in DRONE_CONFIGS:
@@ -217,7 +217,7 @@ class DroneManager:
                 )
             ]
 
-            # 세 드론에 LiDAR를 각각 하나씩 장착하고 토픽을 분리한다.
+            # 각 드론에 LiDAR를 하나씩 장착하고 토픽을 분리한다.
             multirotor_config.graphical_sensors = [
                 NamespacedLidar(
                     "lidar",
@@ -282,7 +282,7 @@ class DroneManager:
         translate_op.Set(zero)
 
     def configure_drone_cameras(self):
-        """세 카메라를 기체 전방에서 지정 각도만큼 아래로 향하게 한다."""
+        """모든 카메라를 기체 전방에서 지정 각도만큼 아래로 향하게 한다."""
         stage = omni.usd.get_context().get_stage()
 
         for camera_path in CAMERA_PRIM_PATHS:

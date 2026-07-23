@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 
-"""세 드론의 수색·탐지·복귀 상태를 중앙에서 관리한다."""
+"""설정된 N대 드론의 수색·탐지·복귀 상태를 중앙에서 관리한다."""
 
 from functools import partial
+import json
 import math
+from pathlib import Path
 import time
 
 from geometry_msgs.msg import PointStamped
@@ -24,6 +26,16 @@ class MissionManagerNode(TimestampedNode):
         self.declare_parameter(
             "drone_ids",
             ["quadrotor_01", "quadrotor_02", "quadrotor_03"],
+        )
+        self.declare_parameter("operation_mode", "rescue_search")
+        self.declare_parameter(
+            "search_plan_path",
+            "~/b3_cobot3_ws/isaac_sim/generated_search_plan.json",
+        )
+        self.declare_parameter("require_search_plan_match", True)
+        self.declare_parameter(
+            "fallback_search_area_bounds_xy",
+            [-46.7, 46.7, -46.7, 46.7],
         )
         self.declare_parameter("required_detection_frames", 3)
         self.declare_parameter("minimum_detection_confidence", 0.40)
@@ -51,9 +63,23 @@ class MissionManagerNode(TimestampedNode):
         )
         self.declare_parameter("auto_takeoff_on_connect", True)
 
+        self.operation_mode = str(
+            self.get_parameter("operation_mode").value
+        ).strip().lower()
+        if self.operation_mode != "rescue_search":
+            raise RuntimeError(
+                "mission_manager는 operation_mode=rescue_search에서만 "
+                f"실행할 수 있습니다: {self.operation_mode!r}"
+            )
+
         self.drone_ids = [
             str(value) for value in self.get_parameter("drone_ids").value
         ]
+        if not self.drone_ids:
+            raise RuntimeError("drone_ids가 비어 있습니다.")
+        self.search_zone_bounds = {}
+        self.start_exclusion_centers = []
+        self._load_search_plan_metadata(log_result=True)
         self.command_publishers = {}
         self.drone_status = {drone_id: "UNKNOWN" for drone_id in self.drone_ids}
         self.detection_counts = {drone_id: 0 for drone_id in self.drone_ids}
@@ -115,6 +141,11 @@ class MissionManagerNode(TimestampedNode):
             "/mission/state",
             10,
         )
+        self.mode_publisher = self.create_publisher(
+            String,
+            "/mission/mode",
+            10,
+        )
         self.finder_publisher = self.create_publisher(
             String,
             "/mission/finder_drone",
@@ -137,12 +168,36 @@ class MissionManagerNode(TimestampedNode):
         self.finder_hovering = False
         self.camera_position_received = False
         self.map_position_received = False
+        self._publish_mode()
         self._publish_state("IDLE")
+        self.republish_timer = self.create_timer(
+            1.0,
+            self._republish_mode_and_state,
+        )
+        self.get_logger().info(
+            "구조 수색 모드 시작: "
+            f"operation_mode={self.operation_mode}, drones={self.drone_ids}"
+        )
 
     def _start_mission_callback(self, _request, response):
         if self.state != "READY":
             response.success = False
             response.message = f"READY 상태에서만 시작할 수 있습니다: {self.state}"
+            return response
+
+        # 시뮬레이션 재실행으로 수색계획이 갱신됐을 수 있으므로 다시 읽는다.
+        plan_ready = self._load_search_plan_metadata(log_result=True)
+        if (
+            bool(self.get_parameter("require_search_plan_match").value)
+            and not plan_ready
+        ):
+            response.success = False
+            response.message = (
+                "현재 operation_mode와 drone_count에 일치하는 "
+                "generated_search_plan.json이 없습니다. Isaac Sim을 같은 "
+                "모드와 드론 수로 먼저 실행하세요."
+            )
+            self.get_logger().error(response.message)
             return response
 
         self._reset_detection_state()
@@ -151,7 +206,9 @@ class MissionManagerNode(TimestampedNode):
         self._publish_state("SEARCHING")
         self._send_all("START_SEARCH")
         response.success = True
-        response.message = "드론 3대의 분할 구역 수색을 시작했습니다."
+        response.message = (
+            f"드론 {len(self.drone_ids)}대의 분할 구역 수색을 시작했습니다."
+        )
         return response
 
     def _land_callback(self, _request, response):
@@ -218,7 +275,8 @@ class MissionManagerNode(TimestampedNode):
         ):
             self._publish_state("READY")
             self.get_logger().info(
-                "드론 3대 초기 이륙 완료: /mission/start 대기"
+                f"드론 {len(self.drone_ids)}대 초기 이륙 완료: "
+                "/mission/start 대기"
             )
             return
 
@@ -583,13 +641,121 @@ class MissionManagerNode(TimestampedNode):
                     "나머지 드론은 홈 착륙 완료"
                 )
 
+    def _load_search_plan_metadata(self, log_result=True):
+        """생성 JSON이 현재 launch의 함대 구성과 정확히 일치하는지 확인한다."""
+        plan_path = Path(
+            str(self.get_parameter("search_plan_path").value)
+        ).expanduser()
+        try:
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            drone_plans = plan["drones"]
+            if not isinstance(drone_plans, dict):
+                raise TypeError("drones는 객체여야 합니다")
+
+            plan_mode = str(
+                plan.get("operation_mode", "rescue_search")
+            ).strip().lower()
+            if plan_mode != self.operation_mode:
+                raise ValueError(
+                    "Isaac/ROS operation_mode이 다릅니다: "
+                    f"plan={plan_mode}, launch={self.operation_mode}"
+                )
+
+            plan_ids = [
+                str(value)
+                for value in plan.get("drone_ids", drone_plans.keys())
+            ]
+            plan_count = int(plan.get("drone_count", len(plan_ids)))
+            if plan_count != len(plan_ids):
+                raise ValueError(
+                    "drone_count와 drone_ids 길이가 다릅니다: "
+                    f"count={plan_count}, ids={plan_ids}"
+                )
+            if set(drone_plans) != set(plan_ids):
+                raise ValueError(
+                    "drone_ids와 drones 키가 다릅니다: "
+                    f"ids={plan_ids}, keys={list(drone_plans)}"
+                )
+            if plan_ids != self.drone_ids:
+                raise ValueError(
+                    "Isaac/ROS 함대 구성이 다릅니다: "
+                    f"plan={plan_ids}, launch={self.drone_ids}"
+                )
+        except (
+            OSError,
+            KeyError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as error:
+            self.search_zone_bounds = {}
+            self.start_exclusion_centers = []
+            if log_result:
+                self.get_logger().warning(
+                    "현재 함대와 일치하는 수색 계획을 읽지 못했습니다: "
+                    f"{plan_path}: {error}"
+                )
+            return False
+
+        loaded_zones = {}
+        loaded_centers = []
+        terrain_bounds = plan.get("terrain_bounds", {})
+        terrain_x_min = terrain_bounds.get("x_min")
+        terrain_x_max = terrain_bounds.get("x_max")
+
+        for drone_id in self.drone_ids:
+            drone_plan = drone_plans.get(drone_id)
+            if not isinstance(drone_plan, dict):
+                if log_result:
+                    self.get_logger().warning(
+                        f"수색 계획에 {drone_id} 항목이 없습니다: {plan_path}"
+                    )
+                return False
+
+            zone = drone_plan.get("zone_bounds_xy")
+            if not isinstance(zone, list) or len(zone) != 4:
+                y_min = drone_plan.get("zone_y_min")
+                y_max = drone_plan.get("zone_y_max")
+                if None not in (terrain_x_min, terrain_x_max, y_min, y_max):
+                    zone = [terrain_x_min, terrain_x_max, y_min, y_max]
+            if not isinstance(zone, list) or len(zone) != 4:
+                if log_result:
+                    self.get_logger().warning(
+                        f"{drone_id} 담당 구역 형식이 잘못됐습니다: {zone}"
+                    )
+                return False
+            loaded_zones[drone_id] = tuple(float(value) for value in zone)
+
+            home = drone_plan.get("home_world_enu")
+            if not isinstance(home, list) or len(home) < 2:
+                if log_result:
+                    self.get_logger().warning(
+                        f"{drone_id} 홈 좌표 형식이 잘못됐습니다: {home}"
+                    )
+                return False
+            loaded_centers.extend([float(home[0]), float(home[1])])
+
+        self.search_zone_bounds = loaded_zones
+        self.start_exclusion_centers = loaded_centers
+        if log_result:
+            self.get_logger().info(
+                "동적 수색 계획 검증 완료: "
+                f"drones={len(self.drone_ids)}, ids={self.drone_ids}, "
+                f"path={plan_path}"
+            )
+        return True
+
     def _is_in_start_exclusion_zone(self, x, y):
-        values = [
-            float(value)
-            for value in self.get_parameter(
-                "start_exclusion_centers_xy"
-            ).value
-        ]
+        values = self.start_exclusion_centers
+        if not values:
+            fallback_values = [
+                float(value)
+                for value in self.get_parameter(
+                    "start_exclusion_centers_xy"
+                ).value
+            ]
+            # 존재하지 않는 드론의 시작점까지 오탐 제외 영역으로 쓰지 않는다.
+            values = fallback_values[: 2 * len(self.drone_ids)]
         radius = float(
             self.get_parameter("start_exclusion_radius_m").value
         )
@@ -599,21 +765,44 @@ class MissionManagerNode(TimestampedNode):
         return False
 
     def _is_in_assigned_search_zone(self, drone_id, x, y):
-        values = [
-            float(value)
-            for value in self.get_parameter("search_zone_bounds_xy").value
-        ]
-        try:
-            drone_index = self.drone_ids.index(drone_id)
-        except ValueError:
-            return False
-        offset = drone_index * 4
-        if offset + 3 >= len(values):
-            self.get_logger().error(
-                "search_zone_bounds_xy 설정이 드론 수보다 짧습니다."
+        zone = self.search_zone_bounds.get(drone_id)
+        if zone is None:
+            # Isaac Sim이 JSON을 생성한 직후 ROS가 시작되는 경우를 고려해 재시도한다.
+            self._load_search_plan_metadata(log_result=False)
+            zone = self.search_zone_bounds.get(drone_id)
+
+        if zone is None:
+            # JSON을 필수로 하지 않는 호환 모드에서는 현재 N대 수에 맞춰
+            # 전체 영역을 Y축으로 균등 분할한다. 작은 ID가 상단을 맡는다.
+            bounds = [
+                float(value)
+                for value in self.get_parameter(
+                    "fallback_search_area_bounds_xy"
+                ).value
+            ]
+            if len(bounds) != 4:
+                self.get_logger().error(
+                    "fallback_search_area_bounds_xy는 4개 값이어야 합니다."
+                )
+                return False
+            try:
+                drone_index = self.drone_ids.index(drone_id)
+            except ValueError:
+                return False
+
+            x_min, x_max, y_min, y_max = bounds
+            if x_min >= x_max or y_min >= y_max:
+                return False
+            zone_height = (y_max - y_min) / len(self.drone_ids)
+            reverse_index = len(self.drone_ids) - 1 - drone_index
+            zone = (
+                x_min,
+                x_max,
+                y_min + reverse_index * zone_height,
+                y_min + (reverse_index + 1) * zone_height,
             )
-            return False
-        x_min, x_max, y_min, y_max = values[offset:offset + 4]
+
+        x_min, x_max, y_min, y_max = zone
         return x_min <= x <= x_max and y_min <= y <= y_max
 
     def _try_finish_search_without_victim(self):
@@ -647,6 +836,11 @@ class MissionManagerNode(TimestampedNode):
         message.data = drone_id
         self.finder_publisher.publish(message)
 
+    def _publish_mode(self):
+        message = String()
+        message.data = self.operation_mode
+        self.mode_publisher.publish(message)
+
     def _publish_state(self, state):
         if state == self.state and state != "IDLE":
             return
@@ -655,6 +849,12 @@ class MissionManagerNode(TimestampedNode):
         message.data = state
         self.state_publisher.publish(message)
         self.get_logger().info(f"임무 상태: {state}")
+
+    def _republish_mode_and_state(self):
+        self._publish_mode()
+        message = String()
+        message.data = self.state
+        self.state_publisher.publish(message)
 
 
 def main(args=None):

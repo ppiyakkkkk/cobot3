@@ -2,9 +2,19 @@
 
 """산림 조난자 탐지 드론 시뮬레이션 실행 진입점.
 
-실행 명령은 기존과 동일하다.
+기본 실행은 드론 3대다.
 
     isaac_python final_24.py
+
+실행할 드론 수와 운용 모드를 직접 지정할 수 있다.
+
+    isaac_python final_24.py --drone_count 4 \
+        --operation_mode rescue_search
+
+3D 매핑 골격 모드에서는 조난자와 구조자를 생성하지 않는다.
+
+    isaac_python final_24.py --drone_count 1 \
+        --operation_mode mapping_3d
 
 긴 구현은 역할별 모듈로 분리했다.
 - sim_config.py: 모든 설정값과 경로
@@ -16,26 +26,82 @@
 
 중요:
 Isaac Sim/Pegasus 모듈은 대부분 SimulationApp이 생성된 뒤 import해야 한다.
-따라서 이 파일에서는 SimulationApp 생성과 extension 활성화를 먼저 수행하고,
-그 다음 역할별 모듈을 import한다.
+따라서 이 파일에서는 실행 인자와 공통 설정을 먼저 확정하고,
+SimulationApp 생성과 extension 활성화 후 역할별 모듈을 import한다.
 """
 
+import argparse
 import os
 from pathlib import Path
+import sys
 
 import numpy as np
-from isaacsim import SimulationApp
 
 # sim_config.py는 표준 라이브러리만 사용하므로 SimulationApp 전에도 안전하다.
+import sim_config
+
+
+def parse_runtime_args():
+    """Isaac Sim에 넘기지 않을 프로젝트 전용 실행 인자를 분리한다."""
+    parser = argparse.ArgumentParser(
+        description="산림 구조 다중 드론 Isaac Sim 실행",
+    )
+    parser.add_argument(
+        "--drone_count",
+        "--drone-count",
+        dest="drone_count",
+        type=int,
+        default=sim_config.DEFAULT_DRONE_COUNT,
+        choices=range(
+            sim_config.MIN_DRONE_COUNT,
+            sim_config.MAX_DRONE_COUNT + 1,
+        ),
+        metavar="N",
+        help="실행할 드론 수 1~4 (기본값: 3)",
+    )
+    parser.add_argument(
+        "--operation_mode",
+        "--operation-mode",
+        dest="operation_mode",
+        choices=sim_config.SUPPORTED_OPERATION_MODES,
+        default=sim_config.DEFAULT_OPERATION_MODE,
+        help=(
+            "운용 모드: rescue_search 또는 mapping_3d "
+            "(기본값: rescue_search)"
+        ),
+    )
+
+    # Isaac Sim/Kit 자체 인자는 그대로 남기고 프로젝트 인자만 제거한다.
+    args, remaining_args = parser.parse_known_args()
+    sys.argv = [sys.argv[0], *remaining_args]
+    return args
+
+
+runtime_args = parse_runtime_args()
+sim_config.configure_drone_count(runtime_args.drone_count)
+sim_config.configure_operation_mode(runtime_args.operation_mode)
+
+from isaacsim import SimulationApp
+
 from sim_config import (
     DRONE_CONFIGS,
     FOREST_WORLD_PATH,
+    OPERATION_MODE,
     GENERATED_ENVIRONMENT_MESH_PATH,
     GENERATED_GROUND_TRUTH_PATH,
+    GENERATED_SEARCH_PLAN_PATH,
     GENERATED_TERRAIN_MESH_PATH,
     RVIZ_TERRAIN_SAMPLE_SPACING_M,
 )
 
+
+print(
+    "[CONFIG] Isaac Sim 동적 함대/모드: "
+    f"operation_mode={OPERATION_MODE}, "
+    f"drone_count={runtime_args.drone_count}, "
+    f"drone_ids={[item[0].rsplit('/', 1)[-1] for item in DRONE_CONFIGS]}, "
+    f"spawn_people={sim_config.should_spawn_people()}"
+)
 
 # 대부분의 Isaac Sim 모듈보다 먼저 SimulationApp을 생성해야 한다.
 simulation_app = SimulationApp({"headless": False})
@@ -76,6 +142,7 @@ from sim_utils import (
     SceneEnvironmentManager,
     SearchPlanGenerator,
     remove_previous_generated_files,
+    write_ground_truth,
 )
 from sim_viewports import ViewportManager
 
@@ -141,6 +208,7 @@ class ForestRescueSimulation:
 
         # 이전 실행의 실제 스폰 위치와 Mesh가 RViz에 잠시 남지 않도록 제거한다.
         remove_previous_generated_files(
+            GENERATED_SEARCH_PLAN_PATH,
             GENERATED_GROUND_TRUTH_PATH,
             GENERATED_TERRAIN_MESH_PATH,
             GENERATED_ENVIRONMENT_MESH_PATH,
@@ -208,23 +276,47 @@ class ForestRescueSimulation:
             GENERATED_ENVIRONMENT_MESH_PATH
         )
 
-        search_plan_generator = SearchPlanGenerator(self.terrain)
-        search_plan_generator.write_generated_search_plan()
+        # ------------------------------------------------------------------
+        # 모드별 수색 계획과 사람 생성
+        # ------------------------------------------------------------------
+        self.people_manager = None
+        self.victim = None
+        self.rescuer = None
+
+        if OPERATION_MODE == "rescue_search":
+            search_plan_generator = SearchPlanGenerator(self.terrain)
+            search_plan_generator.write_generated_search_plan()
+
+            self.people_manager = PeopleManager(
+                terrain=self.terrain,
+                rng=self.rng,
+                test_victim_spawn_world_enu=(
+                    search_plan_generator.test_victim_spawn_world_enu
+                ),
+            )
+            self.people_manager.spawn_people()
+            self.victim = self.people_manager.victim
+            self.rescuer = self.people_manager.rescuer
+            print(
+                "[MODE] rescue_search: 수색 경로와 조난자·구조자를 "
+                "생성했습니다."
+            )
+        else:
+            # 매핑 모드에서는 구조 수색용 사람과 수색 계획을 만들지 않는다.
+            # RViz와 ROS가 현재 모드/함대 구성을 확인할 수 있도록 드론
+            # 시작 위치만 포함한 Ground Truth를 기록한다.
+            write_ground_truth(
+                victim_position=None,
+                victim_index=-1,
+            )
+            print(
+                "[MODE] mapping_3d: 조난자·구조자와 구조 수색 계획을 "
+                "생성하지 않습니다."
+            )
 
         # ------------------------------------------------------------------
-        # 사람과 드론 생성
+        # 드론 생성
         # ------------------------------------------------------------------
-        self.people_manager = PeopleManager(
-            terrain=self.terrain,
-            rng=self.rng,
-            test_victim_spawn_world_enu=(
-                search_plan_generator.test_victim_spawn_world_enu
-            ),
-        )
-        self.people_manager.spawn_people()
-        self.victim = self.people_manager.victim
-        self.rescuer = self.people_manager.rescuer
-
         self.drone_manager = DroneManager(self.pg)
         self.drone_manager.spawn_iris()
         self.drones = self.drone_manager.drones
@@ -256,7 +348,11 @@ class ForestRescueSimulation:
         simulation_app.update()
         self.viewport_manager.setup_follow_viewport()
 
-        print("[OK] Forest-rescue multi-drone simulation initialized")
+        print(
+            "[OK] Forest-rescue multi-drone simulation initialized: "
+            f"operation_mode={OPERATION_MODE}, "
+            f"drone_count={len(DRONE_CONFIGS)}"
+        )
         for prim_path, _, _ in DRONE_CONFIGS:
             drone_name = prim_path.rsplit("/", 1)[-1]
             print(f"[INFO] {drone_name} RGB: /{drone_name}/Camera/rgb")
@@ -284,8 +380,9 @@ class ForestRescueSimulation:
             # 왼쪽 메인 Viewport의 3인칭 카메라가 지정 드론을 따라간다.
             self.viewport_manager.update_follow_viewport()
 
-            # Person Animation Graph의 위치를 다음 물리 스텝 충돌체에 반영한다.
-            self.people_manager.sync_person_physics_proxies()
+            # 구조 수색 모드에서만 Person 충돌체를 동기화한다.
+            if self.people_manager is not None:
+                self.people_manager.sync_person_physics_proxies()
 
         carb.log_warn("Forest-rescue simulation is closing.")
         self.timeline.stop()

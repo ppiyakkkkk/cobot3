@@ -31,6 +31,7 @@ setup(
             "human_detector = forest_rescue_system.human_detector_node:main",
             "victim_localizer = forest_rescue_system.victim_localizer_node:main",
             "mission_manager = forest_rescue_system.mission_manager_node:main",
+            "mapping_manager = forest_rescue_system.mapping_manager_node:main",
             "drone_controller = forest_rescue_system.drone_controller_node:main",
             "sensor_tf = forest_rescue_system.sensor_tf_node:main",
             "obstacle_monitor = forest_rescue_system.obstacle_monitor_node:main",

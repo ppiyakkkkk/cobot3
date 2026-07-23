@@ -12,6 +12,7 @@ from pxr import Gf, Usd, UsdGeom, UsdLux
 
 from sim_config import (
     DRONE_CONFIGS,
+    OPERATION_MODE,
     FOR_TEST_VICTIM_KEEP_ON_GROUND,
     FOR_TEST_VICTIM_SPAWN_ENABLED,
     FOR_TEST_VICTIM_WORLD_XYZ,
@@ -32,7 +33,7 @@ from sim_config import (
 
 
 class SearchPlanGenerator:
-    """Terrain 높이를 반영해 3대 드론의 수색 경로 JSON을 생성한다."""
+    """Terrain 높이를 반영해 설정된 드론 수만큼 수색 경로 JSON을 생성한다."""
 
     def __init__(self, terrain):
         self.terrain = terrain
@@ -54,7 +55,13 @@ class SearchPlanGenerator:
         ]
 
     def write_generated_search_plan(self):
-        """Terrain 높이를 반영한 드론 3대의 3차원 지그재그 경로를 저장한다."""
+        """Terrain 높이를 반영한 N대 드론의 구조 수색 경로를 저장한다."""
+        if OPERATION_MODE != "rescue_search":
+            raise RuntimeError(
+                "구조 수색 계획은 operation_mode=rescue_search에서만 "
+                f"생성할 수 있습니다: {OPERATION_MODE}"
+            )
+
         x_low = self.terrain.x_min + SEARCH_AREA_MARGIN_M
         x_high = self.terrain.x_max - SEARCH_AREA_MARGIN_M
         y_low = self.terrain.y_min + SEARCH_AREA_MARGIN_M
@@ -63,10 +70,21 @@ class SearchPlanGenerator:
         if x_low >= x_high or y_low >= y_high:
             raise RuntimeError("수색 경로를 만들 Terrain 영역이 부족합니다.")
 
-        # 그림과 같이 위·가운데·아래의 가로 구역 3개로 균등 분할한다.
-        y_edges = np.linspace(y_low, y_high, 4)
+        drone_count = len(DRONE_CONFIGS)
+        if drone_count < 1:
+            raise RuntimeError("수색 경로를 만들 드론 설정이 없습니다.")
+
+        # 전체 Y 범위를 현재 드론 수 N개의 가로 띠로 균등 분할한다.
+        y_edges = np.linspace(y_low, y_high, drone_count + 1)
+        drone_ids = [
+            config[0].rsplit("/", 1)[-1]
+            for config in DRONE_CONFIGS
+        ]
         plan = {
-            "format_version": 3,
+            "format_version": 5,
+            "operation_mode": OPERATION_MODE,
+            "drone_count": drone_count,
+            "drone_ids": drone_ids,
             "map_frame": "map",
             "coordinate_convention": "world_enu_and_local_ned",
             "terrain_bounds": {
@@ -78,6 +96,7 @@ class SearchPlanGenerator:
                 "z_max": self.terrain.z_max,
             },
             "search_clearance_m": SEARCH_CLEARANCE_M,
+            "search_area_bounds_xy": [x_low, x_high, y_low, y_high],
             # 실제 복귀 목표 고도는 드론의 현재 위치가 정해지는
             # RETURN_HOME 시점에 ROS 2 컨트롤러가 계산한다.
             "return_height_mode": "current_to_home_terrain_profile",
@@ -158,8 +177,9 @@ class SearchPlanGenerator:
                 f"{test_z:.2f}), mode={z_mode}"
             )
 
-        # drone_01은 상단, 02는 중앙, 03은 하단 구역을 맡는다.
-        zone_indices = (2, 1, 0)
+        # ID가 작은 드론부터 상단 구역을 맡도록 Y 인덱스를 역순 배정한다.
+        # 1대: 전체, 2대: 상/하, 3대: 상/중/하, 4대: 4등분.
+        zone_indices = reversed(range(drone_count))
         for config, zone_index in zip(DRONE_CONFIGS, zone_indices):
             prim_path, vehicle_id, home = config
             drone_name = prim_path.rsplit("/", 1)[-1]
@@ -296,6 +316,12 @@ class SearchPlanGenerator:
                 "home_world_enu": [home_x, home_y, home_z],
                 "zone_y_min": zone_min_y,
                 "zone_y_max": zone_max_y,
+                "zone_bounds_xy": [
+                    float(self.terrain.x_min),
+                    float(self.terrain.x_max),
+                    zone_min_y,
+                    zone_max_y,
+                ],
                 "waypoints": waypoints,
             }
 
@@ -304,7 +330,7 @@ class SearchPlanGenerator:
             encoding="utf-8",
         )
         print(
-            "[INFO] Terrain 기반 3드론 수색 경로 저장: "
+            f"[INFO] Terrain 기반 {drone_count}드론 수색 경로 저장: "
             f"{GENERATED_SEARCH_PLAN_PATH}"
         )
         for drone_name, drone_plan in plan["drones"].items():
@@ -479,8 +505,8 @@ class SceneEnvironmentManager:
         print(f"[CHECK] Viewport eye={eye}, target={target}")
 
 
-def write_ground_truth(victim_position, victim_index):
-    """드론 시작점과 실제 조난자 스폰 위치를 원자적으로 저장한다."""
+def write_ground_truth(victim_position=None, victim_index=-1):
+    """현재 모드의 드론 시작점과 선택적 조난자 위치를 저장한다."""
     drone_starts = []
     for prim_path, vehicle_id, position in DRONE_CONFIGS:
         drone_starts.append(
@@ -495,12 +521,13 @@ def write_ground_truth(victim_position, victim_index):
             }
         )
 
-    payload = {
-        "format_version": 1,
-        "map_frame": "map",
-        "coordinate_convention": "world_enu",
-        "drone_starts": drone_starts,
-        "victim": {
+    victim_payload = None
+    if victim_position is not None:
+        if len(victim_position) != 3:
+            raise ValueError(
+                f"victim_position은 XYZ 3개여야 합니다: {victim_position}"
+            )
+        victim_payload = {
             "victim_id": "victim_01",
             "spawn_candidate_index": int(victim_index),
             "world_enu": [
@@ -508,11 +535,20 @@ def write_ground_truth(victim_position, victim_index):
                 float(victim_position[1]),
                 float(victim_position[2]),
             ],
-        },
+        }
+
+    payload = {
+        "format_version": 2,
+        "operation_mode": OPERATION_MODE,
+        "people_spawned": victim_payload is not None,
+        "drone_count": len(drone_starts),
+        "drone_ids": [item["drone_id"] for item in drone_starts],
+        "map_frame": "map",
+        "coordinate_convention": "world_enu",
+        "drone_starts": drone_starts,
+        "victim": victim_payload,
     }
 
-    # ROS 노드가 저장 중인 JSON을 읽지 않도록 임시 파일을 완성한 뒤
-    # 최종 파일명으로 교체한다.
     temporary_path = GENERATED_GROUND_TRUTH_PATH.with_suffix(
         ".json.tmp"
     )
@@ -522,10 +558,16 @@ def write_ground_truth(victim_position, victim_index):
     )
     temporary_path.replace(GENERATED_GROUND_TRUTH_PATH)
 
+    victim_text = (
+        victim_payload["world_enu"]
+        if victim_payload is not None
+        else "NONE"
+    )
     print(
         "[INFO] RViz Ground Truth 저장: "
         f"{GENERATED_GROUND_TRUTH_PATH}, "
-        f"victim={payload['victim']['world_enu']}"
+        f"operation_mode={OPERATION_MODE}, "
+        f"drone_count={len(drone_starts)}, victim={victim_text}"
     )
 
 

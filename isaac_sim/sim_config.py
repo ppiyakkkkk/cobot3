@@ -47,17 +47,113 @@ FOLLOW_CAMERA_DIRECTION_SMOOTHING = 0.15
 # ---------------------------------------------------------------------------
 # 드론 및 사람 배치 설정
 # ---------------------------------------------------------------------------
-# 시작 직후 서로의 LiDAR costmap을 점유하지 않도록 5 m 간격으로 배치한다.
-DRONE_CONFIGS = [
+MIN_DRONE_COUNT = 1
+MAX_DRONE_COUNT = 4
+DEFAULT_DRONE_COUNT = 3
+
+# 실행 모드는 Isaac Sim과 ROS 2 Launch에서 동일하게 지정한다.
+SUPPORTED_OPERATION_MODES = (
+    "rescue_search",
+    "mapping_3d",
+)
+DEFAULT_OPERATION_MODE = "rescue_search"
+OPERATION_MODE = DEFAULT_OPERATION_MODE
+
+# 1~3대 설정은 V1의 위치와 vehicle_id를 그대로 유지한다.
+# 4번 드론은 기존 기체와 5 m 간격을 유지하면서 Terrain 안쪽에 배치한다.
+_AVAILABLE_DRONE_CONFIGS = [
     ("/World/quadrotor_01", 0, [-34.0, 40.0, 31.0]),
     ("/World/quadrotor_02", 1, [-29.0, 40.0, 31.0]),
     ("/World/quadrotor_03", 2, [-39.0, 40.0, 31.0]),
+    ("/World/quadrotor_04", 3, [-34.0, 45.0, 31.0]),
 ]
 
-CAMERA_PRIM_PATHS = [
-    f"{prim_path}/body/Camera"
-    for prim_path, _, _ in DRONE_CONFIGS
-]
+DRONE_COUNT = DEFAULT_DRONE_COUNT
+DRONE_CONFIGS = []
+DRONE_IDS = []
+CAMERA_PRIM_PATHS = []
+
+
+def configure_drone_count(drone_count=DEFAULT_DRONE_COUNT):
+    """1~4 범위의 실행 드론 수를 공통 설정에 반영한다.
+
+    ``final_24.py``가 다른 Isaac Sim 역할 모듈을 import하기 전에 이 함수를
+    호출해야 한다. 인자를 생략하면 기본값 3대를 사용한다.
+    """
+    global DRONE_COUNT, DRONE_CONFIGS, DRONE_IDS, CAMERA_PRIM_PATHS
+
+    try:
+        count = int(drone_count)
+    except (TypeError, ValueError) as error:
+        raise RuntimeError(
+            f"drone_count는 정수여야 합니다: {drone_count!r}"
+        ) from error
+
+    if not MIN_DRONE_COUNT <= count <= MAX_DRONE_COUNT:
+        raise RuntimeError(
+            f"drone_count는 {MIN_DRONE_COUNT}~{MAX_DRONE_COUNT} "
+            f"범위여야 합니다: {count}"
+        )
+    if len(_AVAILABLE_DRONE_CONFIGS) < count:
+        raise RuntimeError(
+            f"요청한 {count}대에 필요한 드론 설정이 부족합니다: "
+            f"available={len(_AVAILABLE_DRONE_CONFIGS)}"
+        )
+
+    selected = list(_AVAILABLE_DRONE_CONFIGS[:count])
+    prim_paths = [item[0] for item in selected]
+    vehicle_ids = [int(item[1]) for item in selected]
+    if len(set(prim_paths)) != count:
+        raise RuntimeError(f"드론 prim_path가 중복됩니다: {prim_paths}")
+    if len(set(vehicle_ids)) != count:
+        raise RuntimeError(f"PX4 vehicle_id가 중복됩니다: {vehicle_ids}")
+    for prim_path, vehicle_id, position in selected:
+        if len(position) != 3:
+            raise RuntimeError(
+                f"{prim_path} 스폰 좌표는 XYZ 3개여야 합니다: {position}"
+            )
+        if vehicle_id < 0:
+            raise RuntimeError(
+                f"{prim_path} vehicle_id는 0 이상이어야 합니다: {vehicle_id}"
+            )
+
+    DRONE_COUNT = count
+    DRONE_CONFIGS = selected
+    DRONE_IDS = [
+        prim_path.rsplit("/", 1)[-1]
+        for prim_path, _, _ in DRONE_CONFIGS
+    ]
+    CAMERA_PRIM_PATHS = [
+        f"{prim_path}/body/Camera"
+        for prim_path, _, _ in DRONE_CONFIGS
+    ]
+    return DRONE_COUNT
+
+
+def configure_operation_mode(operation_mode=DEFAULT_OPERATION_MODE):
+    """운용 모드를 공통 설정에 반영한다."""
+    global OPERATION_MODE
+
+    mode = str(operation_mode).strip().lower()
+    if mode not in SUPPORTED_OPERATION_MODES:
+        supported = ", ".join(SUPPORTED_OPERATION_MODES)
+        raise RuntimeError(
+            f"operation_mode는 다음 중 하나여야 합니다: {supported}. "
+            f"입력값={operation_mode!r}"
+        )
+
+    OPERATION_MODE = mode
+    return OPERATION_MODE
+
+
+def should_spawn_people():
+    """구조 수색 모드에서만 조난자와 구조자를 생성한다."""
+    return OPERATION_MODE == "rescue_search"
+
+
+# 다른 모듈이 sim_config만 직접 import해도 기본 설정이 준비되게 한다.
+configure_drone_count(DEFAULT_DRONE_COUNT)
+configure_operation_mode(DEFAULT_OPERATION_MODE)
 
 # 일반 실행에서는 아래 후보 좌표 중 한 곳에 조난자를 생성한다.
 VICTIM_SPAWN_POSITIONS = [
@@ -78,7 +174,7 @@ FOR_TEST_VICTIM_KEEP_ON_GROUND = True
 # 구조자 충돌체도 초기 LiDAR 팽창영역에 들어오지 않도록 6 m 떨어뜨린다.
 # 구조자의 발 높이는 첫 번째 드론의 초기 World Z와 동일하게 맞춘다.
 RESCUER_XY = (-34.0, 34.0)
-RESCUER_FOOT_Z = float(DRONE_CONFIGS[0][2][2])
+RESCUER_FOOT_Z = float(_AVAILABLE_DRONE_CONFIGS[0][2][2])
 
 # 지형 보간 오차로 발이 지면에 묻히지 않도록 아주 조금 띄운다.
 PERSON_GROUND_CLEARANCE_M = 0.08

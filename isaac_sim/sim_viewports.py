@@ -21,7 +21,7 @@ from sim_config import (
 
 
 class ViewportManager:
-    """오른쪽 센서 화면 3개와 왼쪽 추적 화면을 독립적으로 관리한다."""
+    """오른쪽 N대 센서 화면과 왼쪽 추적 화면을 독립적으로 관리한다."""
 
     def __init__(self, simulation_app):
         self.simulation_app = simulation_app
@@ -33,7 +33,7 @@ class ViewportManager:
         self._follow_direction_xy = None
 
     def create_docked_camera_viewports(self):
-        """ROS2CameraGraph의 실제 센서 Viewport 3개를 고정 배치한다.
+        """ROS2CameraGraph의 실제 센서 Viewport를 드론 수에 맞춰 배치한다.
 
         배치 구조는 오른쪽 영역의 상단에 Camera 01, 하단을 좌우로
         나눠 Camera 02와 Camera 03을 두는 형태다. 별도 Viewport를
@@ -63,10 +63,14 @@ class ViewportManager:
                 )
 
             sensor_viewport_specs = [
-                ("/quadrotor_01/Camera", CAMERA_PRIM_PATHS[0]),
-                ("/quadrotor_02/Camera", CAMERA_PRIM_PATHS[1]),
-                ("/quadrotor_03/Camera", CAMERA_PRIM_PATHS[2]),
+                (f"/quadrotor_{index:02d}/Camera", camera_path)
+                for index, camera_path in enumerate(
+                    CAMERA_PRIM_PATHS,
+                    start=1,
+                )
             ]
+            if not sensor_viewport_specs:
+                raise RuntimeError("도킹할 센서 Viewport 설정이 없습니다.")
 
             # ROS2CameraGraph가 센서 Viewport와 WindowHandle을 모두
             # 생성할 때까지 기다린다. 새 Viewport는 만들지 않는다.
@@ -151,46 +155,54 @@ class ViewportManager:
                     f"resolution={viewport_api.resolution}"
                 )
 
-            camera_01_title = sensor_viewport_specs[0][0]
-            camera_02_title = sensor_viewport_specs[1][0]
-            camera_03_title = sensor_viewport_specs[2][0]
-            camera_01_window = sensor_window_handles[camera_01_title]
-            camera_02_window = sensor_window_handles[camera_02_title]
-            camera_03_window = sensor_window_handles[camera_03_title]
+            sensor_windows = [
+                sensor_window_handles[title]
+                for title, _ in sensor_viewport_specs
+            ]
+            for window in sensor_windows:
+                window.visible = True
 
-            camera_01_window.visible = True
-            camera_02_window.visible = True
-            camera_03_window.visible = True
-
-            # 메인 화면 오른쪽에 Camera 01 영역을 만든다.
-            camera_01_window.dock_in(
+            # 첫 센서 화면은 메인 화면 오른쪽에 배치한다.
+            sensor_windows[0].dock_in(
                 main_window_handle,
                 ui.DockPosition.RIGHT,
                 0.38,
             )
             self.simulation_app.update()
 
-            # Camera 01 아래쪽에 Camera 02를 배치한다.
-            camera_02_window.dock_in(
-                camera_01_window,
-                ui.DockPosition.BOTTOM,
-                0.50,
-            )
-            self.simulation_app.update()
+            # 2대 이상이면 두 번째 화면을 첫 화면 아래에 둔다.
+            if len(sensor_windows) >= 2:
+                sensor_windows[1].dock_in(
+                    sensor_windows[0],
+                    ui.DockPosition.BOTTOM,
+                    0.50,
+                )
+                self.simulation_app.update()
 
-            # 하단 Camera 02 영역의 오른쪽에 Camera 03을 배치한다.
-            camera_03_window.dock_in(
-                camera_02_window,
-                ui.DockPosition.RIGHT,
-                0.50,
-            )
+            # 3대면 기존 V1처럼 하단 오른쪽에 세 번째 화면을 둔다.
+            if len(sensor_windows) >= 3:
+                sensor_windows[2].dock_in(
+                    sensor_windows[1],
+                    ui.DockPosition.RIGHT,
+                    0.50,
+                )
+                self.simulation_app.update()
+
+            # 4대면 상단 오른쪽에 네 번째 화면을 추가해 2x2로 만든다.
+            if len(sensor_windows) >= 4:
+                sensor_windows[3].dock_in(
+                    sensor_windows[0],
+                    ui.DockPosition.RIGHT,
+                    0.50,
+                )
+                self.simulation_app.update()
+
             for _ in range(3):
                 self.simulation_app.update()
 
             dock_states = {
-                camera_01_title: bool(camera_01_window.docked),
-                camera_02_title: bool(camera_02_window.docked),
-                camera_03_title: bool(camera_03_window.docked),
+                title: bool(sensor_window_handles[title].docked)
+                for title, _ in sensor_viewport_specs
             }
             if not all(dock_states.values()):
                 raise RuntimeError(
@@ -199,8 +211,8 @@ class ViewportManager:
 
             print(
                 "[INFO] ROS sensor Viewports docked: "
-                "01=right/top, 02=right/bottom-left, "
-                "03=right/bottom-right"
+                f"count={len(sensor_windows)}, titles="
+                f"{[title for title, _ in sensor_viewport_specs]}"
             )
         except Exception as error:
             carb.log_error(
