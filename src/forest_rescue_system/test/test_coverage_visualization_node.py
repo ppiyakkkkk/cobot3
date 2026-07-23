@@ -336,3 +336,58 @@ def test_load_mesh_if_ready_does_not_reload_after_first_success(
         assert call_count == 0
     finally:
         node.destroy_node()
+
+
+def test_refresh_coverage_skips_marker_publish_when_nothing_newly_claimed(
+    rclpy_context, tmp_path
+):
+    node = _make_node(rclpy_context, tmp_path)
+    try:
+        node.scene, node.ownership = _synthetic_scene_and_ownership()
+        all_indices = np.arange(len(node.scene.centroids))
+        node.ownership.claim(all_indices, drone_index=0)
+
+        node.tf_buffer = _StubTfBuffer()
+        node.camera_info_by_drone["quadrotor_01"] = _camera_info()
+        depth_image = np.zeros((100, 100), dtype=np.float32)
+        depth_image[50, 50] = 5.0
+        node.depth_by_drone["quadrotor_01"] = depth_image
+
+        calls = []
+
+        def _counting_publish(msg):
+            calls.append(msg)
+
+        node.marker_publisher.publish = _counting_publish
+
+        node._refresh_coverage()
+
+        assert len(calls) == 0
+    finally:
+        node.destroy_node()
+
+
+def test_refresh_coverage_publishes_marker_when_something_newly_claimed(
+    rclpy_context, tmp_path
+):
+    node = _make_node(rclpy_context, tmp_path)
+    try:
+        node.scene, node.ownership = _synthetic_scene_and_ownership()
+        node.tf_buffer = _StubTfBuffer()
+        node.camera_info_by_drone["quadrotor_01"] = _camera_info()
+        depth_image = np.zeros((100, 100), dtype=np.float32)
+        depth_image[50, 50] = 5.0
+        node.depth_by_drone["quadrotor_01"] = depth_image
+
+        calls = []
+
+        def _counting_publish(msg):
+            calls.append(msg)
+
+        node.marker_publisher.publish = _counting_publish
+
+        node._refresh_coverage()
+
+        assert len(calls) == 1
+    finally:
+        node.destroy_node()

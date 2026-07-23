@@ -200,20 +200,22 @@ class CoverageVisualizationNode(TimestampedNode):
         if self.scene is None or self.ownership is None:
             return
 
+        any_newly_claimed = False
         for drone_index, drone_id in enumerate(self.drone_ids):
-            self._process_drone(drone_index, drone_id)
+            any_newly_claimed |= self._process_drone(drone_index, drone_id)
 
-        self._publish_markers()
+        if any_newly_claimed:
+            self._publish_markers()
 
     def _process_drone(self, drone_index, drone_id):
         camera_info = self.camera_info_by_drone.get(drone_id)
         depth_image = self.depth_by_drone.get(drone_id)
         if camera_info is None or depth_image is None:
-            return
+            return False
 
         candidate_indices = np.where(self.ownership.unclaimed_mask())[0]
         if candidate_indices.size == 0:
-            return
+            return False
 
         camera_frame = f"{drone_id}/camera_optical_frame"
         try:
@@ -224,7 +226,7 @@ class CoverageVisualizationNode(TimestampedNode):
                 timeout=Duration(seconds=0.0),
             )
         except TransformException:
-            return
+            return False
 
         matrix = coverage_geometry.transform_matrix_from_tf(
             (
@@ -262,8 +264,12 @@ class CoverageVisualizationNode(TimestampedNode):
             float(self.get_parameter("maximum_depth_m").value),
         )
         visible_global_indices = candidate_indices[visible]
+        newly_claimed = np.asarray([], dtype=np.int64)
         if visible_global_indices.size:
-            self.ownership.claim(visible_global_indices, drone_index)
+            newly_claimed = self.ownership.claim(
+                visible_global_indices, drone_index
+            )
+        return bool(newly_claimed.size)
 
     def _build_coverage_marker_array(self):
         marker_array = MarkerArray()

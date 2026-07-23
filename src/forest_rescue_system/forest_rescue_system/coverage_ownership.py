@@ -19,9 +19,10 @@ class TriangleOwnership:
     def claim(self, triangle_indices, drone_index):
         indices = np.asarray(triangle_indices, dtype=np.int64)
         if indices.size == 0:
-            return
+            return np.asarray([], dtype=np.int64)
         unclaimed = indices[self._owner[indices] < 0]
         self._owner[unclaimed] = drone_index
+        return unclaimed
 
     def indices_for_drone(self, drone_index):
         return np.where(self._owner == drone_index)[0]

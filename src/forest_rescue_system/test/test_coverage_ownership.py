@@ -29,3 +29,22 @@ def test_indices_for_drone_returns_only_owned_indices():
     ownership.claim([0, 3], drone_index=2)
     np.testing.assert_array_equal(ownership.indices_for_drone(2), [0, 3])
     np.testing.assert_array_equal(ownership.indices_for_drone(0), [])
+
+
+def test_claim_returns_newly_claimed_indices():
+    ownership = TriangleOwnership(3)
+    newly_claimed = ownership.claim([0, 2], drone_index=1)
+    np.testing.assert_array_equal(newly_claimed, [0, 2])
+
+
+def test_claim_returns_only_unclaimed_subset_of_mixed_indices():
+    ownership = TriangleOwnership(3)
+    ownership.claim([0], drone_index=0)
+    newly_claimed = ownership.claim([0, 1, 2], drone_index=1)
+    np.testing.assert_array_equal(newly_claimed, [1, 2])
+
+
+def test_claim_returns_empty_array_for_empty_input():
+    ownership = TriangleOwnership(3)
+    newly_claimed = ownership.claim([], drone_index=0)
+    np.testing.assert_array_equal(newly_claimed, [])
