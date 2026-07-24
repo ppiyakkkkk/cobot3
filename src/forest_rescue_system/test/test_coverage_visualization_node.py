@@ -458,3 +458,32 @@ def test_refresh_coverage_publishes_marker_when_something_newly_claimed(
         assert len(calls) == 1
     finally:
         node.destroy_node()
+
+
+def test_constructor_builds_raycasting_scene(rclpy_context, tmp_path):
+    node = _make_node(rclpy_context, tmp_path)
+    try:
+        assert node.raycasting_scene is not None
+    finally:
+        node.destroy_node()
+
+
+def test_depth_callback_records_shape_and_stamp_without_cv_bridge(
+    rclpy_context, tmp_path
+):
+    from sensor_msgs.msg import Image
+
+    node = _make_node(rclpy_context, tmp_path)
+    try:
+        message = Image()
+        message.height = 48
+        message.width = 64
+        message.encoding = "32FC1"
+        message.header.stamp = TimeMsg(sec=1, nanosec=0)
+
+        node._depth_callback("quadrotor_01", message)
+
+        assert node.depth_shape_by_drone["quadrotor_01"] == (48, 64)
+        assert node.depth_stamp_by_drone["quadrotor_01"] == message.header.stamp
+    finally:
+        node.destroy_node()

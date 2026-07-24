@@ -6,7 +6,6 @@ from functools import partial
 from pathlib import Path
 import time
 
-from cv_bridge import CvBridge, CvBridgeError
 from geometry_msgs.msg import Point
 import numpy as np
 import rclpy
@@ -61,7 +60,7 @@ class CoverageVisualizationNode(TimestampedNode):
         self.declare_parameter("map_frame", "map")
         self.declare_parameter("refresh_period_sec", 1.0)
         self.declare_parameter("area_publish_period_sec", 1.0)
-        self.declare_parameter("visibility_tolerance_m", 0.5)
+        self.declare_parameter("ray_grid_step_px", 4)
         self.declare_parameter("minimum_depth_m", 0.20)
         self.declare_parameter("maximum_depth_m", 20.0)
         self.declare_parameter("coverage_z_offset_m", 0.05)
@@ -81,12 +80,12 @@ class CoverageVisualizationNode(TimestampedNode):
         self.map_frame = str(self.get_parameter("map_frame").value)
 
         self.scene = None
+        self.raycasting_scene = None
         self.ownership = None
         self.last_mesh_wait_log_at = float("-inf")
 
-        self.bridge = CvBridge()
         self.camera_info_by_drone = {}
-        self.depth_by_drone = {}
+        self.depth_shape_by_drone = {}
         self.depth_stamp_by_drone = {}
 
         for drone_id in self.drone_ids:
@@ -139,16 +138,9 @@ class CoverageVisualizationNode(TimestampedNode):
         self.camera_info_by_drone[drone_id] = message
 
     def _depth_callback(self, drone_id, message):
-        try:
-            depth = self.bridge.imgmsg_to_cv2(
-                message, desired_encoding="passthrough"
-            )
-        except CvBridgeError as error:
-            self.get_logger().error(f"{drone_id} Depth 변환 실패: {error}")
-            return
-        self.depth_by_drone[drone_id] = np.asarray(
-            depth, dtype=np.float32
-        ).copy()
+        self.depth_shape_by_drone[drone_id] = (
+            int(message.height), int(message.width)
+        )
         self.depth_stamp_by_drone[drone_id] = message.header.stamp
 
     def _load_mesh_if_ready(self):
@@ -190,6 +182,9 @@ class CoverageVisualizationNode(TimestampedNode):
             return
 
         self.scene = coverage_geometry.assemble_scene(groups)
+        self.raycasting_scene = coverage_geometry.build_raycasting_scene(
+            self.scene.triangle_positions
+        )
         self.ownership = TriangleOwnership(len(self.scene.centroids))
         self.get_logger().info(
             "Mesh 로드 완료: "
