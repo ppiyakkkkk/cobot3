@@ -90,14 +90,18 @@ def test_constructor_loads_mesh_and_builds_scene(rclpy_context, tmp_path):
 
 
 def _synthetic_scene_and_ownership():
+    # 카메라 원점에서 z=5(near)/z=20(far) 방향으로 겹쳐 놓인 두 삼각형.
+    # 기본 ray_grid_step_px(4px) 격자가 최소 한 개 이상의 광선으로
+    # near 삼각형을 확실히 맞히도록 투영 폭을 충분히 크게 잡는다
+    # (변보다 작으면 격자 간격 사이로 광선이 모두 빠져나갈 수 있다).
     vertices = np.array(
         [
-            [-0.05, -0.05, 5.0],
-            [0.05, -0.05, 5.0],
-            [0.0, 0.05, 5.0],
-            [-0.05, -0.05, 20.0],
-            [0.05, -0.05, 20.0],
-            [0.0, 0.05, 20.0],
+            [-0.5, -0.5, 5.0],
+            [0.5, -0.5, 5.0],
+            [0.0, 0.5, 5.0],
+            [-0.5, -0.5, 20.0],
+            [0.5, -0.5, 20.0],
+            [0.0, 0.5, 20.0],
         ]
     )
     triangles = np.array([[0, 1, 2], [3, 4, 5]])
@@ -117,14 +121,18 @@ def _camera_info():
 def test_process_drone_claims_visible_triangle_and_rejects_occluded_one(
     rclpy_context, tmp_path
 ):
+    # 카메라 원점(0,0,0)에서 +z 방향을 보는 항등 변환.
+    # near 삼각형(z=5)이 far 삼각형(z=20)과 같은 시선 방향에 겹쳐 있으므로
+    # 실제 오클루전으로 far는 가려져야 한다.
     node = _make_node(rclpy_context, tmp_path)
     try:
         node.scene, node.ownership = _synthetic_scene_and_ownership()
+        node.raycasting_scene = coverage_geometry.build_raycasting_scene(
+            node.scene.triangle_positions
+        )
         node.tf_buffer = _StubTfBuffer()
         node.camera_info_by_drone["quadrotor_01"] = _camera_info()
-        depth_image = np.zeros((100, 100), dtype=np.float32)
-        depth_image[50, 50] = 5.0
-        node.depth_by_drone["quadrotor_01"] = depth_image
+        node.depth_shape_by_drone["quadrotor_01"] = (100, 100)
         node.depth_stamp_by_drone["quadrotor_01"] = TimeMsg()
 
         node._process_drone(0, "quadrotor_01")
@@ -134,47 +142,17 @@ def test_process_drone_claims_visible_triangle_and_rejects_occluded_one(
         node.destroy_node()
 
 
-def test_process_drone_claims_triangle_whose_centroid_is_occluded_but_a_vertex_is_visible(
-    rclpy_context, tmp_path
-):
-    # 삼각형 중 정점 하나(0,0,5)만 depth_image와 일치하는 픽셀에 투영되고,
-    # 무게중심(0.667,0.667,5)은 안 보이는(불일치) 픽셀에 투영된다.
-    # 무게중심 1점만 보던 기존 방식이라면 이 삼각형을 놓쳐야 정상이지만,
-    # 다중 샘플링 적용 후에는 claim되어야 한다.
-    node = _make_node(rclpy_context, tmp_path)
-    try:
-        vertices = np.array(
-            [[0.0, 0.0, 5.0], [2.0, 0.0, 5.0], [0.0, 2.0, 5.0]]
-        )
-        triangles = np.array([[0, 1, 2]])
-        node.scene = coverage_geometry.assemble_scene(
-            {"synthetic": (vertices, triangles)}
-        )
-        node.ownership = TriangleOwnership(len(node.scene.centroids))
-        node.tf_buffer = _StubTfBuffer()
-        node.camera_info_by_drone["quadrotor_01"] = _camera_info()
-        depth_image = np.zeros((100, 100), dtype=np.float32)
-        depth_image[50, 50] = 5.0
-        node.depth_by_drone["quadrotor_01"] = depth_image
-        node.depth_stamp_by_drone["quadrotor_01"] = TimeMsg()
-
-        node._process_drone(0, "quadrotor_01")
-
-        np.testing.assert_array_equal(node.ownership.owner_ids, [0])
-    finally:
-        node.destroy_node()
-
-
 def test_process_drone_does_not_overwrite_existing_owner(rclpy_context, tmp_path):
     node = _make_node(rclpy_context, tmp_path)
     try:
         node.scene, node.ownership = _synthetic_scene_and_ownership()
+        node.raycasting_scene = coverage_geometry.build_raycasting_scene(
+            node.scene.triangle_positions
+        )
         node.ownership.claim([0], drone_index=1)
         node.tf_buffer = _StubTfBuffer()
         node.camera_info_by_drone["quadrotor_01"] = _camera_info()
-        depth_image = np.zeros((100, 100), dtype=np.float32)
-        depth_image[50, 50] = 5.0
-        node.depth_by_drone["quadrotor_01"] = depth_image
+        node.depth_shape_by_drone["quadrotor_01"] = (100, 100)
         node.depth_stamp_by_drone["quadrotor_01"] = TimeMsg()
 
         node._process_drone(0, "quadrotor_01")
@@ -230,8 +208,10 @@ def test_process_drone_skips_when_camera_info_missing(rclpy_context, tmp_path):
     node = _make_node(rclpy_context, tmp_path)
     try:
         node.scene, node.ownership = _synthetic_scene_and_ownership()
+        node.raycasting_scene = coverage_geometry.build_raycasting_scene(
+            node.scene.triangle_positions
+        )
         node.tf_buffer = _StubTfBuffer()
-        # camera_info_by_drone에 아무것도 등록하지 않음 (아직 수신 전 상황)
 
         node._process_drone(0, "quadrotor_01")
 
@@ -244,9 +224,12 @@ def test_process_drone_skips_when_depth_missing(rclpy_context, tmp_path):
     node = _make_node(rclpy_context, tmp_path)
     try:
         node.scene, node.ownership = _synthetic_scene_and_ownership()
+        node.raycasting_scene = coverage_geometry.build_raycasting_scene(
+            node.scene.triangle_positions
+        )
         node.tf_buffer = _StubTfBuffer()
         node.camera_info_by_drone["quadrotor_01"] = _camera_info()
-        # depth_by_drone에 아무것도 등록하지 않음 (아직 수신 전 상황)
+        # depth_shape_by_drone에 아무것도 등록하지 않음
 
         node._process_drone(0, "quadrotor_01")
 
@@ -263,11 +246,12 @@ def test_process_drone_skips_when_tf_lookup_fails(rclpy_context, tmp_path):
     node = _make_node(rclpy_context, tmp_path)
     try:
         node.scene, node.ownership = _synthetic_scene_and_ownership()
+        node.raycasting_scene = coverage_geometry.build_raycasting_scene(
+            node.scene.triangle_positions
+        )
         node.tf_buffer = _FailingTfBuffer()
         node.camera_info_by_drone["quadrotor_01"] = _camera_info()
-        depth_image = np.zeros((100, 100), dtype=np.float32)
-        depth_image[50, 50] = 5.0
-        node.depth_by_drone["quadrotor_01"] = depth_image
+        node.depth_shape_by_drone["quadrotor_01"] = (100, 100)
         node.depth_stamp_by_drone["quadrotor_01"] = TimeMsg()
 
         node._process_drone(0, "quadrotor_01")
@@ -307,18 +291,19 @@ def test_process_drone_looks_up_transform_with_correct_frame_order(
     node = _make_node(rclpy_context, tmp_path)
     try:
         node.scene, node.ownership = _synthetic_scene_and_ownership()
+        node.raycasting_scene = coverage_geometry.build_raycasting_scene(
+            node.scene.triangle_positions
+        )
         recording_tf_buffer = _RecordingTfBuffer()
         node.tf_buffer = recording_tf_buffer
         node.camera_info_by_drone["quadrotor_01"] = _camera_info()
-        depth_image = np.zeros((100, 100), dtype=np.float32)
-        depth_image[50, 50] = 5.0
-        node.depth_by_drone["quadrotor_01"] = depth_image
+        node.depth_shape_by_drone["quadrotor_01"] = (100, 100)
         node.depth_stamp_by_drone["quadrotor_01"] = TimeMsg()
 
         node._process_drone(0, "quadrotor_01")
 
         assert [(call[0], call[1]) for call in recording_tf_buffer.calls] == [
-            ("quadrotor_01/camera_optical_frame", node.map_frame)
+            (node.map_frame, "quadrotor_01/camera_optical_frame")
         ]
     finally:
         node.destroy_node()
@@ -333,12 +318,13 @@ def test_process_drone_looks_up_transform_at_depth_image_capture_time(
     node = _make_node(rclpy_context, tmp_path)
     try:
         node.scene, node.ownership = _synthetic_scene_and_ownership()
+        node.raycasting_scene = coverage_geometry.build_raycasting_scene(
+            node.scene.triangle_positions
+        )
         recording_tf_buffer = _RecordingTfBuffer()
         node.tf_buffer = recording_tf_buffer
         node.camera_info_by_drone["quadrotor_01"] = _camera_info()
-        depth_image = np.zeros((100, 100), dtype=np.float32)
-        depth_image[50, 50] = 5.0
-        node.depth_by_drone["quadrotor_01"] = depth_image
+        node.depth_shape_by_drone["quadrotor_01"] = (100, 100)
         node.depth_stamp_by_drone["quadrotor_01"] = TimeMsg(
             sec=123, nanosec=456
         )
@@ -347,6 +333,59 @@ def test_process_drone_looks_up_transform_at_depth_image_capture_time(
 
         used_time = recording_tf_buffer.calls[0][2]
         assert used_time == Time(seconds=123, nanoseconds=456)
+    finally:
+        node.destroy_node()
+
+
+def test_process_drone_records_flashlight_state_with_hit_points(
+    rclpy_context, tmp_path
+):
+    node = _make_node(rclpy_context, tmp_path)
+    try:
+        node.scene, node.ownership = _synthetic_scene_and_ownership()
+        node.raycasting_scene = coverage_geometry.build_raycasting_scene(
+            node.scene.triangle_positions
+        )
+        node.tf_buffer = _StubTfBuffer()
+        node.camera_info_by_drone["quadrotor_01"] = _camera_info()
+        node.depth_shape_by_drone["quadrotor_01"] = (100, 100)
+        node.depth_stamp_by_drone["quadrotor_01"] = TimeMsg()
+
+        node._process_drone(0, "quadrotor_01")
+
+        state = node.flashlight_state["quadrotor_01"]
+        np.testing.assert_allclose(state["origin"], [0.0, 0.0, 0.0], atol=1e-9)
+        assert state["corner_directions"].shape == (4, 3)
+        assert state["hit_points"].shape[1] == 3
+        assert state["hit_points"].shape[0] > 0
+    finally:
+        node.destroy_node()
+
+
+def test_process_drone_clears_flashlight_state_when_tf_lookup_fails(
+    rclpy_context, tmp_path
+):
+    class _FailingTfBuffer:
+        def lookup_transform(self, target_frame, source_frame, time, timeout=None):
+            raise TransformException("no transform available")
+
+    node = _make_node(rclpy_context, tmp_path)
+    try:
+        node.scene, node.ownership = _synthetic_scene_and_ownership()
+        node.raycasting_scene = coverage_geometry.build_raycasting_scene(
+            node.scene.triangle_positions
+        )
+        node.tf_buffer = _StubTfBuffer()
+        node.camera_info_by_drone["quadrotor_01"] = _camera_info()
+        node.depth_shape_by_drone["quadrotor_01"] = (100, 100)
+        node.depth_stamp_by_drone["quadrotor_01"] = TimeMsg()
+        node._process_drone(0, "quadrotor_01")
+        assert "quadrotor_01" in node.flashlight_state
+
+        node.tf_buffer = _FailingTfBuffer()
+        node._process_drone(0, "quadrotor_01")
+
+        assert "quadrotor_01" not in node.flashlight_state
     finally:
         node.destroy_node()
 
@@ -360,13 +399,14 @@ def test_refresh_coverage_first_seen_wins_across_drones_same_cycle(
         assert node.drone_ids[1] == "quadrotor_02"
 
         node.scene, node.ownership = _synthetic_scene_and_ownership()
+        node.raycasting_scene = coverage_geometry.build_raycasting_scene(
+            node.scene.triangle_positions
+        )
         node.tf_buffer = _StubTfBuffer()
 
-        depth_image = np.zeros((100, 100), dtype=np.float32)
-        depth_image[50, 50] = 5.0
         for drone_id in ("quadrotor_01", "quadrotor_02"):
             node.camera_info_by_drone[drone_id] = _camera_info()
-            node.depth_by_drone[drone_id] = depth_image.copy()
+            node.depth_shape_by_drone[drone_id] = (100, 100)
             node.depth_stamp_by_drone[drone_id] = TimeMsg()
 
         node._refresh_coverage()
@@ -409,14 +449,15 @@ def test_refresh_coverage_skips_marker_publish_when_nothing_newly_claimed(
     node = _make_node(rclpy_context, tmp_path)
     try:
         node.scene, node.ownership = _synthetic_scene_and_ownership()
+        node.raycasting_scene = coverage_geometry.build_raycasting_scene(
+            node.scene.triangle_positions
+        )
         all_indices = np.arange(len(node.scene.centroids))
         node.ownership.claim(all_indices, drone_index=0)
 
         node.tf_buffer = _StubTfBuffer()
         node.camera_info_by_drone["quadrotor_01"] = _camera_info()
-        depth_image = np.zeros((100, 100), dtype=np.float32)
-        depth_image[50, 50] = 5.0
-        node.depth_by_drone["quadrotor_01"] = depth_image
+        node.depth_shape_by_drone["quadrotor_01"] = (100, 100)
         node.depth_stamp_by_drone["quadrotor_01"] = TimeMsg()
 
         calls = []
@@ -439,11 +480,12 @@ def test_refresh_coverage_publishes_marker_when_something_newly_claimed(
     node = _make_node(rclpy_context, tmp_path)
     try:
         node.scene, node.ownership = _synthetic_scene_and_ownership()
+        node.raycasting_scene = coverage_geometry.build_raycasting_scene(
+            node.scene.triangle_positions
+        )
         node.tf_buffer = _StubTfBuffer()
         node.camera_info_by_drone["quadrotor_01"] = _camera_info()
-        depth_image = np.zeros((100, 100), dtype=np.float32)
-        depth_image[50, 50] = 5.0
-        node.depth_by_drone["quadrotor_01"] = depth_image
+        node.depth_shape_by_drone["quadrotor_01"] = (100, 100)
         node.depth_stamp_by_drone["quadrotor_01"] = TimeMsg()
 
         calls = []

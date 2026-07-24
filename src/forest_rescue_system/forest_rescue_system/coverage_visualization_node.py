@@ -81,6 +81,7 @@ class CoverageVisualizationNode(TimestampedNode):
 
         self.scene = None
         self.raycasting_scene = None
+        self.flashlight_state = {}
         self.ownership = None
         self.last_mesh_wait_log_at = float("-inf")
 
@@ -206,24 +207,25 @@ class CoverageVisualizationNode(TimestampedNode):
 
     def _process_drone(self, drone_index, drone_id):
         camera_info = self.camera_info_by_drone.get(drone_id)
-        depth_image = self.depth_by_drone.get(drone_id)
+        depth_shape = self.depth_shape_by_drone.get(drone_id)
         depth_stamp = self.depth_stamp_by_drone.get(drone_id)
-        if camera_info is None or depth_image is None or depth_stamp is None:
+        if camera_info is None or depth_shape is None or depth_stamp is None:
+            self.flashlight_state.pop(drone_id, None)
             return False
-
-        candidate_indices = np.where(self.ownership.unclaimed_mask())[0]
-        if candidate_indices.size == 0:
+        if self.raycasting_scene is None:
+            self.flashlight_state.pop(drone_id, None)
             return False
 
         camera_frame = f"{drone_id}/camera_optical_frame"
         try:
             transform_stamped = self.tf_buffer.lookup_transform(
-                camera_frame,
                 self.map_frame,
+                camera_frame,
                 Time.from_msg(depth_stamp),
                 timeout=Duration(seconds=0.0),
             )
         except TransformException:
+            self.flashlight_state.pop(drone_id, None)
             return False
 
         matrix = coverage_geometry.transform_matrix_from_tf(
@@ -239,40 +241,53 @@ class CoverageVisualizationNode(TimestampedNode):
                 transform_stamped.transform.rotation.w,
             ),
         )
-        sample_points = coverage_geometry.triangle_sample_points(
-            self.scene.triangle_positions[candidate_indices]
-        )
-        sample_points_camera = coverage_geometry.apply_transform(
-            sample_points.reshape(-1, 3), matrix
-        ).reshape(sample_points.shape)
-        normals_camera = coverage_geometry.transform_direction(
-            self.scene.normals[candidate_indices], matrix
-        )
+        camera_origin = matrix[:3, 3]
 
-        depth_height, depth_width = depth_image.shape[:2]
+        depth_height, depth_width = depth_shape
         info_width = int(camera_info.width) or depth_width
         info_height = int(camera_info.height) or depth_height
         fx, fy, cx, cy = coverage_geometry.scaled_intrinsics(
             camera_info.k, info_width, info_height, depth_width, depth_height
         )
 
-        visible = coverage_geometry.visibility_mask_multi_sample(
-            sample_points_camera,
-            normals_camera,
-            fx,
-            fy,
-            cx,
-            cy,
-            depth_image,
-            float(self.get_parameter("visibility_tolerance_m").value),
+        grid_u, grid_v = coverage_geometry.pixel_grid_uv(
+            depth_width,
+            depth_height,
+            int(self.get_parameter("ray_grid_step_px").value),
+        )
+        ray_directions_camera = coverage_geometry.pixel_to_camera_ray(
+            grid_u, grid_v, fx, fy, cx, cy
+        )
+        ray_directions_map = coverage_geometry.transform_direction(
+            ray_directions_camera, matrix
+        )
+
+        hit_points, triangle_indices = coverage_geometry.cast_visibility_rays(
+            self.raycasting_scene,
+            camera_origin,
+            ray_directions_map,
             float(self.get_parameter("minimum_depth_m").value),
             float(self.get_parameter("maximum_depth_m").value),
         )
-        visible_global_indices = candidate_indices[visible]
+
+        corner_u = np.array([0.0, float(depth_width), 0.0, float(depth_width)])
+        corner_v = np.array([0.0, 0.0, float(depth_height), float(depth_height)])
+        corner_directions_camera = coverage_geometry.pixel_to_camera_ray(
+            corner_u, corner_v, fx, fy, cx, cy
+        )
+        corner_directions_map = coverage_geometry.transform_direction(
+            corner_directions_camera, matrix
+        )
+        self.flashlight_state[drone_id] = {
+            "origin": camera_origin,
+            "corner_directions": corner_directions_map,
+            "hit_points": hit_points,
+        }
+
         newly_claimed = np.asarray([], dtype=np.int64)
-        if visible_global_indices.size:
+        if triangle_indices.size:
             newly_claimed = self.ownership.claim(
-                visible_global_indices, drone_index
+                np.unique(triangle_indices), drone_index
             )
         return bool(newly_claimed.size)
 
