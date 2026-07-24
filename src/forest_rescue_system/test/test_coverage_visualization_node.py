@@ -1,8 +1,10 @@
+from builtin_interfaces.msg import Time as TimeMsg
 import numpy as np
 import pytest
 import rclpy
 from geometry_msgs.msg import TransformStamped
 from rclpy.parameter import Parameter
+from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo
 from tf2_ros import TransformException
 
@@ -23,13 +25,13 @@ class _StubTfBuffer:
 
 
 class _RecordingTfBuffer:
-    """lookup_transform 호출 시 (target_frame, source_frame) 인자를 기록하는 테스트용 TF 버퍼."""
+    """lookup_transform 호출 시 (target_frame, source_frame, time) 인자를 기록하는 테스트용 TF 버퍼."""
 
     def __init__(self):
         self.calls = []
 
     def lookup_transform(self, target_frame, source_frame, time, timeout=None):
-        self.calls.append((target_frame, source_frame))
+        self.calls.append((target_frame, source_frame, time))
         stamped = TransformStamped()
         stamped.transform.rotation.w = 1.0
         return stamped
@@ -123,6 +125,7 @@ def test_process_drone_claims_visible_triangle_and_rejects_occluded_one(
         depth_image = np.zeros((100, 100), dtype=np.float32)
         depth_image[50, 50] = 5.0
         node.depth_by_drone["quadrotor_01"] = depth_image
+        node.depth_stamp_by_drone["quadrotor_01"] = TimeMsg()
 
         node._process_drone(0, "quadrotor_01")
 
@@ -153,6 +156,7 @@ def test_process_drone_claims_triangle_whose_centroid_is_occluded_but_a_vertex_i
         depth_image = np.zeros((100, 100), dtype=np.float32)
         depth_image[50, 50] = 5.0
         node.depth_by_drone["quadrotor_01"] = depth_image
+        node.depth_stamp_by_drone["quadrotor_01"] = TimeMsg()
 
         node._process_drone(0, "quadrotor_01")
 
@@ -171,6 +175,7 @@ def test_process_drone_does_not_overwrite_existing_owner(rclpy_context, tmp_path
         depth_image = np.zeros((100, 100), dtype=np.float32)
         depth_image[50, 50] = 5.0
         node.depth_by_drone["quadrotor_01"] = depth_image
+        node.depth_stamp_by_drone["quadrotor_01"] = TimeMsg()
 
         node._process_drone(0, "quadrotor_01")
 
@@ -263,6 +268,7 @@ def test_process_drone_skips_when_tf_lookup_fails(rclpy_context, tmp_path):
         depth_image = np.zeros((100, 100), dtype=np.float32)
         depth_image[50, 50] = 5.0
         node.depth_by_drone["quadrotor_01"] = depth_image
+        node.depth_stamp_by_drone["quadrotor_01"] = TimeMsg()
 
         node._process_drone(0, "quadrotor_01")
 
@@ -307,12 +313,40 @@ def test_process_drone_looks_up_transform_with_correct_frame_order(
         depth_image = np.zeros((100, 100), dtype=np.float32)
         depth_image[50, 50] = 5.0
         node.depth_by_drone["quadrotor_01"] = depth_image
+        node.depth_stamp_by_drone["quadrotor_01"] = TimeMsg()
 
         node._process_drone(0, "quadrotor_01")
 
-        assert recording_tf_buffer.calls == [
+        assert [(call[0], call[1]) for call in recording_tf_buffer.calls] == [
             ("quadrotor_01/camera_optical_frame", node.map_frame)
         ]
+    finally:
+        node.destroy_node()
+
+
+def test_process_drone_looks_up_transform_at_depth_image_capture_time(
+    rclpy_context, tmp_path
+):
+    # TF는 처리 시점의 "최신" 자세가 아니라, depth 이미지가 실제로 찍힌
+    # 시각(header.stamp) 기준으로 조회해야 드론 이동 중 투영이 어긋나지
+    # 않는다.
+    node = _make_node(rclpy_context, tmp_path)
+    try:
+        node.scene, node.ownership = _synthetic_scene_and_ownership()
+        recording_tf_buffer = _RecordingTfBuffer()
+        node.tf_buffer = recording_tf_buffer
+        node.camera_info_by_drone["quadrotor_01"] = _camera_info()
+        depth_image = np.zeros((100, 100), dtype=np.float32)
+        depth_image[50, 50] = 5.0
+        node.depth_by_drone["quadrotor_01"] = depth_image
+        node.depth_stamp_by_drone["quadrotor_01"] = TimeMsg(
+            sec=123, nanosec=456
+        )
+
+        node._process_drone(0, "quadrotor_01")
+
+        used_time = recording_tf_buffer.calls[0][2]
+        assert used_time == Time(seconds=123, nanoseconds=456)
     finally:
         node.destroy_node()
 
@@ -333,6 +367,7 @@ def test_refresh_coverage_first_seen_wins_across_drones_same_cycle(
         for drone_id in ("quadrotor_01", "quadrotor_02"):
             node.camera_info_by_drone[drone_id] = _camera_info()
             node.depth_by_drone[drone_id] = depth_image.copy()
+            node.depth_stamp_by_drone[drone_id] = TimeMsg()
 
         node._refresh_coverage()
 
@@ -382,6 +417,7 @@ def test_refresh_coverage_skips_marker_publish_when_nothing_newly_claimed(
         depth_image = np.zeros((100, 100), dtype=np.float32)
         depth_image[50, 50] = 5.0
         node.depth_by_drone["quadrotor_01"] = depth_image
+        node.depth_stamp_by_drone["quadrotor_01"] = TimeMsg()
 
         calls = []
 
@@ -408,6 +444,7 @@ def test_refresh_coverage_publishes_marker_when_something_newly_claimed(
         depth_image = np.zeros((100, 100), dtype=np.float32)
         depth_image[50, 50] = 5.0
         node.depth_by_drone["quadrotor_01"] = depth_image
+        node.depth_stamp_by_drone["quadrotor_01"] = TimeMsg()
 
         calls = []
 

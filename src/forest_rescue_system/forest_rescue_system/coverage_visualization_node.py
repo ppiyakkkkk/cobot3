@@ -87,6 +87,7 @@ class CoverageVisualizationNode(TimestampedNode):
         self.bridge = CvBridge()
         self.camera_info_by_drone = {}
         self.depth_by_drone = {}
+        self.depth_stamp_by_drone = {}
 
         for drone_id in self.drone_ids:
             self.create_subscription(
@@ -148,6 +149,7 @@ class CoverageVisualizationNode(TimestampedNode):
         self.depth_by_drone[drone_id] = np.asarray(
             depth, dtype=np.float32
         ).copy()
+        self.depth_stamp_by_drone[drone_id] = message.header.stamp
 
     def _load_mesh_if_ready(self):
         if self.scene is not None:
@@ -210,7 +212,8 @@ class CoverageVisualizationNode(TimestampedNode):
     def _process_drone(self, drone_index, drone_id):
         camera_info = self.camera_info_by_drone.get(drone_id)
         depth_image = self.depth_by_drone.get(drone_id)
-        if camera_info is None or depth_image is None:
+        depth_stamp = self.depth_stamp_by_drone.get(drone_id)
+        if camera_info is None or depth_image is None or depth_stamp is None:
             return False
 
         candidate_indices = np.where(self.ownership.unclaimed_mask())[0]
@@ -222,7 +225,7 @@ class CoverageVisualizationNode(TimestampedNode):
             transform_stamped = self.tf_buffer.lookup_transform(
                 camera_frame,
                 self.map_frame,
-                Time(),
+                Time.from_msg(depth_stamp),
                 timeout=Duration(seconds=0.0),
             )
         except TransformException:
