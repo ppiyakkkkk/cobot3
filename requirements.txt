@@ -7,4 +7,6 @@ ultralytics
 empy==3.3.4
 
 # 커버리지 레이캐스팅(coverage_visualization_node)에 사용
-open3d
+open3d==0.19.0
+scikit-learn==1.7.2
+scipy==1.15.3
