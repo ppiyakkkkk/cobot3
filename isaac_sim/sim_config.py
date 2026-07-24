@@ -214,7 +214,7 @@ RETURN_OBSTACLE_CLEARANCE_M = 3.0
 # 입력 USD와 자동 생성 파일 경로
 # ---------------------------------------------------------------------------
 SCRIPT_DIR = Path(__file__).resolve().parent
-FOREST_WORLD_PATH = SCRIPT_DIR / "worlds" / "my_forest.usd"
+FOREST_WORLD_PATH = SCRIPT_DIR / "worlds" / "my_forest.usdc"
 GENERATED_SEARCH_PLAN_PATH = SCRIPT_DIR / "generated_search_plan.json"
 GENERATED_GROUND_TRUTH_PATH = SCRIPT_DIR / "generated_ground_truth.json"
 GENERATED_TERRAIN_MESH_PATH = SCRIPT_DIR / "generated_terrain_mesh.npz"
