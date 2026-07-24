@@ -34,6 +34,8 @@ coverage_visualization_node:
     refresh_period_sec: 1.0
     area_publish_period_sec: 1.0
     ray_grid_step_px: 4
+    flashlight_marker_topic: /forest_rescue/flashlight_markers
+    flashlight_color_rgb: [1.0, 0.95, 0.7]
     minimum_depth_m: 0.20
     maximum_depth_m: 30.0
     coverage_z_offset_m: 0.05

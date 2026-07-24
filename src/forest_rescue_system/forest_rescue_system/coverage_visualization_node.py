@@ -61,6 +61,10 @@ class CoverageVisualizationNode(TimestampedNode):
         self.declare_parameter("refresh_period_sec", 1.0)
         self.declare_parameter("area_publish_period_sec", 1.0)
         self.declare_parameter("ray_grid_step_px", 4)
+        self.declare_parameter(
+            "flashlight_marker_topic", "/forest_rescue/flashlight_markers"
+        )
+        self.declare_parameter("flashlight_color_rgb", [1.0, 0.95, 0.7])
         self.declare_parameter("minimum_depth_m", 0.20)
         self.declare_parameter("maximum_depth_m", 20.0)
         self.declare_parameter("coverage_z_offset_m", 0.05)
@@ -82,6 +86,7 @@ class CoverageVisualizationNode(TimestampedNode):
         self.scene = None
         self.raycasting_scene = None
         self.flashlight_state = {}
+        self._flashlight_published_drones = set()
         self.ownership = None
         self.last_mesh_wait_log_at = float("-inf")
 
@@ -118,6 +123,15 @@ class CoverageVisualizationNode(TimestampedNode):
             Float32,
             str(self.get_parameter("coverage_area_topic").value),
             10,
+        )
+
+        flashlight_qos = QoSProfile(depth=1)
+        flashlight_qos.reliability = ReliabilityPolicy.RELIABLE
+        flashlight_qos.durability = DurabilityPolicy.VOLATILE
+        self.flashlight_marker_publisher = self.create_publisher(
+            MarkerArray,
+            str(self.get_parameter("flashlight_marker_topic").value),
+            flashlight_qos,
         )
 
         self._load_mesh_if_ready()
