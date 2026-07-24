@@ -5,6 +5,8 @@
 from dataclasses import dataclass
 
 import numpy as np
+import open3d as o3d
+import open3d.core as o3c
 
 
 @dataclass
@@ -130,6 +132,55 @@ def pixel_grid_uv(width, height, step_px):
     v = np.arange(0, height, step_px, dtype=np.float64) + 0.5
     grid_u, grid_v = np.meshgrid(u, v)
     return grid_u.ravel(), grid_v.ravel()
+
+
+def build_raycasting_scene(triangle_positions):
+    triangle_positions = np.asarray(triangle_positions, dtype=np.float64)
+    vertices = triangle_positions.reshape(-1, 3).astype(np.float32)
+    triangle_count = triangle_positions.shape[0]
+    triangles = np.arange(vertices.shape[0], dtype=np.uint32).reshape(
+        triangle_count, 3
+    )
+    scene = o3d.t.geometry.RaycastingScene()
+    scene.add_triangles(
+        o3c.Tensor(vertices, dtype=o3c.float32),
+        o3c.Tensor(triangles, dtype=o3c.uint32),
+    )
+    return scene
+
+
+def cast_visibility_rays(
+    scene, ray_origin, ray_directions, min_depth_m, max_depth_m
+):
+    ray_origin = np.asarray(ray_origin, dtype=np.float64)
+    ray_directions = np.asarray(ray_directions, dtype=np.float64)
+    ray_count = ray_directions.shape[0]
+    if ray_count == 0:
+        return (
+            np.zeros((0, 3), dtype=np.float64),
+            np.zeros((0,), dtype=np.int64),
+        )
+
+    norms = np.linalg.norm(ray_directions, axis=1, keepdims=True)
+    safe_norms = np.where(norms > 0.0, norms, 1.0)
+    unit_directions = ray_directions / safe_norms
+
+    origins = np.broadcast_to(ray_origin, (ray_count, 3))
+    rays = np.concatenate([origins, unit_directions], axis=1).astype(
+        np.float32
+    )
+
+    result = scene.cast_rays(o3c.Tensor(rays, dtype=o3c.float32))
+    t_hit = result["t_hit"].numpy()
+    primitive_ids = result["primitive_ids"].numpy()
+
+    valid = (
+        np.isfinite(t_hit) & (t_hit >= min_depth_m) & (t_hit <= max_depth_m)
+    )
+    valid_t = t_hit[valid].astype(np.float64)
+    hit_points = ray_origin + unit_directions[valid] * valid_t[:, np.newaxis]
+    triangle_indices = primitive_ids[valid].astype(np.int64)
+    return hit_points, triangle_indices
 
 
 # 그레이징(스침) 각도에서 depth tolerance를 얼마나/어디까지 넓힐지에 대한 기본값.

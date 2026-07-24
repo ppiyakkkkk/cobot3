@@ -271,3 +271,121 @@ def test_pixel_grid_uv_subsamples_with_step_px():
     # arange(0,10,4) = [0,4,8] -> 3x3 = 9개
     assert u.shape == (9,)
     np.testing.assert_allclose(sorted(np.unique(u)), [0.5, 4.5, 8.5])
+
+
+def _single_triangle_scene(z=5.0):
+    vertices = np.array(
+        [[-1.0, -1.0, z], [1.0, -1.0, z], [0.0, 1.0, z]]
+    )
+    triangles = np.array([[0, 1, 2]])
+    return coverage_geometry.build_raycasting_scene(
+        coverage_geometry.triangle_vertex_positions(vertices, triangles)
+    )
+
+
+def test_cast_visibility_rays_hits_triangle_facing_camera():
+    scene = _single_triangle_scene(z=5.0)
+    hit_points, triangle_indices = coverage_geometry.cast_visibility_rays(
+        scene,
+        ray_origin=np.array([0.0, 0.0, 0.0]),
+        ray_directions=np.array([[0.0, 0.0, 1.0]]),
+        min_depth_m=0.2,
+        max_depth_m=30.0,
+    )
+    assert triangle_indices.tolist() == [0]
+    np.testing.assert_allclose(hit_points, [[0.0, 0.0, 5.0]], atol=1e-5)
+
+
+def test_cast_visibility_rays_misses_when_ray_points_away():
+    scene = _single_triangle_scene(z=5.0)
+    hit_points, triangle_indices = coverage_geometry.cast_visibility_rays(
+        scene,
+        ray_origin=np.array([0.0, 0.0, 0.0]),
+        ray_directions=np.array([[0.0, 0.0, -1.0]]),
+        min_depth_m=0.2,
+        max_depth_m=30.0,
+    )
+    assert triangle_indices.shape == (0,)
+    assert hit_points.shape == (0, 3)
+
+
+def test_cast_visibility_rays_respects_max_depth_clipping():
+    scene = _single_triangle_scene(z=5.0)
+    hit_points, triangle_indices = coverage_geometry.cast_visibility_rays(
+        scene,
+        ray_origin=np.array([0.0, 0.0, 0.0]),
+        ray_directions=np.array([[0.0, 0.0, 1.0]]),
+        min_depth_m=0.2,
+        max_depth_m=3.0,  # 삼각형(z=5)보다 가까운 far clip
+    )
+    assert triangle_indices.shape == (0,)
+
+
+def test_cast_visibility_rays_occluder_blocks_farther_triangle():
+    # 가까운 삼각형(z=5)이 먼 삼각형(z=20)과 같은 광선 방향에 겹쳐 있으면
+    # 가까운 쪽만 히트되어야 한다 (실제 오클루션, tolerance 없음).
+    near = coverage_geometry.triangle_vertex_positions(
+        np.array([[-1.0, -1.0, 5.0], [1.0, -1.0, 5.0], [0.0, 1.0, 5.0]]),
+        np.array([[0, 1, 2]]),
+    )
+    far = coverage_geometry.triangle_vertex_positions(
+        np.array([[-1.0, -1.0, 20.0], [1.0, -1.0, 20.0], [0.0, 1.0, 20.0]]),
+        np.array([[0, 1, 2]]),
+    )
+    both = np.concatenate([near, far], axis=0)
+    scene = coverage_geometry.build_raycasting_scene(both)
+
+    hit_points, triangle_indices = coverage_geometry.cast_visibility_rays(
+        scene,
+        ray_origin=np.array([0.0, 0.0, 0.0]),
+        ray_directions=np.array([[0.0, 0.0, 1.0]]),
+        min_depth_m=0.2,
+        max_depth_m=30.0,
+    )
+    assert triangle_indices.tolist() == [0]  # near, not far(index 1)
+    np.testing.assert_allclose(hit_points, [[0.0, 0.0, 5.0]], atol=1e-5)
+
+
+def test_cast_visibility_rays_hits_grazing_angle_downslope_triangle():
+    # 원래 버그 재현: 카메라 시선과 거의 평행한(그레이징) 내리막 삼각형.
+    # 뎁스 리프로젝션 비교 방식은 tolerance 튜닝에 의존했지만, 레이캐스팅은
+    # 정확한 ray-triangle 교차라 그레이징 각도와 무관하게 항상 히트되어야 한다.
+    # 광선을 삼각형의 무게중심으로 정확히 조준한다 (무게중심은 정점 3개의
+    # 평균이므로 비퇴화 삼각형이라면 항상 삼각형 내부에 있음이 보장된다 -
+    # 손으로 배리센트릭 좌표를 계산하지 않아도 교차가 확실하다).
+    vertices = np.array(
+        [
+            [-1.0, 10.0, 0.0],
+            [1.0, 10.0, 0.0],
+            [0.0, 11.0, -0.1],  # y(카메라로부터의 거리)가 커질수록 z가 낮아지는 완만한 내리막
+        ]
+    )
+    triangles = np.array([[0, 1, 2]])
+    scene = coverage_geometry.build_raycasting_scene(
+        coverage_geometry.triangle_vertex_positions(vertices, triangles)
+    )
+    centroid = vertices.mean(axis=0)
+    ray_direction = centroid / np.linalg.norm(centroid)
+
+    hit_points, triangle_indices = coverage_geometry.cast_visibility_rays(
+        scene,
+        ray_origin=np.array([0.0, 0.0, 0.0]),
+        ray_directions=np.array([ray_direction]),
+        min_depth_m=0.2,
+        max_depth_m=30.0,
+    )
+    assert triangle_indices.tolist() == [0]
+    np.testing.assert_allclose(hit_points[0], centroid, atol=1e-5)
+
+
+def test_cast_visibility_rays_handles_empty_ray_array():
+    scene = _single_triangle_scene(z=5.0)
+    hit_points, triangle_indices = coverage_geometry.cast_visibility_rays(
+        scene,
+        ray_origin=np.array([0.0, 0.0, 0.0]),
+        ray_directions=np.zeros((0, 3)),
+        min_depth_m=0.2,
+        max_depth_m=30.0,
+    )
+    assert hit_points.shape == (0, 3)
+    assert triangle_indices.shape == (0,)
