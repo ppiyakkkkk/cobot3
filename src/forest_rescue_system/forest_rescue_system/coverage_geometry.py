@@ -115,6 +115,23 @@ def transform_direction(vectors, matrix):
     return vectors @ matrix[:3, :3].T
 
 
+def pixel_to_camera_ray(u, v, fx, fy, cx, cy):
+    u = np.asarray(u, dtype=np.float64)
+    v = np.asarray(v, dtype=np.float64)
+    directions = np.stack(
+        [(u - cx) / fx, (v - cy) / fy, np.ones_like(u)], axis=-1
+    )
+    norms = np.linalg.norm(directions, axis=-1, keepdims=True)
+    return directions / norms
+
+
+def pixel_grid_uv(width, height, step_px):
+    u = np.arange(0, width, step_px, dtype=np.float64) + 0.5
+    v = np.arange(0, height, step_px, dtype=np.float64) + 0.5
+    grid_u, grid_v = np.meshgrid(u, v)
+    return grid_u.ravel(), grid_v.ravel()
+
+
 # 그레이징(스침) 각도에서 depth tolerance를 얼마나/어디까지 넓힐지에 대한 기본값.
 DEFAULT_NEIGHBORHOOD_PX = 1
 DEFAULT_MIN_GRAZING_COSINE = 0.2

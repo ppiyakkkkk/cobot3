@@ -229,3 +229,45 @@ def test_visibility_mask_matches_neighboring_pixel_within_window():
         tolerance_m=0.1, min_depth_m=0.2, max_depth_m=30.0,
     )
     np.testing.assert_array_equal(mask, [True])
+
+
+def test_pixel_to_camera_ray_at_principal_point_points_straight_ahead():
+    direction = coverage_geometry.pixel_to_camera_ray(
+        u=50.0, v=50.0, fx=100.0, fy=100.0, cx=50.0, cy=50.0
+    )
+    np.testing.assert_allclose(direction, [0.0, 0.0, 1.0], atol=1e-9)
+
+
+def test_pixel_to_camera_ray_returns_normalized_offset_direction():
+    # u=cx+fx, v=cy -> 카메라 프레임에서 (1,0,1) 방향, 정규화 후 1/sqrt(2)
+    direction = coverage_geometry.pixel_to_camera_ray(
+        u=150.0, v=50.0, fx=100.0, fy=100.0, cx=50.0, cy=50.0
+    )
+    expected = np.array([1.0, 0.0, 1.0]) / np.sqrt(2.0)
+    np.testing.assert_allclose(direction, expected, atol=1e-9)
+
+
+def test_pixel_to_camera_ray_vectorizes_over_arrays():
+    directions = coverage_geometry.pixel_to_camera_ray(
+        u=np.array([50.0, 150.0]),
+        v=np.array([50.0, 50.0]),
+        fx=100.0, fy=100.0, cx=50.0, cy=50.0,
+    )
+    assert directions.shape == (2, 3)
+    np.testing.assert_allclose(directions[0], [0.0, 0.0, 1.0], atol=1e-9)
+
+
+def test_pixel_grid_uv_covers_full_frame_with_step_one():
+    u, v = coverage_geometry.pixel_grid_uv(width=4, height=2, step_px=1)
+    assert u.shape == (8,)
+    assert v.shape == (8,)
+    # 픽셀 중심이므로 0.5, 1.5, 2.5, 3.5 값만 나와야 한다
+    np.testing.assert_allclose(sorted(np.unique(u)), [0.5, 1.5, 2.5, 3.5])
+    np.testing.assert_allclose(sorted(np.unique(v)), [0.5, 1.5])
+
+
+def test_pixel_grid_uv_subsamples_with_step_px():
+    u, v = coverage_geometry.pixel_grid_uv(width=10, height=10, step_px=4)
+    # arange(0,10,4) = [0,4,8] -> 3x3 = 9개
+    assert u.shape == (9,)
+    np.testing.assert_allclose(sorted(np.unique(u)), [0.5, 4.5, 8.5])
