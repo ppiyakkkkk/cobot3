@@ -16,9 +16,9 @@ async def set_telemetry_rate(drone, stage):
         # attitude_euler와 attitude_angular_velocity_body는 동일한 MAVLink
         # ATTITUDE 메시지를 디코드하므로 rate 설정도 공유된다.
         await drone.telemetry.set_rate_attitude_euler(hz)
-    elif stage == "velocity":
-        await drone.telemetry.set_rate_velocity_ned(hz)
     else:
+        # velocity/position 두 stage 모두 STREAM_BUILDERS에서
+        # position_velocity_ned()를 구독하므로 rate 설정도 이걸로 통일한다.
         await drone.telemetry.set_rate_position_velocity_ned(hz)
 
 
