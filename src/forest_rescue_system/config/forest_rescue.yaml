@@ -7,75 +7,122 @@ rviz_visualization_node:
     terrain_marker_topic: /forest_rescue/terrain_mesh
     environment_marker_topic: /forest_rescue/environment_meshes
     map_frame: map
-    # 실제 값은 launch의 operation_mode가 덮어쓴다.
     operation_mode: rescue_search
-    # 실제 목록은 launch의 drone_count(1~4)가 덮어쓴다.
-    drone_ids: [quadrotor_01, quadrotor_02, quadrotor_03]
+    drone_ids:
+    - quadrotor_01
+    - quadrotor_02
+    - quadrotor_03
     drone_marker_topic: /forest_rescue/drone_markers
     refresh_period_sec: 0.5
-    # 초록색 반투명 산 표면
-    terrain_color_rgb: [0.10, 0.55, 0.12]
+    terrain_color_rgb:
+    - 0.1
+    - 0.55
+    - 0.12
     terrain_alpha: 0.72
     terrain_z_offset_m: 0.0
-
-    # 실제 USD 그룹별 표시 색상
-    pineforest_color_rgb: [0.03, 0.28, 0.06]
+    pineforest_color_rgb:
+    - 0.03
+    - 0.28
+    - 0.06
     pineforest_alpha: 1.0
-    broadleafforest_color_rgb: [0.12, 0.48, 0.10]
+    broadleafforest_color_rgb:
+    - 0.12
+    - 0.48
+    - 0.1
     broadleafforest_alpha: 1.0
-    bushes_color_rgb: [0.42, 0.68, 0.10]
+    bushes_color_rgb:
+    - 0.42
+    - 0.68
+    - 0.1
     bushes_alpha: 1.0
-    rocks_color_rgb: [0.42, 0.42, 0.45]
+    rocks_color_rgb:
+    - 0.42
+    - 0.42
+    - 0.45
     rocks_alpha: 1.0
-
+    bridge_color_rgb:
+    - 0.42
+    - 0.24
+    - 0.08
+    bridge_alpha: 1.0
+    bridge_z_offset_m: 0.02
+    river_color_rgb:
+    - 0.02
+    - 0.45
+    - 0.95
+    river_alpha: 0.95
+    river_z_offset_m: 0.08
 mission_manager_node:
   ros__parameters:
     operation_mode: rescue_search
-    # 실제 목록은 launch의 drone_count(1~4)가 덮어쓴다.
-    drone_ids: [quadrotor_01, quadrotor_02, quadrotor_03]
+    drone_ids:
+    - quadrotor_01
+    - quadrotor_02
+    - quadrotor_03
     search_plan_path: ~/b3_cobot3_ws/isaac_sim/generated_search_plan.json
-    # Isaac Sim과 ROS launch의 drone_count가 다르면 수색 시작을 거부한다.
     require_search_plan_match: true
-    fallback_search_area_bounds_xy: [-46.7, 46.7, -46.7, 46.7]
+    fallback_search_area_bounds_xy:
+    - -46.7
+    - 46.7
+    - -46.7
+    - 46.7
     required_detection_frames: 3
-    minimum_detection_confidence: 0.40
-    # 미션 시작 지점에 있는 구조자를 조난자로 확정하지 않는 유예시간
+    minimum_detection_confidence: 0.4
     detection_start_delay_sec: 5.0
     require_map_position_before_detection: true
     start_exclusion_radius_m: 15.0
-    start_exclusion_centers_xy: [-34.0, 40.0, -29.0, 40.0, -39.0, 40.0, -34.0, 45.0]
-    # 동일 RGB stamp의 map 위치 3개가 이 반경 안에서 일치해야 확정한다.
+    start_exclusion_centers_xy:
+    - -34.0
+    - 40.0
+    - -29.0
+    - 40.0
+    - -39.0
+    - 40.0
+    - -34.0
+    - 45.0
     detection_position_consistency_radius_m: 4.0
     detection_position_timeout_sec: 1.0
     detection_window_sec: 2.0
     maximum_missed_detections: 2
-    # 조난자 바로 위가 아니라 이 높이만큼 위의 안전 지점으로 접근한다.
     victim_approach_height_m: 7.0
-    # generated_search_plan.json을 우선 사용하며, 아래 값은 V1 호환용이다.
-    search_zone_bounds_xy: [-46.7, 46.7, 13.55, 46.7, -46.7, 46.7, -13.55, 13.55, -46.7, 46.7, -46.7, -13.55]
+    search_zone_bounds_xy:
+    - -46.7
+    - 46.7
+    - 13.55
+    - 46.7
+    - -46.7
+    - 46.7
+    - -13.55
+    - 13.55
+    - -46.7
+    - 46.7
+    - -46.7
+    - -13.55
     auto_takeoff_on_connect: true
     terrain_mesh_path: ~/b3_cobot3_ws/isaac_sim/generated_terrain_mesh.npz
     cooperative_lane_spacing_m: 4.0
     cooperative_sample_spacing_m: 4.0
-    cooperative_terrain_profile_spacing_m: 1.0
-    cooperative_transit_altitude_step_m: 2.0
+    cooperative_terrain_profile_spacing_m: 0.5
+    cooperative_transit_altitude_step_m: 1.0
     cooperative_subzone_margin_m: 0.6
     cooperative_prepare_timeout_sec: 20.0
     cooperative_marker_topic: /mission/cooperative_search/markers
-
+    navigation_surface_path: ~/b3_cobot3_ws/isaac_sim/generated_navigation_surface.npz
+    cooperative_transit_profile_spacing_m: 3.0
+    cooperative_max_climb_step_m: 2.5
+    cooperative_max_descent_step_m: 2.0
+    cooperative_transit_climb_only: true
+    cooperative_transit_skip_current_waypoint: true
 mapping_manager_node:
   ros__parameters:
     operation_mode: mapping_3d
-    # 실제 목록은 launch의 drone_count(1~4)가 덮어쓴다.
-    drone_ids: [quadrotor_01, quadrotor_02, quadrotor_03]
-    # 현재 골격에서도 PX4 연결 후 초기 이륙·Hover까지 검증한다.
+    drone_ids:
+    - quadrotor_01
+    - quadrotor_02
+    - quadrotor_03
     auto_takeoff_on_connect: true
     ground_truth_path: ~/b3_cobot3_ws/isaac_sim/generated_ground_truth.json
     require_simulation_mode_match: true
-
-# ---------------------------------------------------------------------------
-# Drone 01
-# ---------------------------------------------------------------------------
 human_detector_01:
   ros__parameters:
     drone_id: quadrotor_01
@@ -87,7 +134,7 @@ human_detector_01:
     detector_mode: yolo
     model_path: ~/b3_cobot3_ws/models/yolo11s.pt
     person_class_id: 0
-    confidence_threshold: 0.40
+    confidence_threshold: 0.4
     inference_period_sec: 0.05
     inference_image_size: 960
     save_confirmed_image: true
@@ -95,14 +142,17 @@ human_detector_01:
     saved_image_jpeg_quality: 95
     detection_start_delay_sec: 5.0
     detect_only_while_searching: true
-    active_detection_states: [SEARCHING, COOP_SEARCH_PREPARING, COOP_SEARCH_TRANSIT, COOP_SEARCHING]
+    active_detection_states:
+    - SEARCHING
+    - COOP_SEARCH_PREPARING
+    - COOP_SEARCH_TRANSIT
+    - COOP_SEARCHING
     mock_delay_sec: 8.0
     mock_confidence: 0.95
     mock_x_min_ratio: 0.46
     mock_y_min_ratio: 0.38
     mock_x_max_ratio: 0.54
     mock_y_max_ratio: 0.66
-
 victim_localizer_01:
   ros__parameters:
     drone_id: quadrotor_01
@@ -112,34 +162,49 @@ victim_localizer_01:
     camera_position_topic: /drone_01/victim/position_camera
     map_position_topic: /drone_01/victim/position_map
     mission_state_topic: /mission/state
-    active_localization_states: [SEARCHING, COOP_SEARCH_TRANSIT, COOP_SEARCHING, VICTIM_DETECTED, VICTIM_LOCATED]
+    active_localization_states:
+    - SEARCHING
+    - COOP_SEARCH_TRANSIT
+    - COOP_SEARCHING
+    - VICTIM_DETECTED
+    - VICTIM_LOCATED
     camera_frame_override: quadrotor_01/camera_optical_frame
     map_frame: map
-    roi_center_ratio: 0.50
-    minimum_depth_m: 0.20
+    roi_center_ratio: 0.5
+    minimum_depth_m: 0.2
     maximum_depth_m: 30.0
     depth_buffer_duration_sec: 1.0
     depth_buffer_max_frames: 40
     max_depth_detection_time_delta_sec: 0.25
-    # RGB 촬영 시각보다 TF 수신이 수십 ms 늦을 때 콜백을 막지 않고 재시도
     tf_retry_timeout_sec: 1.0
     tf_retry_period_sec: 0.02
     tf_retry_max_points: 40
     log_period_sec: 10.0
-
 sensor_tf_01:
   ros__parameters:
     base_frame: quadrotor_01/base_link
     camera_frame: quadrotor_01/camera_optical_frame
     lidar_frame: quadrotor_01/base_scan
-    camera_translation: [0.0, 0.0, 0.0]
-    # Isaac sim_config.py의 CAMERA_DOWN_TILT_DEG와 같은 값이다.
+    camera_translation:
+    - 0.0
+    - 0.0
+    - 0.0
     camera_down_tilt_deg: 40.0
     derive_camera_quaternion_from_tilt: true
-    camera_quaternion_xyzw: [-0.640856, 0.640856, -0.298836, 0.298836]
-    lidar_translation: [0.0, 0.0, 0.15]
-    lidar_quaternion_xyzw: [0.0, 0.0, 0.0, 1.0]
-
+    camera_quaternion_xyzw:
+    - -0.640856
+    - 0.640856
+    - -0.298836
+    - 0.298836
+    lidar_translation:
+    - 0.0
+    - 0.0
+    - 0.15
+    lidar_quaternion_xyzw:
+    - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
 pointcloud_local_mapper_01:
   ros__parameters:
     drone_id: quadrotor_01
@@ -150,37 +215,43 @@ pointcloud_local_mapper_01:
     accumulated_cloud_topic: /drone_01/obstacle/accumulated_cloud
     accumulated_cloud_body_topic: /drone_01/obstacle/accumulated_cloud_body
     local_costmap_topic: /drone_01/obstacle/local_costmap
-    # 최근 3초를 슬라이딩 윈도우로 유지한다.
-    accumulation_sec: 3.0
-    processing_period_sec: 0.10
-    publish_period_sec: 0.20
-    # PointCloud가 먼저 도착해도 콜백을 막지 않고 exact timestamp TF를 기다린다.
+    accumulation_sec: 1.5
+    processing_period_sec: 0.1
+    publish_period_sec: 0.2
     tf_retry_period_sec: 0.02
-    # 시뮬레이션이 느릴 때도 한두 TF 주기를 충분히 기다리도록 wall time 1초.
-    tf_exact_wait_sec: 1.00
-    # 누적 지도에는 exact timestamp TF만 사용하며 latest TF로 대체하지 않는다.
+    tf_exact_wait_sec: 1.0
     pending_cloud_queue_size: 30
-    # 잘못된 한 프레임이 뒤 프레임 처리를 막지 않도록 매 주기 여러 개를 검사한다.
     max_pending_clouds_per_cycle: 8
     voxel_size_m: 0.25
     minimum_voxel_observations: 2
     maximum_points_per_scan: 30000
     minimum_height_m: -1.2
     maximum_height_m: 1.8
-    local_costmap_size_m: 30.0
+    local_costmap_size_m: 14.0
     local_costmap_resolution_m: 0.25
-    obstacle_inflation_radius_m: 1.10
+    obstacle_inflation_radius_m: 1.1
     self_filter_radius_m: 0.65
-    active_mission_states: [INITIAL_TAKEOFF, INITIAL_HOVER, READY, SEARCHING, COOP_SEARCH_PREPARING, COOP_SEARCH_TRANSIT, COOP_SEARCHING, COOP_SEARCH_COMPLETE, VICTIM_DETECTED, RETURNING_NO_VICTIM, COMPLETE, MISSION_FAILED]
+    active_mission_states:
+    - INITIAL_TAKEOFF
+    - INITIAL_HOVER
+    - READY
+    - SEARCHING
+    - COOP_SEARCH_PREPARING
+    - COOP_SEARCH_TRANSIT
+    - COOP_SEARCHING
+    - COOP_SEARCH_COMPLETE
+    - VICTIM_DETECTED
+    - RETURNING_NO_VICTIM
+    - COMPLETE
+    - MISSION_FAILED
     warning_period_sec: 5.0
-
 obstacle_monitor_01:
   ros__parameters:
     drone_id: quadrotor_01
     point_cloud_topic: /quadrotor_01/point_cloud
     accumulated_point_cloud_topic: /drone_01/obstacle/accumulated_cloud_body
     use_accumulated_cloud_for_astar: true
-    accumulated_cloud_max_age_sec: 0.8
+    accumulated_cloud_max_age_sec: 0.6
     local_astar_path_topic: /drone_01/obstacle/local_astar_path
     blocked_topic: /drone_01/obstacle/blocked
     distance_topic: /drone_01/obstacle/min_distance
@@ -191,8 +262,6 @@ obstacle_monitor_01:
     movement_direction_topic: /drone_01/navigation/direction_body_rad
     mission_state_topic: /mission/state
     safety_distance_m: 4.0
-    # 전방은 1.2m에서 즉시 정지하고, 측면·후방은 실제 충돌에 가까운
-    # 0.75m에서만 정지한다. 옆 나무가 약 1.1m에 있어도 전방이 비면 통과한다.
     emergency_front_distance_m: 1.2
     emergency_side_distance_m: 0.75
     front_sector_half_angle_deg: 35.0
@@ -201,11 +270,30 @@ obstacle_monitor_01:
     minimum_obstacle_points: 3
     blocked_confirm_scans: 2
     clear_confirm_scans: 3
-    processing_period_sec: 0.10
+    processing_period_sec: 0.1
     minimum_height_m: -1.2
     maximum_height_m: 1.8
-    active_mission_states: [INITIAL_TAKEOFF, INITIAL_HOVER, READY, SEARCHING, COOP_SEARCH_PREPARING, COOP_SEARCH_TRANSIT, COOP_SEARCHING, COOP_SEARCH_COMPLETE, VICTIM_DETECTED, RETURNING_NO_VICTIM, COMPLETE, MISSION_FAILED]
-    candidate_offsets_deg: [0.0, -15.0, 15.0, -30.0, 30.0, -45.0, 45.0, -60.0, 60.0, -75.0, 75.0]
+    active_mission_states:
+    - INITIAL_TAKEOFF
+    - INITIAL_HOVER
+    - READY
+    - SEARCHING
+    - COOP_SEARCH_PREPARING
+    - COOP_SEARCH_TRANSIT
+    - COOP_SEARCHING
+    - COOP_SEARCH_COMPLETE
+    - VICTIM_DETECTED
+    - RETURNING_NO_VICTIM
+    - COMPLETE
+    - MISSION_FAILED
+    candidate_offsets_deg:
+    - 0.0
+    - -20.0
+    - 20.0
+    - -40.0
+    - 40.0
+    - -60.0
+    - 60.0
     candidate_sector_half_angle_deg: 12.0
     candidate_min_clearance_m: 3.5
     candidate_score_distance_cap_m: 15.0
@@ -213,22 +301,21 @@ obstacle_monitor_01:
     candidate_forward_progress_weight: 3.0
     candidate_side_switch_penalty: 4.0
     candidate_side_hold_sec: 2.0
-    candidate_max_offset_deg: 80.0
-    local_grid_size_m: 30.0
+    candidate_max_offset_deg: 65.0
+    local_grid_size_m: 12.0
     local_grid_resolution_m: 0.25
-    obstacle_inflation_radius_m: 1.10
-    local_planner_goal_distance_m: 10.0
-    local_planner_lookahead_m: 3.5
-    local_planner_period_sec: 0.40
+    obstacle_inflation_radius_m: 1.1
+    local_planner_goal_distance_m: 4.5
+    local_planner_lookahead_m: 1.25
+    local_planner_period_sec: 0.2
     proactive_avoidance_enabled: true
-    proactive_planning_distance_m: 10.0
-    proactive_corridor_half_width_m: 1.10
-    proactive_ignore_near_m: 0.80
-    proactive_min_obstacle_voxels: 2
-    planner_start_release_radius_m: 0.50
+    proactive_planning_distance_m: 6.0
+    proactive_corridor_half_width_m: 1.1
+    proactive_ignore_near_m: 0.8
+    proactive_min_obstacle_voxels: 3
+    planner_start_release_radius_m: 0.5
     local_planner_min_forward_progress_m: 0.75
     warning_period_sec: 5.0
-
 drone_controller_01:
   ros__parameters:
     drone_id: quadrotor_01
@@ -250,7 +337,10 @@ drone_controller_01:
     cooperative_search_path_topic: /drone_01/cooperative_search_path
     search_repeat_mode: infinite
     base_frame: quadrotor_01/base_link
-    home_world_enu: [-34.0, 40.0, 31.0]
+    home_world_enu:
+    - -34.0
+    - 40.0
+    - 31.0
     search_plan_path: ~/b3_cobot3_ws/isaac_sim/generated_search_plan.json
     takeoff_altitude_m: 6.0
     altitude_acceptance_radius_m: 0.1
@@ -269,11 +359,11 @@ drone_controller_01:
     landing_approach_altitude_m: 3.0
     landing_approach_timeout_sec: 45.0
     landing_descent_start_timeout_sec: 8.0
-    landing_min_descent_progress_m: 0.30
+    landing_min_descent_progress_m: 0.3
     landing_fallback_to_px4_land: true
     landing_xy_tolerance_m: 0.35
-    landing_altitude_tolerance_m: 0.30
-    landing_stopped_speed_m_s: 0.40
+    landing_altitude_tolerance_m: 0.3
+    landing_stopped_speed_m_s: 0.4
     landing_settle_sec: 2.0
     landing_timeout_sec: 75.0
     post_touchdown_settle_sec: 1.0
@@ -284,9 +374,9 @@ drone_controller_01:
     search_horizontal_position_gain: 0.8
     search_vertical_speed_up_m_s: 1.5
     search_vertical_speed_down_m_s: 1.5
-    avoidance_climb_step_m: 2.0
-    avoidance_max_climb_m: 12.0
-    avoidance_settle_sec: 1.0
+    avoidance_climb_step_m: 1.0
+    avoidance_max_climb_m: 8.0
+    avoidance_settle_sec: 0.4
     avoidance_climb_timeout_sec: 15.0
     avoidance_altitude_tolerance_m: 0.5
     avoidance_climb_step_retries: 2
@@ -295,60 +385,58 @@ drone_controller_01:
     avoidance_lateral_offset_m: 5.0
     avoidance_forward_offset_m: 2.0
     avoidance_side_clearance_m: 5.0
-    avoidance_xy_timeout_sec: 8.0
+    avoidance_xy_timeout_sec: 5.0
     avoidance_brake_timeout_sec: 2.5
-    avoidance_stopped_speed_m_s: 0.60
-    avoidance_direction_check_sec: 0.25
+    avoidance_stopped_speed_m_s: 0.6
+    avoidance_direction_check_sec: 0.15
     avoidance_front_clearance_m: 3.5
-    avoidance_probe_distance_m: 4.0
+    avoidance_probe_distance_m: 1.5
+    avoidance_direction_hint_step_m: 1.25
     avoidance_direction_attempts: 2
     avoidance_min_forward_progress_m: 0.75
-    # 한 Waypoint에서 좌우 회피는 한 번만 성공 허용하고, 다시 막히면 상승한다.
     search_horizontal_avoidance_budget_per_waypoint: 1
-    # 계획 고도보다 1m 이상 높은 상태에서는 좌우로 더 빠지지 않고 추가 상승한다.
     search_high_altitude_skip_horizontal_avoidance: true
     search_high_altitude_threshold_m: 1.0
-    # 수색은 계획 D보다 현재 고도가 높으면 내려오지 않고 XY 방문을 우선한다.
     search_xy_priority_enabled: true
     search_keep_high_altitude_after_escape: true
-    # 전진량에 비해 측면 편차가 큰 A*/VFH 후보는 거부한다.
     avoidance_max_lateral_offset_m: 2.0
-    avoidance_max_lateral_to_forward_ratio: 0.80
+    avoidance_max_lateral_to_forward_ratio: 0.8
     avoidance_vector_max_age_sec: 1.2
     local_detour_max_age_sec: 1.2
     local_detour_hard_stop_distance_m: 0.75
     avoidance_keep_yaw_during_detour: true
     avoidance_commit_sec: 0.35
-    avoidance_block_confirm_sec: 0.20
-    vertical_escape_min_climb_m: 5.0
-    vertical_escape_retry_climb_step_m: 2.0
+    avoidance_block_confirm_sec: 0.2
+    vertical_escape_min_climb_m: 2.5
+    vertical_escape_retry_climb_step_m: 1.5
     vertical_escape_cross_retries: 3
     vertical_escape_keep_high_on_descent_failure: true
-    vertical_escape_min_forward_m: 6.0
-    vertical_escape_max_forward_m: 16.0
-    vertical_escape_obstacle_pass_margin_m: 2.5
-    vertical_escape_extra_forward_m: 3.0
-    vertical_escape_clear_hold_sec: 1.2
-    vertical_escape_cross_timeout_sec: 20.0
+    vertical_escape_min_forward_m: 3.0
+    vertical_escape_max_forward_m: 8.0
+    vertical_escape_obstacle_pass_margin_m: 1.5
+    vertical_escape_extra_forward_m: 2.0
+    vertical_escape_clear_hold_sec: 0.6
+    vertical_escape_cross_timeout_sec: 12.0
     vertical_escape_cross_tolerance_m: 0.8
     vertical_escape_descent_step_m: 1.0
-    vertical_escape_descent_timeout_sec: 12.0
-    vertical_escape_descent_retries: 2
-    vertical_escape_descent_clear_sec: 0.6
+    vertical_escape_descent_timeout_sec: 8.0
+    vertical_escape_descent_retries: 1
+    vertical_escape_descent_clear_sec: 0.4
     direction_yaw_enabled: true
-    direction_yaw_min_distance_m: 0.50
-    direction_yaw_tolerance_deg: 6.0
-    direction_yaw_timeout_sec: 8.0
-    direction_yaw_stable_samples: 2
-    direction_yaw_settle_sec: 0.20
+    direction_yaw_min_distance_m: 0.5
+    direction_yaw_tolerance_deg: 10.0
+    direction_yaw_timeout_sec: 4.0
+    direction_yaw_stable_samples: 1
+    direction_yaw_settle_sec: 0.05
     victim_approach_timeout_sec: 120.0
     safe_return_down_m: -40.0
-    search_waypoints: "0,0,-6"
+    search_waypoints: 0,0,-6
     map_frame: map
-
-# ---------------------------------------------------------------------------
-# Drone 02
-# ---------------------------------------------------------------------------
+    search_altitude_recovery_enabled: true
+    search_altitude_recovery_step_m: 1.0
+    search_altitude_recovery_min_excess_m: 1.5
+    cooperative_transit_climb_only_enabled: true
+    direction_yaw_pre_align_threshold_deg: 75.0
 human_detector_02:
   ros__parameters:
     drone_id: quadrotor_02
@@ -360,7 +448,7 @@ human_detector_02:
     detector_mode: yolo
     model_path: ~/b3_cobot3_ws/models/yolo11s.pt
     person_class_id: 0
-    confidence_threshold: 0.40
+    confidence_threshold: 0.4
     inference_period_sec: 0.05
     inference_image_size: 960
     save_confirmed_image: true
@@ -368,14 +456,17 @@ human_detector_02:
     saved_image_jpeg_quality: 95
     detection_start_delay_sec: 5.0
     detect_only_while_searching: true
-    active_detection_states: [SEARCHING, COOP_SEARCH_PREPARING, COOP_SEARCH_TRANSIT, COOP_SEARCHING]
+    active_detection_states:
+    - SEARCHING
+    - COOP_SEARCH_PREPARING
+    - COOP_SEARCH_TRANSIT
+    - COOP_SEARCHING
     mock_delay_sec: 8.0
     mock_confidence: 0.95
     mock_x_min_ratio: 0.46
     mock_y_min_ratio: 0.38
     mock_x_max_ratio: 0.54
     mock_y_max_ratio: 0.66
-
 victim_localizer_02:
   ros__parameters:
     drone_id: quadrotor_02
@@ -385,11 +476,16 @@ victim_localizer_02:
     camera_position_topic: /drone_02/victim/position_camera
     map_position_topic: /drone_02/victim/position_map
     mission_state_topic: /mission/state
-    active_localization_states: [SEARCHING, COOP_SEARCH_TRANSIT, COOP_SEARCHING, VICTIM_DETECTED, VICTIM_LOCATED]
+    active_localization_states:
+    - SEARCHING
+    - COOP_SEARCH_TRANSIT
+    - COOP_SEARCHING
+    - VICTIM_DETECTED
+    - VICTIM_LOCATED
     camera_frame_override: quadrotor_02/camera_optical_frame
     map_frame: map
-    roi_center_ratio: 0.50
-    minimum_depth_m: 0.20
+    roi_center_ratio: 0.5
+    minimum_depth_m: 0.2
     maximum_depth_m: 30.0
     depth_buffer_duration_sec: 1.0
     depth_buffer_max_frames: 40
@@ -398,20 +494,31 @@ victim_localizer_02:
     tf_retry_period_sec: 0.02
     tf_retry_max_points: 40
     log_period_sec: 10.0
-
 sensor_tf_02:
   ros__parameters:
     base_frame: quadrotor_02/base_link
     camera_frame: quadrotor_02/camera_optical_frame
     lidar_frame: quadrotor_02/base_scan
-    camera_translation: [0.0, 0.0, 0.0]
-    # Isaac sim_config.py의 CAMERA_DOWN_TILT_DEG와 같은 값이다.
+    camera_translation:
+    - 0.0
+    - 0.0
+    - 0.0
     camera_down_tilt_deg: 40.0
     derive_camera_quaternion_from_tilt: true
-    camera_quaternion_xyzw: [-0.640856, 0.640856, -0.298836, 0.298836]
-    lidar_translation: [0.0, 0.0, 0.15]
-    lidar_quaternion_xyzw: [0.0, 0.0, 0.0, 1.0]
-
+    camera_quaternion_xyzw:
+    - -0.640856
+    - 0.640856
+    - -0.298836
+    - 0.298836
+    lidar_translation:
+    - 0.0
+    - 0.0
+    - 0.15
+    lidar_quaternion_xyzw:
+    - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
 pointcloud_local_mapper_02:
   ros__parameters:
     drone_id: quadrotor_02
@@ -422,37 +529,43 @@ pointcloud_local_mapper_02:
     accumulated_cloud_topic: /drone_02/obstacle/accumulated_cloud
     accumulated_cloud_body_topic: /drone_02/obstacle/accumulated_cloud_body
     local_costmap_topic: /drone_02/obstacle/local_costmap
-    # 최근 3초를 슬라이딩 윈도우로 유지한다.
-    accumulation_sec: 3.0
-    processing_period_sec: 0.10
-    publish_period_sec: 0.20
-    # PointCloud가 먼저 도착해도 콜백을 막지 않고 exact timestamp TF를 기다린다.
+    accumulation_sec: 1.5
+    processing_period_sec: 0.1
+    publish_period_sec: 0.2
     tf_retry_period_sec: 0.02
-    # 시뮬레이션이 느릴 때도 한두 TF 주기를 충분히 기다리도록 wall time 1초.
-    tf_exact_wait_sec: 1.00
-    # 누적 지도에는 exact timestamp TF만 사용하며 latest TF로 대체하지 않는다.
+    tf_exact_wait_sec: 1.0
     pending_cloud_queue_size: 30
-    # 잘못된 한 프레임이 뒤 프레임 처리를 막지 않도록 매 주기 여러 개를 검사한다.
     max_pending_clouds_per_cycle: 8
     voxel_size_m: 0.25
     minimum_voxel_observations: 2
     maximum_points_per_scan: 30000
     minimum_height_m: -1.2
     maximum_height_m: 1.8
-    local_costmap_size_m: 30.0
+    local_costmap_size_m: 14.0
     local_costmap_resolution_m: 0.25
-    obstacle_inflation_radius_m: 1.10
+    obstacle_inflation_radius_m: 1.1
     self_filter_radius_m: 0.65
-    active_mission_states: [INITIAL_TAKEOFF, INITIAL_HOVER, READY, SEARCHING, COOP_SEARCH_PREPARING, COOP_SEARCH_TRANSIT, COOP_SEARCHING, COOP_SEARCH_COMPLETE, VICTIM_DETECTED, RETURNING_NO_VICTIM, COMPLETE, MISSION_FAILED]
+    active_mission_states:
+    - INITIAL_TAKEOFF
+    - INITIAL_HOVER
+    - READY
+    - SEARCHING
+    - COOP_SEARCH_PREPARING
+    - COOP_SEARCH_TRANSIT
+    - COOP_SEARCHING
+    - COOP_SEARCH_COMPLETE
+    - VICTIM_DETECTED
+    - RETURNING_NO_VICTIM
+    - COMPLETE
+    - MISSION_FAILED
     warning_period_sec: 5.0
-
 obstacle_monitor_02:
   ros__parameters:
     drone_id: quadrotor_02
     point_cloud_topic: /quadrotor_02/point_cloud
     accumulated_point_cloud_topic: /drone_02/obstacle/accumulated_cloud_body
     use_accumulated_cloud_for_astar: true
-    accumulated_cloud_max_age_sec: 0.8
+    accumulated_cloud_max_age_sec: 0.6
     local_astar_path_topic: /drone_02/obstacle/local_astar_path
     blocked_topic: /drone_02/obstacle/blocked
     distance_topic: /drone_02/obstacle/min_distance
@@ -471,11 +584,30 @@ obstacle_monitor_02:
     minimum_obstacle_points: 3
     blocked_confirm_scans: 2
     clear_confirm_scans: 3
-    processing_period_sec: 0.10
+    processing_period_sec: 0.1
     minimum_height_m: -1.2
     maximum_height_m: 1.8
-    active_mission_states: [INITIAL_TAKEOFF, INITIAL_HOVER, READY, SEARCHING, COOP_SEARCH_PREPARING, COOP_SEARCH_TRANSIT, COOP_SEARCHING, COOP_SEARCH_COMPLETE, VICTIM_DETECTED, RETURNING_NO_VICTIM, COMPLETE, MISSION_FAILED]
-    candidate_offsets_deg: [0.0, -15.0, 15.0, -30.0, 30.0, -45.0, 45.0, -60.0, 60.0, -75.0, 75.0]
+    active_mission_states:
+    - INITIAL_TAKEOFF
+    - INITIAL_HOVER
+    - READY
+    - SEARCHING
+    - COOP_SEARCH_PREPARING
+    - COOP_SEARCH_TRANSIT
+    - COOP_SEARCHING
+    - COOP_SEARCH_COMPLETE
+    - VICTIM_DETECTED
+    - RETURNING_NO_VICTIM
+    - COMPLETE
+    - MISSION_FAILED
+    candidate_offsets_deg:
+    - 0.0
+    - -20.0
+    - 20.0
+    - -40.0
+    - 40.0
+    - -60.0
+    - 60.0
     candidate_sector_half_angle_deg: 12.0
     candidate_min_clearance_m: 3.5
     candidate_score_distance_cap_m: 15.0
@@ -483,22 +615,21 @@ obstacle_monitor_02:
     candidate_forward_progress_weight: 3.0
     candidate_side_switch_penalty: 4.0
     candidate_side_hold_sec: 2.0
-    candidate_max_offset_deg: 80.0
-    local_grid_size_m: 30.0
+    candidate_max_offset_deg: 65.0
+    local_grid_size_m: 12.0
     local_grid_resolution_m: 0.25
-    obstacle_inflation_radius_m: 1.10
-    local_planner_goal_distance_m: 10.0
-    local_planner_lookahead_m: 3.5
-    local_planner_period_sec: 0.40
+    obstacle_inflation_radius_m: 1.1
+    local_planner_goal_distance_m: 4.5
+    local_planner_lookahead_m: 1.25
+    local_planner_period_sec: 0.2
     proactive_avoidance_enabled: true
-    proactive_planning_distance_m: 10.0
-    proactive_corridor_half_width_m: 1.10
-    proactive_ignore_near_m: 0.80
-    proactive_min_obstacle_voxels: 2
-    planner_start_release_radius_m: 0.50
+    proactive_planning_distance_m: 6.0
+    proactive_corridor_half_width_m: 1.1
+    proactive_ignore_near_m: 0.8
+    proactive_min_obstacle_voxels: 3
+    planner_start_release_radius_m: 0.5
     local_planner_min_forward_progress_m: 0.75
     warning_period_sec: 5.0
-
 drone_controller_02:
   ros__parameters:
     drone_id: quadrotor_02
@@ -520,7 +651,10 @@ drone_controller_02:
     cooperative_search_path_topic: /drone_02/cooperative_search_path
     search_repeat_mode: infinite
     base_frame: quadrotor_02/base_link
-    home_world_enu: [-29.0, 40.0, 31.0]
+    home_world_enu:
+    - -29.0
+    - 40.0
+    - 31.0
     search_plan_path: ~/b3_cobot3_ws/isaac_sim/generated_search_plan.json
     takeoff_altitude_m: 6.0
     altitude_acceptance_radius_m: 0.1
@@ -539,11 +673,11 @@ drone_controller_02:
     landing_approach_altitude_m: 3.0
     landing_approach_timeout_sec: 45.0
     landing_descent_start_timeout_sec: 8.0
-    landing_min_descent_progress_m: 0.30
+    landing_min_descent_progress_m: 0.3
     landing_fallback_to_px4_land: true
     landing_xy_tolerance_m: 0.35
-    landing_altitude_tolerance_m: 0.30
-    landing_stopped_speed_m_s: 0.40
+    landing_altitude_tolerance_m: 0.3
+    landing_stopped_speed_m_s: 0.4
     landing_settle_sec: 2.0
     landing_timeout_sec: 75.0
     post_touchdown_settle_sec: 1.0
@@ -554,9 +688,9 @@ drone_controller_02:
     search_horizontal_position_gain: 0.8
     search_vertical_speed_up_m_s: 1.5
     search_vertical_speed_down_m_s: 1.5
-    avoidance_climb_step_m: 2.0
-    avoidance_max_climb_m: 12.0
-    avoidance_settle_sec: 1.0
+    avoidance_climb_step_m: 1.0
+    avoidance_max_climb_m: 8.0
+    avoidance_settle_sec: 0.4
     avoidance_climb_timeout_sec: 15.0
     avoidance_altitude_tolerance_m: 0.5
     avoidance_climb_step_retries: 2
@@ -565,60 +699,58 @@ drone_controller_02:
     avoidance_lateral_offset_m: 5.0
     avoidance_forward_offset_m: 2.0
     avoidance_side_clearance_m: 5.0
-    avoidance_xy_timeout_sec: 8.0
+    avoidance_xy_timeout_sec: 5.0
     avoidance_brake_timeout_sec: 2.5
-    avoidance_stopped_speed_m_s: 0.60
-    avoidance_direction_check_sec: 0.25
+    avoidance_stopped_speed_m_s: 0.6
+    avoidance_direction_check_sec: 0.15
     avoidance_front_clearance_m: 3.5
-    avoidance_probe_distance_m: 4.0
+    avoidance_probe_distance_m: 1.5
+    avoidance_direction_hint_step_m: 1.25
     avoidance_direction_attempts: 2
     avoidance_min_forward_progress_m: 0.75
-    # 한 Waypoint에서 좌우 회피는 한 번만 성공 허용하고, 다시 막히면 상승한다.
     search_horizontal_avoidance_budget_per_waypoint: 1
-    # 계획 고도보다 1m 이상 높은 상태에서는 좌우로 더 빠지지 않고 추가 상승한다.
     search_high_altitude_skip_horizontal_avoidance: true
     search_high_altitude_threshold_m: 1.0
-    # 수색은 계획 D보다 현재 고도가 높으면 내려오지 않고 XY 방문을 우선한다.
     search_xy_priority_enabled: true
     search_keep_high_altitude_after_escape: true
-    # 전진량에 비해 측면 편차가 큰 A*/VFH 후보는 거부한다.
     avoidance_max_lateral_offset_m: 2.0
-    avoidance_max_lateral_to_forward_ratio: 0.80
+    avoidance_max_lateral_to_forward_ratio: 0.8
     avoidance_vector_max_age_sec: 1.2
     local_detour_max_age_sec: 1.2
     local_detour_hard_stop_distance_m: 0.75
     avoidance_keep_yaw_during_detour: true
     avoidance_commit_sec: 0.35
-    avoidance_block_confirm_sec: 0.20
-    vertical_escape_min_climb_m: 5.0
-    vertical_escape_retry_climb_step_m: 2.0
+    avoidance_block_confirm_sec: 0.2
+    vertical_escape_min_climb_m: 2.5
+    vertical_escape_retry_climb_step_m: 1.5
     vertical_escape_cross_retries: 3
     vertical_escape_keep_high_on_descent_failure: true
-    vertical_escape_min_forward_m: 6.0
-    vertical_escape_max_forward_m: 16.0
-    vertical_escape_obstacle_pass_margin_m: 2.5
-    vertical_escape_extra_forward_m: 3.0
-    vertical_escape_clear_hold_sec: 1.2
-    vertical_escape_cross_timeout_sec: 20.0
+    vertical_escape_min_forward_m: 3.0
+    vertical_escape_max_forward_m: 8.0
+    vertical_escape_obstacle_pass_margin_m: 1.5
+    vertical_escape_extra_forward_m: 2.0
+    vertical_escape_clear_hold_sec: 0.6
+    vertical_escape_cross_timeout_sec: 12.0
     vertical_escape_cross_tolerance_m: 0.8
     vertical_escape_descent_step_m: 1.0
-    vertical_escape_descent_timeout_sec: 12.0
-    vertical_escape_descent_retries: 2
-    vertical_escape_descent_clear_sec: 0.6
+    vertical_escape_descent_timeout_sec: 8.0
+    vertical_escape_descent_retries: 1
+    vertical_escape_descent_clear_sec: 0.4
     direction_yaw_enabled: true
-    direction_yaw_min_distance_m: 0.50
-    direction_yaw_tolerance_deg: 6.0
-    direction_yaw_timeout_sec: 8.0
-    direction_yaw_stable_samples: 2
-    direction_yaw_settle_sec: 0.20
+    direction_yaw_min_distance_m: 0.5
+    direction_yaw_tolerance_deg: 10.0
+    direction_yaw_timeout_sec: 4.0
+    direction_yaw_stable_samples: 1
+    direction_yaw_settle_sec: 0.05
     victim_approach_timeout_sec: 120.0
     safe_return_down_m: -40.0
-    search_waypoints: "0,0,-6"
+    search_waypoints: 0,0,-6
     map_frame: map
-
-# ---------------------------------------------------------------------------
-# Drone 03
-# ---------------------------------------------------------------------------
+    search_altitude_recovery_enabled: true
+    search_altitude_recovery_step_m: 1.0
+    search_altitude_recovery_min_excess_m: 1.5
+    cooperative_transit_climb_only_enabled: true
+    direction_yaw_pre_align_threshold_deg: 75.0
 human_detector_03:
   ros__parameters:
     drone_id: quadrotor_03
@@ -630,7 +762,7 @@ human_detector_03:
     detector_mode: yolo
     model_path: ~/b3_cobot3_ws/models/yolo11s.pt
     person_class_id: 0
-    confidence_threshold: 0.40
+    confidence_threshold: 0.4
     inference_period_sec: 0.05
     inference_image_size: 960
     save_confirmed_image: true
@@ -638,14 +770,17 @@ human_detector_03:
     saved_image_jpeg_quality: 95
     detection_start_delay_sec: 5.0
     detect_only_while_searching: true
-    active_detection_states: [SEARCHING, COOP_SEARCH_PREPARING, COOP_SEARCH_TRANSIT, COOP_SEARCHING]
+    active_detection_states:
+    - SEARCHING
+    - COOP_SEARCH_PREPARING
+    - COOP_SEARCH_TRANSIT
+    - COOP_SEARCHING
     mock_delay_sec: 8.0
     mock_confidence: 0.95
     mock_x_min_ratio: 0.46
     mock_y_min_ratio: 0.38
     mock_x_max_ratio: 0.54
     mock_y_max_ratio: 0.66
-
 victim_localizer_03:
   ros__parameters:
     drone_id: quadrotor_03
@@ -655,11 +790,16 @@ victim_localizer_03:
     camera_position_topic: /drone_03/victim/position_camera
     map_position_topic: /drone_03/victim/position_map
     mission_state_topic: /mission/state
-    active_localization_states: [SEARCHING, COOP_SEARCH_TRANSIT, COOP_SEARCHING, VICTIM_DETECTED, VICTIM_LOCATED]
+    active_localization_states:
+    - SEARCHING
+    - COOP_SEARCH_TRANSIT
+    - COOP_SEARCHING
+    - VICTIM_DETECTED
+    - VICTIM_LOCATED
     camera_frame_override: quadrotor_03/camera_optical_frame
     map_frame: map
-    roi_center_ratio: 0.50
-    minimum_depth_m: 0.20
+    roi_center_ratio: 0.5
+    minimum_depth_m: 0.2
     maximum_depth_m: 30.0
     depth_buffer_duration_sec: 1.0
     depth_buffer_max_frames: 40
@@ -668,20 +808,31 @@ victim_localizer_03:
     tf_retry_period_sec: 0.02
     tf_retry_max_points: 40
     log_period_sec: 10.0
-
 sensor_tf_03:
   ros__parameters:
     base_frame: quadrotor_03/base_link
     camera_frame: quadrotor_03/camera_optical_frame
     lidar_frame: quadrotor_03/base_scan
-    camera_translation: [0.0, 0.0, 0.0]
-    # Isaac sim_config.py의 CAMERA_DOWN_TILT_DEG와 같은 값이다.
+    camera_translation:
+    - 0.0
+    - 0.0
+    - 0.0
     camera_down_tilt_deg: 40.0
     derive_camera_quaternion_from_tilt: true
-    camera_quaternion_xyzw: [-0.640856, 0.640856, -0.298836, 0.298836]
-    lidar_translation: [0.0, 0.0, 0.15]
-    lidar_quaternion_xyzw: [0.0, 0.0, 0.0, 1.0]
-
+    camera_quaternion_xyzw:
+    - -0.640856
+    - 0.640856
+    - -0.298836
+    - 0.298836
+    lidar_translation:
+    - 0.0
+    - 0.0
+    - 0.15
+    lidar_quaternion_xyzw:
+    - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
 pointcloud_local_mapper_03:
   ros__parameters:
     drone_id: quadrotor_03
@@ -692,37 +843,43 @@ pointcloud_local_mapper_03:
     accumulated_cloud_topic: /drone_03/obstacle/accumulated_cloud
     accumulated_cloud_body_topic: /drone_03/obstacle/accumulated_cloud_body
     local_costmap_topic: /drone_03/obstacle/local_costmap
-    # 최근 3초를 슬라이딩 윈도우로 유지한다.
-    accumulation_sec: 3.0
-    processing_period_sec: 0.10
-    publish_period_sec: 0.20
-    # PointCloud가 먼저 도착해도 콜백을 막지 않고 exact timestamp TF를 기다린다.
+    accumulation_sec: 1.5
+    processing_period_sec: 0.1
+    publish_period_sec: 0.2
     tf_retry_period_sec: 0.02
-    # 시뮬레이션이 느릴 때도 한두 TF 주기를 충분히 기다리도록 wall time 1초.
-    tf_exact_wait_sec: 1.00
-    # 누적 지도에는 exact timestamp TF만 사용하며 latest TF로 대체하지 않는다.
+    tf_exact_wait_sec: 1.0
     pending_cloud_queue_size: 30
-    # 잘못된 한 프레임이 뒤 프레임 처리를 막지 않도록 매 주기 여러 개를 검사한다.
     max_pending_clouds_per_cycle: 8
     voxel_size_m: 0.25
     minimum_voxel_observations: 2
     maximum_points_per_scan: 30000
     minimum_height_m: -1.2
     maximum_height_m: 1.8
-    local_costmap_size_m: 30.0
+    local_costmap_size_m: 14.0
     local_costmap_resolution_m: 0.25
-    obstacle_inflation_radius_m: 1.10
+    obstacle_inflation_radius_m: 1.1
     self_filter_radius_m: 0.65
-    active_mission_states: [INITIAL_TAKEOFF, INITIAL_HOVER, READY, SEARCHING, COOP_SEARCH_PREPARING, COOP_SEARCH_TRANSIT, COOP_SEARCHING, COOP_SEARCH_COMPLETE, VICTIM_DETECTED, RETURNING_NO_VICTIM, COMPLETE, MISSION_FAILED]
+    active_mission_states:
+    - INITIAL_TAKEOFF
+    - INITIAL_HOVER
+    - READY
+    - SEARCHING
+    - COOP_SEARCH_PREPARING
+    - COOP_SEARCH_TRANSIT
+    - COOP_SEARCHING
+    - COOP_SEARCH_COMPLETE
+    - VICTIM_DETECTED
+    - RETURNING_NO_VICTIM
+    - COMPLETE
+    - MISSION_FAILED
     warning_period_sec: 5.0
-
 obstacle_monitor_03:
   ros__parameters:
     drone_id: quadrotor_03
     point_cloud_topic: /quadrotor_03/point_cloud
     accumulated_point_cloud_topic: /drone_03/obstacle/accumulated_cloud_body
     use_accumulated_cloud_for_astar: true
-    accumulated_cloud_max_age_sec: 0.8
+    accumulated_cloud_max_age_sec: 0.6
     local_astar_path_topic: /drone_03/obstacle/local_astar_path
     blocked_topic: /drone_03/obstacle/blocked
     distance_topic: /drone_03/obstacle/min_distance
@@ -741,11 +898,30 @@ obstacle_monitor_03:
     minimum_obstacle_points: 3
     blocked_confirm_scans: 2
     clear_confirm_scans: 3
-    processing_period_sec: 0.10
+    processing_period_sec: 0.1
     minimum_height_m: -1.2
     maximum_height_m: 1.8
-    active_mission_states: [INITIAL_TAKEOFF, INITIAL_HOVER, READY, SEARCHING, COOP_SEARCH_PREPARING, COOP_SEARCH_TRANSIT, COOP_SEARCHING, COOP_SEARCH_COMPLETE, VICTIM_DETECTED, RETURNING_NO_VICTIM, COMPLETE, MISSION_FAILED]
-    candidate_offsets_deg: [0.0, -15.0, 15.0, -30.0, 30.0, -45.0, 45.0, -60.0, 60.0, -75.0, 75.0]
+    active_mission_states:
+    - INITIAL_TAKEOFF
+    - INITIAL_HOVER
+    - READY
+    - SEARCHING
+    - COOP_SEARCH_PREPARING
+    - COOP_SEARCH_TRANSIT
+    - COOP_SEARCHING
+    - COOP_SEARCH_COMPLETE
+    - VICTIM_DETECTED
+    - RETURNING_NO_VICTIM
+    - COMPLETE
+    - MISSION_FAILED
+    candidate_offsets_deg:
+    - 0.0
+    - -20.0
+    - 20.0
+    - -40.0
+    - 40.0
+    - -60.0
+    - 60.0
     candidate_sector_half_angle_deg: 12.0
     candidate_min_clearance_m: 3.5
     candidate_score_distance_cap_m: 15.0
@@ -753,22 +929,21 @@ obstacle_monitor_03:
     candidate_forward_progress_weight: 3.0
     candidate_side_switch_penalty: 4.0
     candidate_side_hold_sec: 2.0
-    candidate_max_offset_deg: 80.0
-    local_grid_size_m: 30.0
+    candidate_max_offset_deg: 65.0
+    local_grid_size_m: 12.0
     local_grid_resolution_m: 0.25
-    obstacle_inflation_radius_m: 1.10
-    local_planner_goal_distance_m: 10.0
-    local_planner_lookahead_m: 3.5
-    local_planner_period_sec: 0.40
+    obstacle_inflation_radius_m: 1.1
+    local_planner_goal_distance_m: 4.5
+    local_planner_lookahead_m: 1.25
+    local_planner_period_sec: 0.2
     proactive_avoidance_enabled: true
-    proactive_planning_distance_m: 10.0
-    proactive_corridor_half_width_m: 1.10
-    proactive_ignore_near_m: 0.80
-    proactive_min_obstacle_voxels: 2
-    planner_start_release_radius_m: 0.50
+    proactive_planning_distance_m: 6.0
+    proactive_corridor_half_width_m: 1.1
+    proactive_ignore_near_m: 0.8
+    proactive_min_obstacle_voxels: 3
+    planner_start_release_radius_m: 0.5
     local_planner_min_forward_progress_m: 0.75
     warning_period_sec: 5.0
-
 drone_controller_03:
   ros__parameters:
     drone_id: quadrotor_03
@@ -790,7 +965,10 @@ drone_controller_03:
     cooperative_search_path_topic: /drone_03/cooperative_search_path
     search_repeat_mode: infinite
     base_frame: quadrotor_03/base_link
-    home_world_enu: [-39.0, 40.0, 31.0]
+    home_world_enu:
+    - -39.0
+    - 40.0
+    - 31.0
     search_plan_path: ~/b3_cobot3_ws/isaac_sim/generated_search_plan.json
     takeoff_altitude_m: 6.0
     altitude_acceptance_radius_m: 0.1
@@ -809,11 +987,11 @@ drone_controller_03:
     landing_approach_altitude_m: 3.0
     landing_approach_timeout_sec: 45.0
     landing_descent_start_timeout_sec: 8.0
-    landing_min_descent_progress_m: 0.30
+    landing_min_descent_progress_m: 0.3
     landing_fallback_to_px4_land: true
     landing_xy_tolerance_m: 0.35
-    landing_altitude_tolerance_m: 0.30
-    landing_stopped_speed_m_s: 0.40
+    landing_altitude_tolerance_m: 0.3
+    landing_stopped_speed_m_s: 0.4
     landing_settle_sec: 2.0
     landing_timeout_sec: 75.0
     post_touchdown_settle_sec: 1.0
@@ -824,9 +1002,9 @@ drone_controller_03:
     search_horizontal_position_gain: 0.8
     search_vertical_speed_up_m_s: 1.5
     search_vertical_speed_down_m_s: 1.5
-    avoidance_climb_step_m: 2.0
-    avoidance_max_climb_m: 12.0
-    avoidance_settle_sec: 1.0
+    avoidance_climb_step_m: 1.0
+    avoidance_max_climb_m: 8.0
+    avoidance_settle_sec: 0.4
     avoidance_climb_timeout_sec: 15.0
     avoidance_altitude_tolerance_m: 0.5
     avoidance_climb_step_retries: 2
@@ -835,60 +1013,58 @@ drone_controller_03:
     avoidance_lateral_offset_m: 5.0
     avoidance_forward_offset_m: 2.0
     avoidance_side_clearance_m: 5.0
-    avoidance_xy_timeout_sec: 8.0
+    avoidance_xy_timeout_sec: 5.0
     avoidance_brake_timeout_sec: 2.5
-    avoidance_stopped_speed_m_s: 0.60
-    avoidance_direction_check_sec: 0.25
+    avoidance_stopped_speed_m_s: 0.6
+    avoidance_direction_check_sec: 0.15
     avoidance_front_clearance_m: 3.5
-    avoidance_probe_distance_m: 4.0
+    avoidance_probe_distance_m: 1.5
+    avoidance_direction_hint_step_m: 1.25
     avoidance_direction_attempts: 2
     avoidance_min_forward_progress_m: 0.75
-    # 한 Waypoint에서 좌우 회피는 한 번만 성공 허용하고, 다시 막히면 상승한다.
     search_horizontal_avoidance_budget_per_waypoint: 1
-    # 계획 고도보다 1m 이상 높은 상태에서는 좌우로 더 빠지지 않고 추가 상승한다.
     search_high_altitude_skip_horizontal_avoidance: true
     search_high_altitude_threshold_m: 1.0
-    # 수색은 계획 D보다 현재 고도가 높으면 내려오지 않고 XY 방문을 우선한다.
     search_xy_priority_enabled: true
     search_keep_high_altitude_after_escape: true
-    # 전진량에 비해 측면 편차가 큰 A*/VFH 후보는 거부한다.
     avoidance_max_lateral_offset_m: 2.0
-    avoidance_max_lateral_to_forward_ratio: 0.80
+    avoidance_max_lateral_to_forward_ratio: 0.8
     avoidance_vector_max_age_sec: 1.2
     local_detour_max_age_sec: 1.2
     local_detour_hard_stop_distance_m: 0.75
     avoidance_keep_yaw_during_detour: true
     avoidance_commit_sec: 0.35
-    avoidance_block_confirm_sec: 0.20
-    vertical_escape_min_climb_m: 5.0
-    vertical_escape_retry_climb_step_m: 2.0
+    avoidance_block_confirm_sec: 0.2
+    vertical_escape_min_climb_m: 2.5
+    vertical_escape_retry_climb_step_m: 1.5
     vertical_escape_cross_retries: 3
     vertical_escape_keep_high_on_descent_failure: true
-    vertical_escape_min_forward_m: 6.0
-    vertical_escape_max_forward_m: 16.0
-    vertical_escape_obstacle_pass_margin_m: 2.5
-    vertical_escape_extra_forward_m: 3.0
-    vertical_escape_clear_hold_sec: 1.2
-    vertical_escape_cross_timeout_sec: 20.0
+    vertical_escape_min_forward_m: 3.0
+    vertical_escape_max_forward_m: 8.0
+    vertical_escape_obstacle_pass_margin_m: 1.5
+    vertical_escape_extra_forward_m: 2.0
+    vertical_escape_clear_hold_sec: 0.6
+    vertical_escape_cross_timeout_sec: 12.0
     vertical_escape_cross_tolerance_m: 0.8
     vertical_escape_descent_step_m: 1.0
-    vertical_escape_descent_timeout_sec: 12.0
-    vertical_escape_descent_retries: 2
-    vertical_escape_descent_clear_sec: 0.6
+    vertical_escape_descent_timeout_sec: 8.0
+    vertical_escape_descent_retries: 1
+    vertical_escape_descent_clear_sec: 0.4
     direction_yaw_enabled: true
-    direction_yaw_min_distance_m: 0.50
-    direction_yaw_tolerance_deg: 6.0
-    direction_yaw_timeout_sec: 8.0
-    direction_yaw_stable_samples: 2
-    direction_yaw_settle_sec: 0.20
+    direction_yaw_min_distance_m: 0.5
+    direction_yaw_tolerance_deg: 10.0
+    direction_yaw_timeout_sec: 4.0
+    direction_yaw_stable_samples: 1
+    direction_yaw_settle_sec: 0.05
     victim_approach_timeout_sec: 120.0
     safe_return_down_m: -40.0
-    search_waypoints: "0,0,-6"
+    search_waypoints: 0,0,-6
     map_frame: map
-
-# ---------------------------------------------------------------------------
-# Drone 04
-# ---------------------------------------------------------------------------
+    search_altitude_recovery_enabled: true
+    search_altitude_recovery_step_m: 1.0
+    search_altitude_recovery_min_excess_m: 1.5
+    cooperative_transit_climb_only_enabled: true
+    direction_yaw_pre_align_threshold_deg: 75.0
 human_detector_04:
   ros__parameters:
     drone_id: quadrotor_04
@@ -900,7 +1076,7 @@ human_detector_04:
     detector_mode: yolo
     model_path: ~/b3_cobot3_ws/models/yolo11s.pt
     person_class_id: 0
-    confidence_threshold: 0.40
+    confidence_threshold: 0.4
     inference_period_sec: 0.05
     inference_image_size: 960
     save_confirmed_image: true
@@ -908,14 +1084,17 @@ human_detector_04:
     saved_image_jpeg_quality: 95
     detection_start_delay_sec: 5.0
     detect_only_while_searching: true
-    active_detection_states: [SEARCHING, COOP_SEARCH_PREPARING, COOP_SEARCH_TRANSIT, COOP_SEARCHING]
+    active_detection_states:
+    - SEARCHING
+    - COOP_SEARCH_PREPARING
+    - COOP_SEARCH_TRANSIT
+    - COOP_SEARCHING
     mock_delay_sec: 8.0
     mock_confidence: 0.95
     mock_x_min_ratio: 0.46
     mock_y_min_ratio: 0.38
     mock_x_max_ratio: 0.54
     mock_y_max_ratio: 0.66
-
 victim_localizer_04:
   ros__parameters:
     drone_id: quadrotor_04
@@ -925,11 +1104,16 @@ victim_localizer_04:
     camera_position_topic: /drone_04/victim/position_camera
     map_position_topic: /drone_04/victim/position_map
     mission_state_topic: /mission/state
-    active_localization_states: [SEARCHING, COOP_SEARCH_TRANSIT, COOP_SEARCHING, VICTIM_DETECTED, VICTIM_LOCATED]
+    active_localization_states:
+    - SEARCHING
+    - COOP_SEARCH_TRANSIT
+    - COOP_SEARCHING
+    - VICTIM_DETECTED
+    - VICTIM_LOCATED
     camera_frame_override: quadrotor_04/camera_optical_frame
     map_frame: map
-    roi_center_ratio: 0.50
-    minimum_depth_m: 0.20
+    roi_center_ratio: 0.5
+    minimum_depth_m: 0.2
     maximum_depth_m: 30.0
     depth_buffer_duration_sec: 1.0
     depth_buffer_max_frames: 40
@@ -938,20 +1122,31 @@ victim_localizer_04:
     tf_retry_period_sec: 0.02
     tf_retry_max_points: 40
     log_period_sec: 10.0
-
 sensor_tf_04:
   ros__parameters:
     base_frame: quadrotor_04/base_link
     camera_frame: quadrotor_04/camera_optical_frame
     lidar_frame: quadrotor_04/base_scan
-    camera_translation: [0.0, 0.0, 0.0]
-    # Isaac sim_config.py의 CAMERA_DOWN_TILT_DEG와 같은 값이다.
+    camera_translation:
+    - 0.0
+    - 0.0
+    - 0.0
     camera_down_tilt_deg: 40.0
     derive_camera_quaternion_from_tilt: true
-    camera_quaternion_xyzw: [-0.640856, 0.640856, -0.298836, 0.298836]
-    lidar_translation: [0.0, 0.0, 0.15]
-    lidar_quaternion_xyzw: [0.0, 0.0, 0.0, 1.0]
-
+    camera_quaternion_xyzw:
+    - -0.640856
+    - 0.640856
+    - -0.298836
+    - 0.298836
+    lidar_translation:
+    - 0.0
+    - 0.0
+    - 0.15
+    lidar_quaternion_xyzw:
+    - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
 pointcloud_local_mapper_04:
   ros__parameters:
     drone_id: quadrotor_04
@@ -962,37 +1157,43 @@ pointcloud_local_mapper_04:
     accumulated_cloud_topic: /drone_04/obstacle/accumulated_cloud
     accumulated_cloud_body_topic: /drone_04/obstacle/accumulated_cloud_body
     local_costmap_topic: /drone_04/obstacle/local_costmap
-    # 최근 3초를 슬라이딩 윈도우로 유지한다.
-    accumulation_sec: 3.0
-    processing_period_sec: 0.10
-    publish_period_sec: 0.20
-    # PointCloud가 먼저 도착해도 콜백을 막지 않고 exact timestamp TF를 기다린다.
+    accumulation_sec: 1.5
+    processing_period_sec: 0.1
+    publish_period_sec: 0.2
     tf_retry_period_sec: 0.02
-    # 시뮬레이션이 느릴 때도 한두 TF 주기를 충분히 기다리도록 wall time 1초.
-    tf_exact_wait_sec: 1.00
-    # 누적 지도에는 exact timestamp TF만 사용하며 latest TF로 대체하지 않는다.
+    tf_exact_wait_sec: 1.0
     pending_cloud_queue_size: 30
-    # 잘못된 한 프레임이 뒤 프레임 처리를 막지 않도록 매 주기 여러 개를 검사한다.
     max_pending_clouds_per_cycle: 8
     voxel_size_m: 0.25
     minimum_voxel_observations: 2
     maximum_points_per_scan: 30000
     minimum_height_m: -1.2
     maximum_height_m: 1.8
-    local_costmap_size_m: 30.0
+    local_costmap_size_m: 14.0
     local_costmap_resolution_m: 0.25
-    obstacle_inflation_radius_m: 1.10
+    obstacle_inflation_radius_m: 1.1
     self_filter_radius_m: 0.65
-    active_mission_states: [INITIAL_TAKEOFF, INITIAL_HOVER, READY, SEARCHING, COOP_SEARCH_PREPARING, COOP_SEARCH_TRANSIT, COOP_SEARCHING, COOP_SEARCH_COMPLETE, VICTIM_DETECTED, RETURNING_NO_VICTIM, COMPLETE, MISSION_FAILED]
+    active_mission_states:
+    - INITIAL_TAKEOFF
+    - INITIAL_HOVER
+    - READY
+    - SEARCHING
+    - COOP_SEARCH_PREPARING
+    - COOP_SEARCH_TRANSIT
+    - COOP_SEARCHING
+    - COOP_SEARCH_COMPLETE
+    - VICTIM_DETECTED
+    - RETURNING_NO_VICTIM
+    - COMPLETE
+    - MISSION_FAILED
     warning_period_sec: 5.0
-
 obstacle_monitor_04:
   ros__parameters:
     drone_id: quadrotor_04
     point_cloud_topic: /quadrotor_04/point_cloud
     accumulated_point_cloud_topic: /drone_04/obstacle/accumulated_cloud_body
     use_accumulated_cloud_for_astar: true
-    accumulated_cloud_max_age_sec: 0.8
+    accumulated_cloud_max_age_sec: 0.6
     local_astar_path_topic: /drone_04/obstacle/local_astar_path
     blocked_topic: /drone_04/obstacle/blocked
     distance_topic: /drone_04/obstacle/min_distance
@@ -1011,11 +1212,30 @@ obstacle_monitor_04:
     minimum_obstacle_points: 3
     blocked_confirm_scans: 2
     clear_confirm_scans: 3
-    processing_period_sec: 0.10
+    processing_period_sec: 0.1
     minimum_height_m: -1.2
     maximum_height_m: 1.8
-    active_mission_states: [INITIAL_TAKEOFF, INITIAL_HOVER, READY, SEARCHING, COOP_SEARCH_PREPARING, COOP_SEARCH_TRANSIT, COOP_SEARCHING, COOP_SEARCH_COMPLETE, VICTIM_DETECTED, RETURNING_NO_VICTIM, COMPLETE, MISSION_FAILED]
-    candidate_offsets_deg: [0.0, -15.0, 15.0, -30.0, 30.0, -45.0, 45.0, -60.0, 60.0, -75.0, 75.0]
+    active_mission_states:
+    - INITIAL_TAKEOFF
+    - INITIAL_HOVER
+    - READY
+    - SEARCHING
+    - COOP_SEARCH_PREPARING
+    - COOP_SEARCH_TRANSIT
+    - COOP_SEARCHING
+    - COOP_SEARCH_COMPLETE
+    - VICTIM_DETECTED
+    - RETURNING_NO_VICTIM
+    - COMPLETE
+    - MISSION_FAILED
+    candidate_offsets_deg:
+    - 0.0
+    - -20.0
+    - 20.0
+    - -40.0
+    - 40.0
+    - -60.0
+    - 60.0
     candidate_sector_half_angle_deg: 12.0
     candidate_min_clearance_m: 3.5
     candidate_score_distance_cap_m: 15.0
@@ -1023,22 +1243,21 @@ obstacle_monitor_04:
     candidate_forward_progress_weight: 3.0
     candidate_side_switch_penalty: 4.0
     candidate_side_hold_sec: 2.0
-    candidate_max_offset_deg: 80.0
-    local_grid_size_m: 30.0
+    candidate_max_offset_deg: 65.0
+    local_grid_size_m: 12.0
     local_grid_resolution_m: 0.25
-    obstacle_inflation_radius_m: 1.10
-    local_planner_goal_distance_m: 10.0
-    local_planner_lookahead_m: 3.5
-    local_planner_period_sec: 0.40
+    obstacle_inflation_radius_m: 1.1
+    local_planner_goal_distance_m: 4.5
+    local_planner_lookahead_m: 1.25
+    local_planner_period_sec: 0.2
     proactive_avoidance_enabled: true
-    proactive_planning_distance_m: 10.0
-    proactive_corridor_half_width_m: 1.10
-    proactive_ignore_near_m: 0.80
-    proactive_min_obstacle_voxels: 2
-    planner_start_release_radius_m: 0.50
+    proactive_planning_distance_m: 6.0
+    proactive_corridor_half_width_m: 1.1
+    proactive_ignore_near_m: 0.8
+    proactive_min_obstacle_voxels: 3
+    planner_start_release_radius_m: 0.5
     local_planner_min_forward_progress_m: 0.75
     warning_period_sec: 5.0
-
 drone_controller_04:
   ros__parameters:
     drone_id: quadrotor_04
@@ -1060,7 +1279,10 @@ drone_controller_04:
     cooperative_search_path_topic: /drone_04/cooperative_search_path
     search_repeat_mode: infinite
     base_frame: quadrotor_04/base_link
-    home_world_enu: [-34.0, 45.0, 31.0]
+    home_world_enu:
+    - -34.0
+    - 45.0
+    - 31.0
     search_plan_path: ~/b3_cobot3_ws/isaac_sim/generated_search_plan.json
     takeoff_altitude_m: 6.0
     altitude_acceptance_radius_m: 0.1
@@ -1079,11 +1301,11 @@ drone_controller_04:
     landing_approach_altitude_m: 3.0
     landing_approach_timeout_sec: 45.0
     landing_descent_start_timeout_sec: 8.0
-    landing_min_descent_progress_m: 0.30
+    landing_min_descent_progress_m: 0.3
     landing_fallback_to_px4_land: true
     landing_xy_tolerance_m: 0.35
-    landing_altitude_tolerance_m: 0.30
-    landing_stopped_speed_m_s: 0.40
+    landing_altitude_tolerance_m: 0.3
+    landing_stopped_speed_m_s: 0.4
     landing_settle_sec: 2.0
     landing_timeout_sec: 75.0
     post_touchdown_settle_sec: 1.0
@@ -1094,9 +1316,9 @@ drone_controller_04:
     search_horizontal_position_gain: 0.8
     search_vertical_speed_up_m_s: 1.5
     search_vertical_speed_down_m_s: 1.5
-    avoidance_climb_step_m: 2.0
-    avoidance_max_climb_m: 12.0
-    avoidance_settle_sec: 1.0
+    avoidance_climb_step_m: 1.0
+    avoidance_max_climb_m: 8.0
+    avoidance_settle_sec: 0.4
     avoidance_climb_timeout_sec: 15.0
     avoidance_altitude_tolerance_m: 0.5
     avoidance_climb_step_retries: 2
@@ -1105,53 +1327,55 @@ drone_controller_04:
     avoidance_lateral_offset_m: 5.0
     avoidance_forward_offset_m: 2.0
     avoidance_side_clearance_m: 5.0
-    avoidance_xy_timeout_sec: 8.0
+    avoidance_xy_timeout_sec: 5.0
     avoidance_brake_timeout_sec: 2.5
-    avoidance_stopped_speed_m_s: 0.60
-    avoidance_direction_check_sec: 0.25
+    avoidance_stopped_speed_m_s: 0.6
+    avoidance_direction_check_sec: 0.15
     avoidance_front_clearance_m: 3.5
-    avoidance_probe_distance_m: 4.0
+    avoidance_probe_distance_m: 1.5
+    avoidance_direction_hint_step_m: 1.25
     avoidance_direction_attempts: 2
     avoidance_min_forward_progress_m: 0.75
-    # 한 Waypoint에서 좌우 회피는 한 번만 성공 허용하고, 다시 막히면 상승한다.
     search_horizontal_avoidance_budget_per_waypoint: 1
-    # 계획 고도보다 1m 이상 높은 상태에서는 좌우로 더 빠지지 않고 추가 상승한다.
     search_high_altitude_skip_horizontal_avoidance: true
     search_high_altitude_threshold_m: 1.0
-    # 수색은 계획 D보다 현재 고도가 높으면 내려오지 않고 XY 방문을 우선한다.
     search_xy_priority_enabled: true
     search_keep_high_altitude_after_escape: true
-    # 전진량에 비해 측면 편차가 큰 A*/VFH 후보는 거부한다.
     avoidance_max_lateral_offset_m: 2.0
-    avoidance_max_lateral_to_forward_ratio: 0.80
+    avoidance_max_lateral_to_forward_ratio: 0.8
     avoidance_vector_max_age_sec: 1.2
     local_detour_max_age_sec: 1.2
     local_detour_hard_stop_distance_m: 0.75
     avoidance_keep_yaw_during_detour: true
     avoidance_commit_sec: 0.35
-    avoidance_block_confirm_sec: 0.20
-    vertical_escape_min_climb_m: 5.0
-    vertical_escape_retry_climb_step_m: 2.0
+    avoidance_block_confirm_sec: 0.2
+    vertical_escape_min_climb_m: 2.5
+    vertical_escape_retry_climb_step_m: 1.5
     vertical_escape_cross_retries: 3
     vertical_escape_keep_high_on_descent_failure: true
-    vertical_escape_min_forward_m: 6.0
-    vertical_escape_max_forward_m: 16.0
-    vertical_escape_obstacle_pass_margin_m: 2.5
-    vertical_escape_extra_forward_m: 3.0
-    vertical_escape_clear_hold_sec: 1.2
-    vertical_escape_cross_timeout_sec: 20.0
+    vertical_escape_min_forward_m: 3.0
+    vertical_escape_max_forward_m: 8.0
+    vertical_escape_obstacle_pass_margin_m: 1.5
+    vertical_escape_extra_forward_m: 2.0
+    vertical_escape_clear_hold_sec: 0.6
+    vertical_escape_cross_timeout_sec: 12.0
     vertical_escape_cross_tolerance_m: 0.8
     vertical_escape_descent_step_m: 1.0
-    vertical_escape_descent_timeout_sec: 12.0
-    vertical_escape_descent_retries: 2
-    vertical_escape_descent_clear_sec: 0.6
+    vertical_escape_descent_timeout_sec: 8.0
+    vertical_escape_descent_retries: 1
+    vertical_escape_descent_clear_sec: 0.4
     direction_yaw_enabled: true
-    direction_yaw_min_distance_m: 0.50
-    direction_yaw_tolerance_deg: 6.0
-    direction_yaw_timeout_sec: 8.0
-    direction_yaw_stable_samples: 2
-    direction_yaw_settle_sec: 0.20
+    direction_yaw_min_distance_m: 0.5
+    direction_yaw_tolerance_deg: 10.0
+    direction_yaw_timeout_sec: 4.0
+    direction_yaw_stable_samples: 1
+    direction_yaw_settle_sec: 0.05
     victim_approach_timeout_sec: 120.0
     safe_return_down_m: -40.0
-    search_waypoints: "0,0,-6"
+    search_waypoints: 0,0,-6
     map_frame: map
+    search_altitude_recovery_enabled: true
+    search_altitude_recovery_step_m: 1.0
+    search_altitude_recovery_min_excess_m: 1.5
+    cooperative_transit_climb_only_enabled: true
+    direction_yaw_pre_align_threshold_deg: 75.0

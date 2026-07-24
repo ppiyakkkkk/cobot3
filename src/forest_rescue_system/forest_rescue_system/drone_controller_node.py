@@ -82,9 +82,9 @@ class DroneControllerNode(TimestampedNode):
         self.declare_parameter("search_horizontal_position_gain", 0.8)
         self.declare_parameter("search_vertical_speed_up_m_s", 1.5)
         self.declare_parameter("search_vertical_speed_down_m_s", 1.5)
-        self.declare_parameter("avoidance_climb_step_m", 2.0)
-        self.declare_parameter("avoidance_max_climb_m", 12.0)
-        self.declare_parameter("avoidance_settle_sec", 1.0)
+        self.declare_parameter("avoidance_climb_step_m", 1.0)
+        self.declare_parameter("avoidance_max_climb_m", 8.0)
+        self.declare_parameter("avoidance_settle_sec", 0.4)
         self.declare_parameter("avoidance_climb_timeout_sec", 15.0)
         self.declare_parameter("avoidance_altitude_tolerance_m", 0.5)
         self.declare_parameter("avoidance_climb_step_retries", 2)
@@ -93,12 +93,15 @@ class DroneControllerNode(TimestampedNode):
         self.declare_parameter("avoidance_lateral_offset_m", 5.0)
         self.declare_parameter("avoidance_forward_offset_m", 2.0)
         self.declare_parameter("avoidance_side_clearance_m", 5.0)
-        self.declare_parameter("avoidance_xy_timeout_sec", 8.0)
+        self.declare_parameter("avoidance_xy_timeout_sec", 5.0)
         self.declare_parameter("avoidance_brake_timeout_sec", 2.5)
         self.declare_parameter("avoidance_stopped_speed_m_s", 0.60)
-        self.declare_parameter("avoidance_direction_check_sec", 0.25)
+        self.declare_parameter("avoidance_direction_check_sec", 0.15)
         self.declare_parameter("avoidance_front_clearance_m", 3.5)
-        self.declare_parameter("avoidance_probe_distance_m", 4.0)
+        # A*/VFH는 완성된 우회 경로가 아니라 가까운 방향 힌트로만 쓴다.
+        # 한 번에 긴 임시점을 명령하지 않고 짧게 이동한 뒤 새 LiDAR로 재평가한다.
+        self.declare_parameter("avoidance_probe_distance_m", 1.5)
+        self.declare_parameter("avoidance_direction_hint_step_m", 1.25)
         # 한 Waypoint에서 A*와 VFH를 반복해 수색 경로에서 멀어지지 않도록
         # A* 1회와 VFH 1회 정도만 검사한 뒤 상승 회피로 전환한다.
         self.declare_parameter("avoidance_direction_attempts", 2)
@@ -118,6 +121,18 @@ class DroneControllerNode(TimestampedNode):
         self.declare_parameter("search_xy_priority_enabled", True)
         self.declare_parameter(
             "search_keep_high_altitude_after_escape",
+            True,
+        )
+        # 상승 회피 후 계속 같은 높은 고도에 머무르지 않고, 다음 수색
+        # Waypoint마다 지형 안전고도를 넘지 않는 범위에서 1m씩 회복한다.
+        self.declare_parameter("search_altitude_recovery_enabled", True)
+        self.declare_parameter("search_altitude_recovery_step_m", 1.0)
+        self.declare_parameter("search_altitude_recovery_min_excess_m", 1.5)
+        # COOP_TRANSIT에서는 지형이 낮아져도 하강하지 않는다. 현재보다
+        # 높은 안전고도가 필요할 때만 상승하고, 수직 회피로 확보한 고도도
+        # 첫 협동 수색 Waypoint까지 유지한다.
+        self.declare_parameter(
+            "cooperative_transit_climb_only_enabled",
             True,
         )
         # 원래 Waypoint 방향으로 최소 이만큼 전진하지 못하는 순수 측면
@@ -141,24 +156,24 @@ class DroneControllerNode(TimestampedNode):
         # 수평 A*/VFH가 모두 실패했을 때 충분히 상승한 뒤 원래 진행
         # 방향으로 장애물을 건넌다. LiDAR가 잠깐 clear가 되더라도 최소
         # 상승량을 채우며, 전진 중 다시 막히면 추가 상승 후 재시도한다.
-        self.declare_parameter("vertical_escape_min_climb_m", 5.0)
-        self.declare_parameter("vertical_escape_retry_climb_step_m", 2.0)
+        self.declare_parameter("vertical_escape_min_climb_m", 2.5)
+        self.declare_parameter("vertical_escape_retry_climb_step_m", 1.5)
         self.declare_parameter("vertical_escape_cross_retries", 3)
         self.declare_parameter(
             "vertical_escape_keep_high_on_descent_failure",
             True,
         )
-        self.declare_parameter("vertical_escape_min_forward_m", 6.0)
-        self.declare_parameter("vertical_escape_max_forward_m", 16.0)
-        self.declare_parameter("vertical_escape_obstacle_pass_margin_m", 2.5)
-        self.declare_parameter("vertical_escape_extra_forward_m", 3.0)
-        self.declare_parameter("vertical_escape_clear_hold_sec", 1.2)
-        self.declare_parameter("vertical_escape_cross_timeout_sec", 20.0)
+        self.declare_parameter("vertical_escape_min_forward_m", 3.0)
+        self.declare_parameter("vertical_escape_max_forward_m", 8.0)
+        self.declare_parameter("vertical_escape_obstacle_pass_margin_m", 1.5)
+        self.declare_parameter("vertical_escape_extra_forward_m", 2.0)
+        self.declare_parameter("vertical_escape_clear_hold_sec", 0.6)
+        self.declare_parameter("vertical_escape_cross_timeout_sec", 12.0)
         self.declare_parameter("vertical_escape_cross_tolerance_m", 0.8)
         self.declare_parameter("vertical_escape_descent_step_m", 1.0)
-        self.declare_parameter("vertical_escape_descent_timeout_sec", 12.0)
-        self.declare_parameter("vertical_escape_descent_retries", 2)
-        self.declare_parameter("vertical_escape_descent_clear_sec", 0.6)
+        self.declare_parameter("vertical_escape_descent_timeout_sec", 8.0)
+        self.declare_parameter("vertical_escape_descent_retries", 1)
+        self.declare_parameter("vertical_escape_descent_clear_sec", 0.4)
         self.declare_parameter("victim_approach_timeout_sec", 120.0)
 
         # 수평 이동 전에 기체 전방과 RGB 카메라가 목표 진행방향을
@@ -166,10 +181,13 @@ class DroneControllerNode(TimestampedNode):
         # 시작될 때부터 모든 수색·우회·접근·복귀 이동에 적용된다.
         self.declare_parameter("direction_yaw_enabled", True)
         self.declare_parameter("direction_yaw_min_distance_m", 0.50)
-        self.declare_parameter("direction_yaw_tolerance_deg", 6.0)
-        self.declare_parameter("direction_yaw_timeout_sec", 8.0)
-        self.declare_parameter("direction_yaw_stable_samples", 2)
-        self.declare_parameter("direction_yaw_settle_sec", 0.20)
+        # 작은 방향 변화는 이동 Setpoint와 함께 회전하고, 큰 방향
+        # 전환일 때만 제자리 Yaw 정렬을 수행한다.
+        self.declare_parameter("direction_yaw_pre_align_threshold_deg", 75.0)
+        self.declare_parameter("direction_yaw_tolerance_deg", 10.0)
+        self.declare_parameter("direction_yaw_timeout_sec", 4.0)
+        self.declare_parameter("direction_yaw_stable_samples", 1)
+        self.declare_parameter("direction_yaw_settle_sec", 0.05)
         self.declare_parameter(
             "search_plan_path",
             "~/b3_cobot3_ws/isaac_sim/generated_search_plan.json",
@@ -1387,6 +1405,19 @@ class DroneControllerNode(TimestampedNode):
         if abs(initial_error_deg) <= tolerance_deg:
             return float(target_yaw_deg)
 
+        pre_align_threshold_deg = max(
+            tolerance_deg,
+            float(
+                self.get_parameter(
+                    "direction_yaw_pre_align_threshold_deg"
+                ).value
+            ),
+        )
+        if abs(initial_error_deg) < pre_align_threshold_deg:
+            # 작은 방향 변화는 제자리 정렬로 멈추지 않고, 다음 Position
+            # setpoint에 목표 Yaw를 포함해 이동과 회전을 동시에 수행한다.
+            return float(target_yaw_deg)
+
         # 회전 중에는 현재 위치와 고도를 유지한다. 위치 이동 명령과 Yaw
         # 회전을 동시에 보내지 않아 옆걸음처럼 보이는 구간을 최소화한다.
         hold_north_m = float(self.latest_north_m)
@@ -1472,6 +1503,15 @@ class DroneControllerNode(TimestampedNode):
                 ).value
             )
         )
+        transit_climb_only = (
+            allow_avoidance
+            and str(resume_status).strip().upper() == "COOP_TRANSIT"
+            and bool(
+                self.get_parameter(
+                    "cooperative_transit_climb_only_enabled"
+                ).value
+            )
+        )
         keep_high_altitude = (
             xy_priority
             and bool(
@@ -1480,11 +1520,70 @@ class DroneControllerNode(TimestampedNode):
                 ).value
             )
         )
-        commanded_down_m = (
-            min(float(down_m), float(self.latest_down_m))
-            if keep_high_altitude
-            else float(down_m)
+        maintain_high_after_escape = (
+            keep_high_altitude or transit_climb_only
         )
+
+        if transit_climb_only:
+            # NED Down은 값이 작을수록 높은 고도다. 계획점이 낮아져도
+            # 현재 D를 유지하고, 계획 안전고도가 더 높을 때만 상승한다.
+            commanded_down_m = min(
+                float(down_m),
+                float(self.latest_down_m),
+            )
+            if float(down_m) > float(self.latest_down_m) + 0.2:
+                self.get_logger().info(
+                    "협동 진입 하강 억제: "
+                    f"현재D={self.latest_down_m:.1f}, "
+                    f"계획D={down_m:.1f}, "
+                    f"명령D={commanded_down_m:.1f}"
+                )
+        elif keep_high_altitude:
+            commanded_down_m = min(
+                float(down_m),
+                float(self.latest_down_m),
+            )
+            altitude_excess_m = (
+                float(down_m) - float(self.latest_down_m)
+            )
+            recovery_enabled = bool(
+                self.get_parameter(
+                    "search_altitude_recovery_enabled"
+                ).value
+            )
+            recovery_min_excess = max(
+                0.0,
+                float(
+                    self.get_parameter(
+                        "search_altitude_recovery_min_excess_m"
+                    ).value
+                ),
+            )
+            if (
+                recovery_enabled
+                and altitude_excess_m > recovery_min_excess
+                and not self._reactive_obstacle_present()
+            ):
+                recovery_step = max(
+                    0.2,
+                    float(
+                        self.get_parameter(
+                            "search_altitude_recovery_step_m"
+                        ).value
+                    ),
+                )
+                commanded_down_m = min(
+                    float(down_m),
+                    float(self.latest_down_m) + recovery_step,
+                )
+                self.get_logger().info(
+                    "수색 고도 단계 회복: "
+                    f"현재D={self.latest_down_m:.1f}, "
+                    f"계획D={down_m:.1f}, "
+                    f"명령D={commanded_down_m:.1f}"
+                )
+        else:
+            commanded_down_m = float(down_m)
         horizontal_avoidance_successes = 0
         avoidance_replans = 0
 
@@ -1597,7 +1696,7 @@ class DroneControllerNode(TimestampedNode):
 
                 if avoided_horizontally:
                     horizontal_avoidance_successes += 1
-                    if keep_high_altitude:
+                    if maintain_high_after_escape:
                         commanded_down_m = min(
                             float(commanded_down_m),
                             float(self.latest_down_m),
@@ -1613,7 +1712,7 @@ class DroneControllerNode(TimestampedNode):
                         yaw_deg=command_yaw_deg,
                         resume_status=resume_status,
                         highest_allowed_down=avoidance_ceiling_down_m,
-                        maintain_high_for_search=keep_high_altitude,
+                        maintain_high_for_search=maintain_high_after_escape,
                     )
                     if vertical_down_m is None:
                         if (
@@ -1721,7 +1820,7 @@ class DroneControllerNode(TimestampedNode):
                 ).value
             )
 
-            if xy_priority:
+            if xy_priority or transit_climb_only:
                 # 계획 고도는 최소 안전고도로만 사용한다. 현재 고도가 그보다
                 # 높다면 하강을 기다리지 않고 XY 도달만으로 방문을 완료한다.
                 safe_altitude_reached = (
@@ -1732,7 +1831,14 @@ class DroneControllerNode(TimestampedNode):
                     horizontal_error <= horizontal_tolerance
                     and safe_altitude_reached
                 ):
-                    if (
+                    if transit_climb_only:
+                        self.get_logger().info(
+                            "협동 진입 XY 도달(하강 없음): "
+                            f"N={north_m:.1f}, E={east_m:.1f}, "
+                            f"안전계획D={down_m:.1f}, "
+                            f"유지고도D={self.latest_down_m:.1f}"
+                        )
+                    elif (
                         self.latest_down_m
                         < float(down_m) - altitude_tolerance
                     ):
@@ -1878,6 +1984,22 @@ class DroneControllerNode(TimestampedNode):
                 )
                 return False
 
+            # A*/VFH가 계산한 전체 우회점은 방향만 사용한다. 너무 긴
+            # 임시점으로 한 번에 이동하면 산림의 새 장애물을 뒤늦게 만나므로,
+            # 같은 방향을 유지한 채 짧은 거리로 축소하고 다시 센싱한다.
+            raw_detour_distance = math.hypot(body_x, body_y)
+            hint_step = max(
+                0.6,
+                float(
+                    self.get_parameter(
+                        "avoidance_direction_hint_step_m"
+                    ).value
+                ),
+            )
+            if raw_detour_distance > hint_step:
+                scale = hint_step / raw_detour_distance
+                body_x *= scale
+                body_y *= scale
             detour_distance = math.hypot(body_x, body_y)
             if detour_distance < 0.5:
                 if path_source == "로컬A*":
@@ -2059,8 +2181,9 @@ class DroneControllerNode(TimestampedNode):
                 else "FORWARD"
             )
             self.get_logger().warning(
-                f"{path_source} {side_name} 우회 승인: body="
+                f"{path_source} {side_name} 방향 힌트 승인: body="
                 f"({body_x:.2f}, {body_y:.2f})m, "
+                f"원경로={raw_detour_distance:.2f}m, "
                 f"전진성={forward_progress:.2f}m, "
                 f"임시점 N={detour_north:.1f}, "
                 f"E={detour_east:.1f}, D={detour_down:.1f}"
@@ -2563,8 +2686,13 @@ class DroneControllerNode(TimestampedNode):
                 continue
 
             if maintain_high_for_search:
+                altitude_mode = (
+                    "협동 진입"
+                    if str(resume_status).strip().upper() == "COOP_TRANSIT"
+                    else "XY 우선 수색"
+                )
                 self.get_logger().warning(
-                    "XY 우선 수색: 장애물 상공 통과 후 계획 고도로 "
+                    f"{altitude_mode}: 장애물 상공 통과 후 계획 고도로 "
                     f"하강하지 않고 D={escape_down_m:.1f}를 유지한 채 "
                     "원래 Waypoint XY로 이동합니다."
                 )

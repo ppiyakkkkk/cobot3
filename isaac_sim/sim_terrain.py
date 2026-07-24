@@ -11,12 +11,22 @@ from pathlib import Path
 
 import carb
 import numpy as np
-from pxr import Gf, Usd, UsdGeom
+from pxr import Gf, Usd, UsdGeom, UsdShade
 from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
 
 from sim_config import (
+    NAVIGATION_STRUCTURE_ALIASES,
+    NAVIGATION_STRUCTURE_XY_MARGIN_M,
     RVIZ_ENVIRONMENT_GROUPS,
     RVIZ_ENVIRONMENT_MAX_TRIANGLES_PER_GROUP,
+    RVIZ_RIVER_AUTO_COLOR_CLASSIFICATION,
+    RVIZ_RIVER_AUTO_MAX_THICKNESS_RATIO,
+    RVIZ_RIVER_AUTO_MAX_VERTICAL_THICKNESS_M,
+    RVIZ_RIVER_AUTO_MIN_BLUE,
+    RVIZ_RIVER_AUTO_MIN_BLUE_MINUS_RED,
+    RVIZ_RIVER_AUTO_MIN_COLOR_RANGE,
+    RVIZ_RIVER_AUTO_MIN_HORIZONTAL_SPAN_M,
+    RVIZ_RIVER_EXPLICIT_PRIM_PATHS,
 )
 
 
@@ -25,6 +35,8 @@ class TerrainHeightField:
         self._stage = stage
         self._terrain_prim = self._find_terrain_mesh()
         self._build_interpolator()
+        self._navigation_structures = []
+        self._build_navigation_structures()
 
     def _find_terrain_mesh(self):
         meshes = [
@@ -138,6 +150,211 @@ class TerrainHeightField:
                 f"Terrain 높이를 계산하지 못했습니다: X={x:.2f}, Y={y:.2f}"
             )
         return value
+
+    @staticmethod
+    def _normalize_name(value):
+        return "".join(
+            character.lower()
+            for character in str(value)
+            if character.isalnum()
+        )
+
+    def _build_navigation_structures(self):
+        """다리처럼 Terrain과 분리된 구조물의 World AABB를 수집한다.
+
+        구조물의 세부 삼각형을 2D 격자에 직접 투영하면 계산량이 커지므로,
+        경로계획에서는 보수적으로 World XY bounding box 안의 최고점을
+        구조물 표면 높이로 사용한다. 구조물 수가 적은 산림 환경에 적합하다.
+        """
+        aliases = tuple(
+            self._normalize_name(value)
+            for value in NAVIGATION_STRUCTURE_ALIASES
+            if str(value).strip()
+        )
+        if not aliases:
+            return
+
+        xform_cache = UsdGeom.XformCache(Usd.TimeCode.Default())
+        unmatched_large_meshes = []
+
+        for prim in self._stage.Traverse():
+            if not prim.IsA(UsdGeom.Mesh):
+                continue
+            if prim == self._terrain_prim:
+                continue
+
+            mesh = UsdGeom.Mesh(prim)
+            local_points = mesh.GetPointsAttr().Get()
+            if local_points is None or len(local_points) < 3:
+                continue
+
+            path_text = self._normalize_name(str(prim.GetPath()))
+            matched = any(alias in path_text for alias in aliases)
+            if not matched:
+                if len(local_points) >= 100:
+                    unmatched_large_meshes.append(
+                        (len(local_points), str(prim.GetPath()))
+                    )
+                continue
+
+            imageable = UsdGeom.Imageable(prim)
+            if imageable and (
+                imageable.ComputeVisibility() == UsdGeom.Tokens.invisible
+                or imageable.ComputePurpose() == UsdGeom.Tokens.proxy
+            ):
+                continue
+
+            world_matrix = xform_cache.GetLocalToWorldTransform(prim)
+            world_points = np.asarray(
+                [
+                    tuple(
+                        world_matrix.Transform(
+                            Gf.Vec3d(
+                                float(point[0]),
+                                float(point[1]),
+                                float(point[2]),
+                            )
+                        )
+                    )
+                    for point in local_points
+                ],
+                dtype=np.float64,
+            )
+            finite = np.all(np.isfinite(world_points), axis=1)
+            world_points = world_points[finite]
+            if len(world_points) < 3:
+                continue
+
+            structure = {
+                "path": str(prim.GetPath()),
+                "x_min": float(np.min(world_points[:, 0])),
+                "x_max": float(np.max(world_points[:, 0])),
+                "y_min": float(np.min(world_points[:, 1])),
+                "y_max": float(np.max(world_points[:, 1])),
+                "z_max": float(np.max(world_points[:, 2])),
+            }
+            self._navigation_structures.append(structure)
+            print(
+                "[NAV STRUCTURE] "
+                f"{structure['path']}: "
+                f"XY=({structure['x_min']:.2f}, {structure['x_max']:.2f}, "
+                f"{structure['y_min']:.2f}, {structure['y_max']:.2f}), "
+                f"top_Z={structure['z_max']:.2f}"
+            )
+
+        if self._navigation_structures:
+            print(
+                "[NAV STRUCTURE] 경로계획에 반영할 구조물 수: "
+                f"{len(self._navigation_structures)}"
+            )
+            return
+
+        # Bridge 이름이 다른 경우 다음 실행 로그만으로 Prim 이름을 찾을 수
+        # 있도록 Terrain 외의 큰 Mesh 후보를 출력한다.
+        unmatched_large_meshes.sort(reverse=True)
+        if unmatched_large_meshes:
+            candidate_text = ", ".join(
+                f"{path}(points={count})"
+                for count, path in unmatched_large_meshes[:12]
+            )
+            carb.log_warn(
+                "bridge/deck 이름의 경로계획 구조물을 찾지 못했습니다. "
+                "다리 Prim 이름이 다르면 sim_config.py의 "
+                f"NAVIGATION_STRUCTURE_ALIASES에 추가하세요. 후보: {candidate_text}"
+            )
+
+    def navigation_height(self, x, y):
+        """Terrain과 등록된 다리 구조물 중 더 높은 표면을 반환한다."""
+        result = float(self.height(x, y))
+        margin = max(0.0, float(NAVIGATION_STRUCTURE_XY_MARGIN_M))
+        for structure in self._navigation_structures:
+            if (
+                structure["x_min"] - margin
+                <= float(x)
+                <= structure["x_max"] + margin
+                and structure["y_min"] - margin
+                <= float(y)
+                <= structure["y_max"] + margin
+            ):
+                result = max(result, structure["z_max"])
+        return result
+
+    def write_navigation_surface(self, output_path, sample_spacing_m):
+        """Terrain과 다리 상단을 합친 경로계획 전용 규칙 격자를 저장한다."""
+        spacing = max(0.25, float(sample_spacing_m))
+        x_count = max(
+            2,
+            int(math.ceil((self.x_max - self.x_min) / spacing)) + 1,
+        )
+        y_count = max(
+            2,
+            int(math.ceil((self.y_max - self.y_min) / spacing)) + 1,
+        )
+        x_values = np.linspace(self.x_min, self.x_max, x_count)
+        y_values = np.linspace(self.y_min, self.y_max, y_count)
+
+        vertices = np.empty((x_count * y_count, 3), dtype=np.float32)
+        vertex_index = 0
+        for world_y in y_values:
+            for world_x in x_values:
+                vertices[vertex_index] = (
+                    float(world_x),
+                    float(world_y),
+                    float(self.navigation_height(world_x, world_y)),
+                )
+                vertex_index += 1
+
+        triangle_count = (x_count - 1) * (y_count - 1) * 2
+        triangles = np.empty((triangle_count, 3), dtype=np.int32)
+        triangle_index = 0
+        for row in range(y_count - 1):
+            for column in range(x_count - 1):
+                lower_left = row * x_count + column
+                lower_right = lower_left + 1
+                upper_left = (row + 1) * x_count + column
+                upper_right = upper_left + 1
+                triangles[triangle_index] = (
+                    lower_left,
+                    lower_right,
+                    upper_right,
+                )
+                triangle_index += 1
+                triangles[triangle_index] = (
+                    lower_left,
+                    upper_right,
+                    upper_left,
+                )
+                triangle_index += 1
+
+        output_path = Path(output_path)
+        temporary_path = output_path.with_suffix(".npz.tmp")
+        with temporary_path.open("wb") as file_handle:
+            np.savez_compressed(
+                file_handle,
+                vertices=vertices,
+                triangles=triangles,
+                map_frame=np.asarray(["map"]),
+                coordinate_convention=np.asarray(["world_enu"]),
+                sample_spacing_m=np.asarray([spacing], dtype=np.float32),
+                navigation_structure_count=np.asarray(
+                    [len(self._navigation_structures)],
+                    dtype=np.int32,
+                ),
+                navigation_structure_paths=np.asarray(
+                    [
+                        structure["path"]
+                        for structure in self._navigation_structures
+                    ],
+                    dtype=str,
+                ),
+            )
+        temporary_path.replace(output_path)
+        print(
+            "[INFO] 경로계획 Navigation Surface 저장: "
+            f"{output_path}, vertices={len(vertices)}, "
+            f"structures={len(self._navigation_structures)}, "
+            f"spacing={spacing:.2f}m"
+        )
 
     def write_rviz_terrain_mesh(self, output_path, sample_spacing_m):
         """실제 USD Terrain 높이로 RViz용 삼각형 표면을 저장한다."""
@@ -273,21 +490,228 @@ class EnvironmentMeshExporter:
             if character.isalnum()
         )
 
+    @staticmethod
+    def _normalized_aliases(values):
+        return tuple(
+            EnvironmentMeshExporter._normalize_name(value)
+            for value in values
+            if str(value).strip()
+        )
+
+    @staticmethod
+    def _color_triplet(value):
+        """USD 색상 값을 평균 RGB 3개로 변환한다."""
+        if value is None:
+            return None
+        try:
+            array = np.asarray(value, dtype=np.float64)
+        except (TypeError, ValueError):
+            return None
+        if array.size < 3:
+            return None
+
+        if array.ndim == 1:
+            color = array[:3]
+        else:
+            if array.shape[-1] < 3:
+                return None
+            color = np.mean(array.reshape(-1, array.shape[-1])[:, :3], axis=0)
+
+        if color.shape != (3,) or not np.all(np.isfinite(color)):
+            return None
+        return color
+
+    def _bound_material(self, prim):
+        """Prim에 최종 바인딩된 Material을 안전하게 반환한다."""
+        try:
+            material, _ = UsdShade.MaterialBindingAPI(
+                prim
+            ).ComputeBoundMaterial()
+        except Exception:
+            return None
+        if not material:
+            return None
+        material_prim = material.GetPrim()
+        if not material_prim or not material_prim.IsValid():
+            return None
+        return material
+
+    def _material_matches_alias(self, prim, aliases):
+        material = self._bound_material(prim)
+        if material is None:
+            return False
+
+        material_text = self._normalize_name(str(material.GetPath()))
+        if any(alias in material_text for alias in aliases):
+            return True
+
+        for child in Usd.PrimRange(material.GetPrim()):
+            child_text = self._normalize_name(
+                f"{child.GetName()} {child.GetTypeName()}"
+            )
+            if any(alias in child_text for alias in aliases):
+                return True
+        return False
+
+    def _mesh_color_candidates(self, prim):
+        """Mesh 표시색과 Material Shader의 색상 입력을 수집한다."""
+        colors = []
+
+        try:
+            display_color = UsdGeom.PrimvarsAPI(prim).GetPrimvar(
+                "displayColor"
+            )
+            if display_color and display_color.HasValue():
+                color = self._color_triplet(display_color.Get())
+                if color is not None:
+                    colors.append(color)
+        except Exception:
+            pass
+
+        material = self._bound_material(prim)
+        if material is None:
+            return colors
+
+        color_input_tokens = (
+            "basecolor",
+            "diffusecolor",
+            "albedo",
+            "reflectioncolor",
+            "watercolor",
+            "tintcolor",
+            "color",
+        )
+        for child in Usd.PrimRange(material.GetPrim()):
+            if not child.IsA(UsdShade.Shader):
+                continue
+            shader = UsdShade.Shader(child)
+            for shader_input in shader.GetInputs():
+                input_name = self._normalize_name(
+                    shader_input.GetBaseName()
+                )
+                if not any(
+                    token in input_name for token in color_input_tokens
+                ):
+                    continue
+                try:
+                    value = shader_input.Get()
+                except Exception:
+                    continue
+                color = self._color_triplet(value)
+                if color is not None:
+                    colors.append(color)
+        return colors
+
+    @staticmethod
+    def _looks_like_river_color(color):
+        red, green, blue = [float(value) for value in color]
+        color_range = max(red, green, blue) - min(red, green, blue)
+        return (
+            blue >= float(RVIZ_RIVER_AUTO_MIN_BLUE)
+            and blue - red
+            >= float(RVIZ_RIVER_AUTO_MIN_BLUE_MINUS_RED)
+            and color_range >= float(RVIZ_RIVER_AUTO_MIN_COLOR_RANGE)
+            # 청록색 물도 허용하되 녹색이 파란색보다 지나치게 크면 제외한다.
+            and green <= blue * 1.35
+        )
+
+    def _looks_like_broad_flat_water_mesh(self, prim):
+        """파란색이며 넓고 평평한 Mesh인지 검사한다."""
+        if not bool(RVIZ_RIVER_AUTO_COLOR_CLASSIFICATION):
+            return False
+        if not any(
+            self._looks_like_river_color(color)
+            for color in self._mesh_color_candidates(prim)
+        ):
+            return False
+
+        local_points = UsdGeom.Mesh(prim).GetPointsAttr().Get()
+        if local_points is None or len(local_points) < 3:
+            return False
+
+        world_matrix = self._xform_cache.GetLocalToWorldTransform(prim)
+        world_points = np.asarray(
+            [
+                tuple(
+                    world_matrix.Transform(
+                        Gf.Vec3d(
+                            float(point[0]),
+                            float(point[1]),
+                            float(point[2]),
+                        )
+                    )
+                )
+                for point in local_points
+            ],
+            dtype=np.float64,
+        )
+        finite = np.all(np.isfinite(world_points), axis=1)
+        world_points = world_points[finite]
+        if len(world_points) < 3:
+            return False
+
+        extents = np.ptp(world_points, axis=0)
+        horizontal_span = float(max(extents[0], extents[1]))
+        vertical_thickness = float(extents[2])
+        if horizontal_span < float(RVIZ_RIVER_AUTO_MIN_HORIZONTAL_SPAN_M):
+            return False
+
+        thickness_limit = max(
+            float(RVIZ_RIVER_AUTO_MAX_VERTICAL_THICKNESS_M),
+            horizontal_span * float(RVIZ_RIVER_AUTO_MAX_THICKNESS_RATIO),
+        )
+        return vertical_thickness <= thickness_limit
+
     def _classify_mesh(self, prim):
-        """Prim 경로의 조상 이름을 검사해 환경 그룹을 결정한다."""
+        """Prim 경로·Material·색상과 형상으로 환경 그룹을 결정한다."""
+        prim_path = str(prim.GetPath())
+        explicit_river_paths = tuple(
+            str(value).strip()
+            for value in RVIZ_RIVER_EXPLICIT_PRIM_PATHS
+            if str(value).strip()
+        )
+        if any(
+            prim_path == path or prim_path.startswith(path.rstrip("/") + "/")
+            for path in explicit_river_paths
+        ):
+            print(f"[RIVER] 명시적 Prim 경로로 분류: {prim_path}")
+            return "river"
+
         normalized_segments = [
             self._normalize_name(segment)
-            for segment in str(prim.GetPath()).split("/")
+            for segment in prim_path.split("/")
             if segment
         ]
 
-        for category, aliases in RVIZ_ENVIRONMENT_GROUPS.items():
+        for category, raw_aliases in RVIZ_ENVIRONMENT_GROUPS.items():
+            aliases = self._normalized_aliases(raw_aliases)
             for segment in normalized_segments:
                 if any(
                     segment == alias or segment.startswith(alias)
                     for alias in aliases
                 ):
+                    if category == "bridges":
+                        print(
+                            "[BRIDGE] Prim 경로로 분류: "
+                            f"{prim_path}"
+                        )
                     return category
+
+            # 강은 Prim 이름 대신 Material 이름에 Water/River가 들어간
+            # 경우가 많으므로 바인딩 Material 경로도 함께 검사한다.
+            if category == "river" and self._material_matches_alias(
+                prim,
+                aliases,
+            ):
+                print(f"[RIVER] Material 이름으로 분류: {prim_path}")
+                return category
+
+        # 이름과 Material 모두 일반적이어도 파란색의 넓고 평평한 Mesh면
+        # 강 표면으로 자동 분류한다.
+        if self._looks_like_broad_flat_water_mesh(prim):
+            print(f"[RIVER AUTO] 파란 평면 Mesh로 분류: {prim_path}")
+            return "river"
+
         return None
 
     @staticmethod
@@ -407,7 +831,7 @@ class EnvironmentMeshExporter:
         )
 
     def write(self, output_path):
-        """Pine/Broadleaf/Bushes/Rocks Mesh를 하나의 NPZ로 저장한다."""
+        """식생·바위·강·다리 Mesh를 하나의 NPZ로 저장한다."""
         grouped_vertices = {
             category: []
             for category in RVIZ_ENVIRONMENT_GROUPS
@@ -445,7 +869,7 @@ class EnvironmentMeshExporter:
             vertex_offsets[category] += len(vertices)
 
         payload = {
-            "format_version": np.asarray([1], dtype=np.int32),
+            "format_version": np.asarray([3], dtype=np.int32),
             "map_frame": np.asarray(["map"]),
             "coordinate_convention": np.asarray(["world_enu"]),
         }
@@ -513,7 +937,7 @@ class EnvironmentMeshExporter:
 
         if found_group_count == 0:
             raise RuntimeError(
-                "PineForest/BroadleafForest/Bushes/Rocks 아래에서 "
+                "PineForest/BroadleafForest/Bushes/Rocks/River/Bridges에서 "
                 "RViz용 Mesh를 하나도 찾지 못했습니다."
             )
 

@@ -73,13 +73,25 @@ class MissionManagerNode(TimestampedNode):
             "terrain_mesh_path",
             "~/b3_cobot3_ws/isaac_sim/generated_terrain_mesh.npz",
         )
+        self.declare_parameter(
+            "navigation_surface_path",
+            "~/b3_cobot3_ws/isaac_sim/generated_navigation_surface.npz",
+        )
         self.declare_parameter("cooperative_lane_spacing_m", 4.0)
         self.declare_parameter("cooperative_sample_spacing_m", 4.0)
         self.declare_parameter(
             "cooperative_terrain_profile_spacing_m",
             1.0,
         )
-        self.declare_parameter("cooperative_transit_altitude_step_m", 2.0)
+        self.declare_parameter("cooperative_transit_altitude_step_m", 1.0)
+        self.declare_parameter("cooperative_transit_profile_spacing_m", 3.0)
+        self.declare_parameter("cooperative_max_climb_step_m", 2.5)
+        self.declare_parameter("cooperative_max_descent_step_m", 2.0)
+        self.declare_parameter("cooperative_transit_climb_only", True)
+        self.declare_parameter(
+            "cooperative_transit_skip_current_waypoint",
+            True,
+        )
         self.declare_parameter("cooperative_subzone_margin_m", 0.6)
         self.declare_parameter("cooperative_prepare_timeout_sec", 20.0)
         self.declare_parameter(
@@ -112,6 +124,9 @@ class MissionManagerNode(TimestampedNode):
             terrain_mesh_path=str(
                 self.get_parameter("terrain_mesh_path").value
             ),
+            navigation_surface_path=str(
+                self.get_parameter("navigation_surface_path").value
+            ),
             lane_spacing_m=float(
                 self.get_parameter("cooperative_lane_spacing_m").value
             ),
@@ -126,6 +141,31 @@ class MissionManagerNode(TimestampedNode):
             transit_altitude_step_m=float(
                 self.get_parameter(
                     "cooperative_transit_altitude_step_m"
+                ).value
+            ),
+            transit_profile_spacing_m=float(
+                self.get_parameter(
+                    "cooperative_transit_profile_spacing_m"
+                ).value
+            ),
+            max_climb_step_m=float(
+                self.get_parameter(
+                    "cooperative_max_climb_step_m"
+                ).value
+            ),
+            max_descent_step_m=float(
+                self.get_parameter(
+                    "cooperative_max_descent_step_m"
+                ).value
+            ),
+            transit_climb_only=bool(
+                self.get_parameter(
+                    "cooperative_transit_climb_only"
+                ).value
+            ),
+            transit_skip_current_waypoint=bool(
+                self.get_parameter(
+                    "cooperative_transit_skip_current_waypoint"
                 ).value
             ),
             subzone_margin_m=float(
@@ -488,8 +528,9 @@ class MissionManagerNode(TimestampedNode):
                         f"START_COOPERATIVE_SEARCH:{plan_id}",
                     )
                 self.get_logger().warning(
-                    "협동 수색 진입 시작: 각 드론은 서로 다른 고도로 "
-                    "자기 소구역 첫 웨이포인트로 직접 이동합니다."
+                    "협동 수색 진입 시작: 현재 절대고도보다 하강하지 "
+                    "않고, 앞쪽 지형·장애물에 필요할 때만 상승하며 자기 "
+                    "소구역 첫 웨이포인트로 이동합니다."
                 )
             return
 

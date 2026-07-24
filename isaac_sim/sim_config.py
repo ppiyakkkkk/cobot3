@@ -194,12 +194,39 @@ PERSON_COLLIDER_TOTAL_HEIGHT_M = (
 # ---------------------------------------------------------------------------
 SEARCH_AREA_MARGIN_M = 6.0
 SEARCH_LANE_SPACING_M = 7.0
-SEARCH_SAMPLE_SPACING_M = 7.0
+# 강가·급경사 구간에서 고도 변화가 한 번에 커지지 않도록 수색점 간격을
+# 기존 7m보다 촘촘하게 둔다.
+SEARCH_SAMPLE_SPACING_M = 5.0
 SEARCH_CLEARANCE_M = 6.0
 
-# 두 Waypoint 사이의 직선 구간도 지형과 충돌하지 않도록 1 m 간격으로
-# 지형 최고점을 검사한다. 끝점만 검사하면 구간 중간 봉우리와 충돌할 수 있다.
-SEARCH_TERRAIN_PROFILE_SPACING_M = 1.0
+# 급격한 하천 사면과 다리 진입부의 높이 변화를 놓치지 않도록 선분을
+# 0.5m 간격으로 검사한다.
+SEARCH_TERRAIN_PROFILE_SPACING_M = 0.5
+
+# 연속 Waypoint 사이의 목표 고도 변화량을 제한한다. 상승이 더 필요하면
+# 이전 Waypoint들을 미리 높여 완만하게 준비하고, 하강은 다음 지점들에
+# 걸쳐 단계적으로 수행한다.
+SEARCH_MAX_CLIMB_PER_WAYPOINT_M = 2.5
+SEARCH_MAX_DESCENT_PER_WAYPOINT_M = 2.0
+
+# 협동 수색 진입 경로는 전역 최고고도에서 수직 상승 후 이동하지 않고,
+# 현재 위치부터 첫 소구역까지 지형을 따라 이동하면서 고도를 바꾼다.
+COOPERATIVE_TRANSIT_PROFILE_SPACING_M = 3.0
+COOPERATIVE_MAX_CLIMB_PER_WAYPOINT_M = 2.5
+COOPERATIVE_MAX_DESCENT_PER_WAYPOINT_M = 2.0
+
+# Terrain과 분리된 다리 구조물도 사전 경로 높이에 포함하기 위한 이름
+# 후보들이다. 실제 USD Prim 경로에 아래 문자열이 들어가면 구조물 상단을
+# navigation surface로 취급한다.
+NAVIGATION_STRUCTURE_ALIASES = (
+    "bridge",
+    "footbridge",
+    "woodbridge",
+    "woodenbridge",
+    "crossing",
+    "deck",
+)
+NAVIGATION_STRUCTURE_XY_MARGIN_M = 1.5
 
 # 복귀 고도는 더 이상 지도 전체 최고점으로 고정하지 않는다. ROS 2
 # 컨트롤러가 RETURN_HOME 수신 시점의 실제 위치부터 홈까지 지형만 검사하고,
@@ -218,6 +245,10 @@ FOREST_WORLD_PATH = SCRIPT_DIR / "worlds" / "my_forest.usdc"
 GENERATED_SEARCH_PLAN_PATH = SCRIPT_DIR / "generated_search_plan.json"
 GENERATED_GROUND_TRUTH_PATH = SCRIPT_DIR / "generated_ground_truth.json"
 GENERATED_TERRAIN_MESH_PATH = SCRIPT_DIR / "generated_terrain_mesh.npz"
+# Terrain과 이름으로 확인된 다리 구조물 상단을 합친 경로계획 전용 표면이다.
+GENERATED_NAVIGATION_SURFACE_PATH = (
+    SCRIPT_DIR / "generated_navigation_surface.npz"
+)
 GENERATED_ENVIRONMENT_MESH_PATH = (
     SCRIPT_DIR / "generated_environment_meshes.npz"
 )
@@ -233,7 +264,48 @@ RVIZ_ENVIRONMENT_GROUPS = {
     "broadleafforest": ("broadleafforest",),
     "bushes": ("bushes",),
     "rocks": ("rocks",),
+    # Wooden_bridge1, Wooden_bridge2처럼 부모 Prim 이름에 아래 문자열이
+    # 들어가면 실제 다리 Mesh를 별도 그룹으로 추출한다.
+    "bridges": (
+        "woodenbridge",
+        "woodbridge",
+        "footbridge",
+        "bridge",
+        "crossing",
+        "deck",
+    ),
+    # 강 Prim이나 Material 이름이 아래 별칭 중 하나를 포함하면 강으로
+    # 분류한다. 이름이 일반적인 Mesh/Plane인 경우에는 sim_terrain.py가
+    # 파란 재질과 넓고 평평한 형상을 함께 검사해 보조 분류한다.
+    "river": (
+        "river",
+        "water",
+        "stream",
+        "creek",
+        "brook",
+        "canal",
+        "channel",
+        "waterway",
+        "watersurface",
+        "riversurface",
+        "lake",
+        "pond",
+    ),
 }
+
+# 강 Prim 이름이 전혀 드러나지 않는 USD를 위한 명시적 Prim 경로다.
+# Stage에서 강을 선택해 확인한 경로를 여기에 추가하면 최우선으로 분류된다.
+RVIZ_RIVER_EXPLICIT_PRIM_PATHS = ()
+
+# 파란색 재질을 사용하는 넓고 평평한 Mesh를 강으로 자동 분류한다.
+# 나무·바위의 파란 소품이 잘못 분류되지 않도록 색상과 형상을 함께 검사한다.
+RVIZ_RIVER_AUTO_COLOR_CLASSIFICATION = True
+RVIZ_RIVER_AUTO_MIN_HORIZONTAL_SPAN_M = 3.0
+RVIZ_RIVER_AUTO_MAX_VERTICAL_THICKNESS_M = 1.5
+RVIZ_RIVER_AUTO_MAX_THICKNESS_RATIO = 0.15
+RVIZ_RIVER_AUTO_MIN_BLUE = 0.30
+RVIZ_RIVER_AUTO_MIN_BLUE_MINUS_RED = 0.12
+RVIZ_RIVER_AUTO_MIN_COLOR_RANGE = 0.15
 
 # TRIANGLE_LIST 메시지가 지나치게 커지는 것을 방지하는 그룹별 상한이다.
 # 원본 삼각형 수가 이 값을 넘을 때만 균일하게 일부 면을 선택한다.

@@ -27,6 +27,8 @@ from sim_config import (
     SEARCH_AREA_MARGIN_M,
     SEARCH_CLEARANCE_M,
     SEARCH_LANE_SPACING_M,
+    SEARCH_MAX_CLIMB_PER_WAYPOINT_M,
+    SEARCH_MAX_DESCENT_PER_WAYPOINT_M,
     SEARCH_SAMPLE_SPACING_M,
     SEARCH_TERRAIN_PROFILE_SPACING_M,
 )
@@ -53,6 +55,42 @@ class SearchPlanGenerator:
             float(value)
             for value in np.linspace(float(start), float(stop), count)
         ]
+
+    @staticmethod
+    def _smooth_required_altitudes(required_z):
+        """급경사에서도 Waypoint 고도가 한 번에 크게 변하지 않게 한다.
+
+        먼저 뒤쪽의 높은 지형을 보고 앞쪽 Waypoint를 미리 올려 상승을
+        준비하고, 이후 정방향으로 내려가며 하강량을 제한한다. 원래 계산한
+        안전고도보다 낮추지는 않는다.
+        """
+        if not required_z:
+            return []
+
+        smoothed = [float(value) for value in required_z]
+        max_climb = max(
+            0.5,
+            float(SEARCH_MAX_CLIMB_PER_WAYPOINT_M),
+        )
+        max_descent = max(
+            0.5,
+            float(SEARCH_MAX_DESCENT_PER_WAYPOINT_M),
+        )
+
+        # 다음 점이 급격히 높으면 이전 점들을 미리 높여 상승 준비한다.
+        for index in range(len(smoothed) - 2, -1, -1):
+            smoothed[index] = max(
+                smoothed[index],
+                smoothed[index + 1] - max_climb,
+            )
+
+        # 강 계곡으로 내려갈 때 한 Waypoint에서 과도하게 하강하지 않는다.
+        for index in range(1, len(smoothed)):
+            smoothed[index] = max(
+                smoothed[index],
+                smoothed[index - 1] - max_descent,
+            )
+        return smoothed
 
     def write_generated_search_plan(self):
         """Terrain 높이를 반영한 N대 드론의 구조 수색 경로를 저장한다."""
@@ -261,7 +299,7 @@ class SearchPlanGenerator:
             # SEARCH_CLEARANCE_M만큼 높인다. 따라서 PX4가 두 점 사이를 직선
             # 보간해도 선분 중간의 산봉우리와 충돌하지 않는다.
             point_ground_z = [
-                self.terrain.height(world_x, world_y)
+                self.terrain.navigation_height(world_x, world_y)
                 for world_x, world_y in route_xy
             ]
             segment_safe_z = []
@@ -277,7 +315,7 @@ class SearchPlanGenerator:
                     )) + 1,
                 )
                 terrain_max = max(
-                    self.terrain.height(
+                    self.terrain.navigation_height(
                         start_xy[0]
                         + (end_xy[0] - start_xy[0]) * ratio,
                         start_xy[1]
@@ -287,10 +325,8 @@ class SearchPlanGenerator:
                 )
                 segment_safe_z.append(terrain_max + SEARCH_CLEARANCE_M)
 
-            waypoints = []
-            for point_index, ((world_x, world_y), ground_z) in enumerate(
-                zip(route_xy, point_ground_z)
-            ):
+            raw_required_z = []
+            for point_index, ground_z in enumerate(point_ground_z):
                 required_z = ground_z + SEARCH_CLEARANCE_M
                 if point_index > 0:
                     required_z = max(
@@ -302,6 +338,16 @@ class SearchPlanGenerator:
                         required_z,
                         segment_safe_z[point_index],
                     )
+                raw_required_z.append(float(required_z))
+
+            smoothed_required_z = self._smooth_required_altitudes(
+                raw_required_z
+            )
+            waypoints = []
+            for (world_x, world_y), required_z in zip(
+                route_xy,
+                smoothed_required_z,
+            ):
                 waypoints.append(
                     {
                         "north_m": world_y - home_y,

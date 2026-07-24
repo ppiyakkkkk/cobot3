@@ -31,7 +31,7 @@ class ObstacleMonitorNode(TimestampedNode):
             "/drone_01/obstacle/accumulated_cloud_body",
         )
         self.declare_parameter("use_accumulated_cloud_for_astar", True)
-        self.declare_parameter("accumulated_cloud_max_age_sec", 0.8)
+        self.declare_parameter("accumulated_cloud_max_age_sec", 0.6)
         self.declare_parameter(
             "local_astar_path_topic",
             "/drone_01/obstacle/local_astar_path",
@@ -80,7 +80,7 @@ class ObstacleMonitorNode(TimestampedNode):
         )
         self.declare_parameter(
             "candidate_offsets_deg",
-            [0.0, -25.0, 25.0, -50.0, 50.0, -75.0, 75.0, -100.0, 100.0],
+            [0.0, -20.0, 20.0, -40.0, 40.0, -60.0, 60.0],
         )
         self.declare_parameter("candidate_sector_half_angle_deg", 15.0)
         self.declare_parameter("candidate_min_clearance_m", 3.5)
@@ -91,20 +91,22 @@ class ObstacleMonitorNode(TimestampedNode):
         self.declare_parameter("candidate_forward_progress_weight", 3.0)
         self.declare_parameter("candidate_side_switch_penalty", 4.0)
         self.declare_parameter("candidate_side_hold_sec", 2.0)
-        self.declare_parameter("candidate_max_offset_deg", 80.0)
-        self.declare_parameter("local_grid_size_m", 30.0)
+        self.declare_parameter("candidate_max_offset_deg", 65.0)
+        # A*는 멀리 돌아가는 경로 생성기가 아니라 근거리 방향 힌트다.
+        # 12m 로컬 창에서 4.5m 앞을 향해 계획하고 첫 1.25m만 제시한다.
+        self.declare_parameter("local_grid_size_m", 12.0)
         self.declare_parameter("local_grid_resolution_m", 0.25)
         self.declare_parameter("obstacle_inflation_radius_m", 1.1)
-        self.declare_parameter("local_planner_goal_distance_m", 10.0)
-        self.declare_parameter("local_planner_lookahead_m", 3.5)
-        self.declare_parameter("local_planner_period_sec", 0.40)
+        self.declare_parameter("local_planner_goal_distance_m", 4.5)
+        self.declare_parameter("local_planner_lookahead_m", 1.25)
+        self.declare_parameter("local_planner_period_sec", 0.20)
         # 누적 코스트맵에서 원래 진행 통로가 앞으로 막힐 것으로 보이면
         # 근거리 blocked 판정 전에도 A*를 선제적으로 요청한다.
         self.declare_parameter("proactive_avoidance_enabled", True)
-        self.declare_parameter("proactive_planning_distance_m", 10.0)
+        self.declare_parameter("proactive_planning_distance_m", 6.0)
         self.declare_parameter("proactive_corridor_half_width_m", 1.10)
         self.declare_parameter("proactive_ignore_near_m", 0.80)
-        self.declare_parameter("proactive_min_obstacle_voxels", 2)
+        self.declare_parameter("proactive_min_obstacle_voxels", 3)
         self.declare_parameter("planner_start_release_radius_m", 0.50)
         # A* 경로의 첫 구간이 목표 방향으로 충분히 전진할 때만
         # 로컬 우회점으로 사용한다. 순수 측면·후진 경로는 거부한다.

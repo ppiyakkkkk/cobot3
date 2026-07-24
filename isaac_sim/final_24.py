@@ -89,6 +89,7 @@ from sim_config import (
     OPERATION_MODE,
     GENERATED_ENVIRONMENT_MESH_PATH,
     GENERATED_GROUND_TRUTH_PATH,
+    GENERATED_NAVIGATION_SURFACE_PATH,
     GENERATED_SEARCH_PLAN_PATH,
     GENERATED_TERRAIN_MESH_PATH,
     RVIZ_TERRAIN_SAMPLE_SPACING_M,
@@ -211,6 +212,7 @@ class ForestRescueSimulation:
             GENERATED_SEARCH_PLAN_PATH,
             GENERATED_GROUND_TRUTH_PATH,
             GENERATED_TERRAIN_MESH_PATH,
+            GENERATED_NAVIGATION_SURFACE_PATH,
             GENERATED_ENVIRONMENT_MESH_PATH,
         )
 
@@ -270,6 +272,10 @@ class ForestRescueSimulation:
         self.terrain = TerrainHeightField(stage)
         self.terrain.write_rviz_terrain_mesh(
             GENERATED_TERRAIN_MESH_PATH,
+            RVIZ_TERRAIN_SAMPLE_SPACING_M,
+        )
+        self.terrain.write_navigation_surface(
+            GENERATED_NAVIGATION_SURFACE_PATH,
             RVIZ_TERRAIN_SAMPLE_SPACING_M,
         )
         EnvironmentMeshExporter(stage).write(

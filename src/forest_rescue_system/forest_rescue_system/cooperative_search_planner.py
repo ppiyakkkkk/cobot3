@@ -18,14 +18,25 @@ class CooperativeSearchPlanner:
         self,
         search_plan_path,
         terrain_mesh_path,
+        navigation_surface_path=None,
         lane_spacing_m=4.0,
         sample_spacing_m=4.0,
         terrain_profile_spacing_m=1.0,
-        transit_altitude_step_m=2.0,
+        transit_altitude_step_m=1.0,
+        transit_profile_spacing_m=3.0,
+        max_climb_step_m=2.5,
+        max_descent_step_m=2.0,
+        transit_climb_only=True,
+        transit_skip_current_waypoint=True,
         subzone_margin_m=0.6,
     ):
         self.search_plan_path = Path(search_plan_path).expanduser()
         self.terrain_mesh_path = Path(terrain_mesh_path).expanduser()
+        self.navigation_surface_path = (
+            Path(navigation_surface_path).expanduser()
+            if navigation_surface_path
+            else self.terrain_mesh_path
+        )
         self.lane_spacing_m = max(1.0, float(lane_spacing_m))
         self.sample_spacing_m = max(0.5, float(sample_spacing_m))
         self.terrain_profile_spacing_m = max(
@@ -35,6 +46,25 @@ class CooperativeSearchPlanner:
         self.transit_altitude_step_m = max(
             0.0,
             float(transit_altitude_step_m),
+        )
+        self.transit_profile_spacing_m = max(
+            1.0,
+            float(transit_profile_spacing_m),
+        )
+        self.max_climb_step_m = max(
+            0.5,
+            float(max_climb_step_m),
+        )
+        self.max_descent_step_m = max(
+            0.5,
+            float(max_descent_step_m),
+        )
+        # 협동 진입은 담당 구역 도착이 우선이다. 지형이 낮아져도
+        # 절대고도를 낮추지 않고, 앞쪽 지형·다리 때문에 필요할 때만
+        # 상승한다. 첫 현재 위치 점도 생략해 제자리 고도 변경을 줄인다.
+        self.transit_climb_only = bool(transit_climb_only)
+        self.transit_skip_current_waypoint = bool(
+            transit_skip_current_waypoint
         )
         self.subzone_margin_m = max(0.0, float(subzone_margin_m))
 
@@ -52,7 +82,12 @@ class CooperativeSearchPlanner:
         if not isinstance(drone_plans, dict) or not drone_plans:
             raise ValueError("기본 수색 계획의 drones 항목이 비어 있습니다.")
 
-        with np.load(self.terrain_mesh_path, allow_pickle=False) as mesh:
+        mesh_path = (
+            self.navigation_surface_path
+            if self.navigation_surface_path.is_file()
+            else self.terrain_mesh_path
+        )
+        with np.load(mesh_path, allow_pickle=False) as mesh:
             vertices = np.asarray(mesh["vertices"], dtype=np.float64)
         if vertices.ndim != 2 or vertices.shape[1] != 3:
             raise ValueError(
@@ -188,21 +223,97 @@ class CooperativeSearchPlanner:
             raise ValueError(f"소구역 경로를 만들 수 없습니다: {bounds}")
         return route
 
+    def _smooth_altitudes(self, required_z):
+        if not required_z:
+            return []
+        smoothed = [float(value) for value in required_z]
+        for index in range(len(smoothed) - 2, -1, -1):
+            smoothed[index] = max(
+                smoothed[index],
+                smoothed[index + 1] - self.max_climb_step_m,
+            )
+        for index in range(1, len(smoothed)):
+            smoothed[index] = max(
+                smoothed[index],
+                smoothed[index - 1] - self.max_descent_step_m,
+            )
+        return smoothed
+
+    def _sample_segment_xy(self, start_xy, end_xy, spacing_m):
+        distance = self._distance_xy(start_xy, end_xy)
+        count = max(2, int(math.ceil(distance / spacing_m)) + 1)
+        return [
+            (
+                float(start_xy[0] + (end_xy[0] - start_xy[0]) * ratio),
+                float(start_xy[1] + (end_xy[1] - start_xy[1]) * ratio),
+            )
+            for ratio in np.linspace(0.0, 1.0, count)
+        ]
+
     def _safe_world_route(self, route_xy, clearance_m):
         ground_z = [self.terrain_height(x, y) for x, y in route_xy]
         segment_safe_z = [
             self._segment_max_height(start, end) + clearance_m
             for start, end in zip(route_xy, route_xy[1:])
         ]
-        route = []
-        for index, ((x, y), ground) in enumerate(zip(route_xy, ground_z)):
+        required_z = []
+        for index, ground in enumerate(ground_z):
             z_value = ground + clearance_m
             if index > 0:
                 z_value = max(z_value, segment_safe_z[index - 1])
             if index < len(segment_safe_z):
                 z_value = max(z_value, segment_safe_z[index])
-            route.append([float(x), float(y), float(z_value)])
-        return route
+            required_z.append(float(z_value))
+
+        smoothed_z = self._smooth_altitudes(required_z)
+        return [
+            [float(x), float(y), float(z_value)]
+            for (x, y), z_value in zip(route_xy, smoothed_z)
+        ]
+
+    def _terrain_following_transit_route(
+        self,
+        current,
+        entry,
+        clearance_m,
+        altitude_offset_m,
+    ):
+        """수직 상승 후 장거리 수평이동 대신 지형을 따라 진입한다."""
+        route_xy = self._sample_segment_xy(
+            current[:2],
+            entry[:2],
+            self.transit_profile_spacing_m,
+        )
+        safe_route = self._safe_world_route(
+            route_xy,
+            clearance_m + altitude_offset_m,
+        )
+
+        # 협동 진입에서는 낮아지는 지형을 따라 하강하지 않는다. 현재
+        # World Z를 기준으로 시작해, 이후 각 점은 앞쪽 지형·구조물의
+        # 안전고도가 더 높을 때만 상승한다. 한 번 올라간 고도는 첫
+        # 협동 수색점에 도착할 때까지 유지한다.
+        if self.transit_climb_only:
+            maintained_z = float(current[2])
+            for point in safe_route:
+                maintained_z = max(maintained_z, float(point[2]))
+                point[2] = maintained_z
+        else:
+            safe_route[0][2] = max(
+                float(current[2]),
+                float(safe_route[0][2]),
+            )
+
+        safe_route[-1][2] = max(
+            float(entry[2]),
+            float(safe_route[-1][2]),
+        )
+
+        # 첫 점은 현재 XY와 같아서 고도만 바뀌는 제자리 명령이 될 수
+        # 있다. 두 번째 점부터 보내면 전진과 필요한 상승을 동시에 한다.
+        if self.transit_skip_current_waypoint and len(safe_route) > 1:
+            safe_route = safe_route[1:]
+        return safe_route
 
     @staticmethod
     def _partition(bounds, count):
@@ -334,6 +445,14 @@ class CooperativeSearchPlanner:
             "target_zone_bounds_xy": target_bounds,
             "active_drone_ids": list(active_drone_ids),
             "search_repeat_mode": "infinite",
+            "transit_altitude_mode": (
+                "climb_only_absolute_world_z"
+                if self.transit_climb_only
+                else "terrain_following"
+            ),
+            "transit_skip_current_waypoint": bool(
+                self.transit_skip_current_waypoint
+            ),
             "assignments": {},
         }
 
@@ -349,17 +468,12 @@ class CooperativeSearchPlanner:
                 route_xy.reverse()
             search_route = self._safe_world_route(route_xy, clearance)
             entry = search_route[0]
-            path_terrain_max = self._segment_max_height(current[:2], entry[:2])
-            transit_z = max(
-                float(current[2]),
-                float(entry[2]),
-                path_terrain_max + clearance,
-            ) + altitude_offsets[drone_id]
-            transit_route = [
-                [float(current[0]), float(current[1]), float(transit_z)],
-                [float(entry[0]), float(entry[1]), float(transit_z)],
-                [float(entry[0]), float(entry[1]), float(entry[2])],
-            ]
+            transit_route = self._terrain_following_transit_route(
+                current=current,
+                entry=entry,
+                clearance_m=clearance,
+                altitude_offset_m=altitude_offsets[drone_id],
+            )
             plan["assignments"][drone_id] = {
                 "drone_id": drone_id,
                 "subzone_index": int(subzone_index),

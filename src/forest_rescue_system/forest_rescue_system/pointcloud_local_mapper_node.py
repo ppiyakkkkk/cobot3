@@ -49,7 +49,9 @@ class PointCloudLocalMapperNode(TimestampedNode):
             "local_costmap_topic",
             "/drone_01/obstacle/local_costmap",
         )
-        self.declare_parameter("accumulation_sec", 3.0)
+        # 오래된 나무 voxel이 좌우 판단을 계속 끌고 가지 않도록 최근
+        # 1.5초만 누적한다. A*는 이 짧은 로컬 지도를 방향 힌트로 사용한다.
+        self.declare_parameter("accumulation_sec", 1.5)
         self.declare_parameter("processing_period_sec", 0.10)
         self.declare_parameter("publish_period_sec", 0.20)
         # PointCloud가 TF보다 수십 ms 먼저 도착할 수 있으므로 메시지를 잠시
@@ -65,7 +67,7 @@ class PointCloudLocalMapperNode(TimestampedNode):
         self.declare_parameter("maximum_points_per_scan", 30000)
         self.declare_parameter("minimum_height_m", -1.2)
         self.declare_parameter("maximum_height_m", 1.8)
-        self.declare_parameter("local_costmap_size_m", 30.0)
+        self.declare_parameter("local_costmap_size_m", 14.0)
         self.declare_parameter("local_costmap_resolution_m", 0.25)
         self.declare_parameter("obstacle_inflation_radius_m", 1.10)
         self.declare_parameter("self_filter_radius_m", 0.65)

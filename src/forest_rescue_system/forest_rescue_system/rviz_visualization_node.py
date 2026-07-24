@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""Start, Victim, 산과 식생·바위를 RViz에 함께 표시한다."""
+"""Start, Victim, 산과 식생·바위·강·다리를 RViz에 함께 표시한다."""
 
 from functools import partial
 import json
@@ -86,6 +86,19 @@ class RvizVisualizationNode(TimestampedNode):
             [0.56, 0.57, 0.60],
         )
         self.declare_parameter("rocks_alpha", 1.0)
+        self.declare_parameter(
+            "bridge_color_rgb",
+            [0.42, 0.24, 0.08],
+        )
+        self.declare_parameter("bridge_alpha", 1.0)
+        self.declare_parameter("bridge_z_offset_m", 0.02)
+        self.declare_parameter(
+            "river_color_rgb",
+            [0.02, 0.45, 0.95],
+        )
+        self.declare_parameter("river_alpha", 0.95)
+        # Terrain과 수면이 같은 높이일 때 생기는 Z-fighting을 방지한다.
+        self.declare_parameter("river_z_offset_m", 0.08)
 
         self.ground_truth_path = Path(
             str(self.get_parameter("ground_truth_path").value)
@@ -379,6 +392,18 @@ class RvizVisualizationNode(TimestampedNode):
                 "rocks_color_rgb",
                 "rocks_alpha",
             ),
+            (
+                "bridges",
+                "Bridges",
+                "bridge_color_rgb",
+                "bridge_alpha",
+            ),
+            (
+                "river",
+                "River",
+                "river_color_rgb",
+                "river_alpha",
+            ),
         )
 
         marker_array = MarkerArray()
@@ -404,12 +429,20 @@ class RvizVisualizationNode(TimestampedNode):
                 color_parameter,
                 alpha_parameter,
             ) in enumerate(group_specs):
+                vertices_value = data.get(f"{key}_vertices")
+                triangles_value = data.get(f"{key}_triangles")
+                # 이전 버전 NPZ에는 river 키가 없을 수 있다. Isaac Sim을
+                # 다시 실행해 파일이 갱신될 때까지 기존 그룹은 정상 표시한다.
+                if vertices_value is None or triangles_value is None:
+                    summaries[display_name] = 0
+                    continue
+
                 vertices = np.asarray(
-                    data[f"{key}_vertices"],
+                    vertices_value,
                     dtype=np.float64,
                 )
                 triangles = np.asarray(
-                    data[f"{key}_triangles"],
+                    triangles_value,
                     dtype=np.int64,
                 )
 
@@ -431,6 +464,14 @@ class RvizVisualizationNode(TimestampedNode):
                 marker.type = Marker.TRIANGLE_LIST
                 marker.action = Marker.ADD
                 marker.pose.orientation.w = 1.0
+                if key == "river":
+                    marker.pose.position.z = float(
+                        self.get_parameter("river_z_offset_m").value
+                    )
+                elif key == "bridges":
+                    marker.pose.position.z = float(
+                        self.get_parameter("bridge_z_offset_m").value
+                    )
                 marker.scale.x = 1.0
                 marker.scale.y = 1.0
                 marker.scale.z = 1.0
@@ -462,9 +503,22 @@ class RvizVisualizationNode(TimestampedNode):
                 )
 
                 marker.points = []
+
+                # RViz의 TRIANGLE_LIST는 면의 정점 순서에 따라 한쪽 면만
+                # 보일 수 있다. River 원본 Mesh의 면 방향이 아래쪽을 향하면
+                # 아래에서는 파랗지만 위에서는 지형에 가려진 것처럼 보인다.
+                # 강에만 역방향 면을 하나 더 만들어 위·아래 양쪽에서 표시한다.
+                render_triangles = triangles
+                if key == "river":
+                    reverse_triangles = triangles[:, [0, 2, 1]]
+                    render_triangles = np.concatenate(
+                        (triangles, reverse_triangles),
+                        axis=0,
+                    )
+
                 marker.points.extend(
                     self._point_from_vertex(vertices[index])
-                    for triangle in triangles
+                    for triangle in render_triangles
                     for index in triangle
                 )
 
