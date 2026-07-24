@@ -561,6 +561,28 @@ def test_build_flashlight_marker_array_uses_drone_namespace_and_two_markers(
         cone = next(m for m in drone_01_markers if m.id == 0)
         assert cone.type == Marker.LINE_LIST
         assert len(cone.points) == 16  # 모서리 4선 + 먼 사각형 4선, 선당 2점
+        # far cap 4선(points[8:16])이 닫힌 사각형을 이루는지 검증한다.
+        # 대각선(코너0-코너2 / 코너1-코너3)의 중점이 일치해야 진짜 사각형이며,
+        # 코너 순서가 래스터 순서(TL,TR,BL,BR)로 잘못 생성되면
+        # 나비넥타이 형태가 되어 대각선 중점이 어긋난다.
+        far_cap_points = cone.points[8:16]
+        corner_0, corner_1, corner_2, corner_3 = (
+            far_cap_points[0],
+            far_cap_points[1],
+            far_cap_points[3],
+            far_cap_points[5],
+        )
+        diagonal_a_midpoint = (
+            corner_0.x + corner_2.x,
+            corner_0.y + corner_2.y,
+            corner_0.z + corner_2.z,
+        )
+        diagonal_b_midpoint = (
+            corner_1.x + corner_3.x,
+            corner_1.y + corner_3.y,
+            corner_1.z + corner_3.z,
+        )
+        assert diagonal_a_midpoint == pytest.approx(diagonal_b_midpoint, abs=1e-6)
         hits = next(m for m in drone_01_markers if m.id == 1)
         assert hits.type == Marker.POINTS
         assert len(hits.points) > 0

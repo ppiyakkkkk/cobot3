@@ -298,7 +298,7 @@ class CoverageVisualizationNode(TimestampedNode):
             float(self.get_parameter("maximum_depth_m").value),
         )
 
-        corner_u = np.array([0.0, float(depth_width), 0.0, float(depth_width)])
+        corner_u = np.array([0.0, float(depth_width), float(depth_width), 0.0])
         corner_v = np.array(
             [0.0, 0.0, float(depth_height), float(depth_height)]
         )
