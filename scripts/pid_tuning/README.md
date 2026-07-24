@@ -5,6 +5,39 @@ PX4 SITL(Isaac Sim + Pegasus)에 붙어서 캐스케이드 4단계(Rate → Atti
 - 설계 문서: `docs/superpowers/specs/2026-07-24-pid-cascade-tuning-tool-design.md`
 - 구현 계획: `docs/superpowers/plans/2026-07-24-pid-cascade-tuning-tool.md`
 
+## 가장 단순한 실행 방법 (터미널 2개)
+
+ROS 2 launch는 필요 없음 — Isaac Sim + PX4 SITL만 떠 있으면 됨.
+
+### 터미널 1: Isaac Sim + PX4 SITL 켜기
+
+프로젝트 최상위 README의 "터미널 1"과 동일 (드론 3대가 다 뜨지만, 이 도구는 그중 1대만 사용).
+
+```bash
+cd ~/b3_cobot3_ws
+source ~/.bashrc
+ros_setup
+isaac_ros_setup
+
+isaac_python isaac_sim/final_13.py
+```
+
+Isaac Sim에서 드론들과 PX4 연결이 준비될 때까지 기다린다.
+
+### 터미널 2: 튜닝 스크립트 실행
+
+```bash
+cd ~/b3_cobot3_ws
+source ~/.bashrc
+mavsdk_on
+
+python scripts/pid_tuning/tune_cascade.py --stage position --axis horizontal --duration 3.0
+```
+
+- `mavsdk_on`은 MAVSDK가 설치된 파이썬 가상환경을 활성화하는 alias (`01_mavsdk_takeoff_test.py` 등 기존 MAVSDK 스크립트와 동일).
+- ROS 2(`ros_setup`)는 필요 없음 — 이 도구는 ROS를 쓰지 않고 MAVSDK로 PX4에 직접 붙는다.
+- 명령을 바꿔가며(`--stage`/`--axis`/`--set` 등) 이 터미널에서 반복 실행하면 됨. 시뮬레이터(터미널 1)는 계속 켜둔 채로.
+
 ## 사용법
 
 ```bash
