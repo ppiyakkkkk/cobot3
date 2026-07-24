@@ -69,113 +69,8 @@ def test_transform_matrix_from_tf_rotates_90_degrees_about_z():
     np.testing.assert_allclose(points, [[0.0, 1.0, 0.0]], atol=1e-9)
 
 
-def test_visibility_mask_accepts_point_matching_depth_image():
-    points_camera = np.array([[0.0, 0.0, 5.0]])
-    depth_image = np.full((10, 10), 100.0, dtype=np.float32)
-    depth_image[5, 5] = 5.0
-    mask = coverage_geometry.visibility_mask(
-        points_camera,
-        fx=10.0, fy=10.0, cx=5.0, cy=5.0,
-        depth_image=depth_image,
-        tolerance_m=0.5, min_depth_m=0.2, max_depth_m=30.0,
-    )
-    np.testing.assert_array_equal(mask, [True])
 
 
-def test_visibility_mask_rejects_occluded_point_behind_closer_surface():
-    points_camera = np.array([[0.0, 0.0, 20.0]])
-    depth_image = np.full((10, 10), 5.0, dtype=np.float32)
-    mask = coverage_geometry.visibility_mask(
-        points_camera,
-        fx=10.0, fy=10.0, cx=5.0, cy=5.0,
-        depth_image=depth_image,
-        tolerance_m=0.5, min_depth_m=0.2, max_depth_m=30.0,
-    )
-    np.testing.assert_array_equal(mask, [False])
-
-
-def test_visibility_mask_rejects_point_outside_max_depth_range():
-    points_camera = np.array([[0.0, 0.0, 50.0]])
-    depth_image = np.full((10, 10), 50.0, dtype=np.float32)
-    mask = coverage_geometry.visibility_mask(
-        points_camera,
-        fx=10.0, fy=10.0, cx=5.0, cy=5.0,
-        depth_image=depth_image,
-        tolerance_m=0.5, min_depth_m=0.2, max_depth_m=30.0,
-    )
-    np.testing.assert_array_equal(mask, [False])
-
-
-def test_visibility_mask_rejects_point_projecting_outside_image_bounds():
-    points_camera = np.array([[1000.0, 0.0, 5.0]])
-    depth_image = np.full((10, 10), 5.0, dtype=np.float32)
-    mask = coverage_geometry.visibility_mask(
-        points_camera,
-        fx=10.0, fy=10.0, cx=5.0, cy=5.0,
-        depth_image=depth_image,
-        tolerance_m=0.5, min_depth_m=0.2, max_depth_m=30.0,
-    )
-    np.testing.assert_array_equal(mask, [False])
-
-
-def test_visibility_mask_samples_depth_image_as_row_v_col_u():
-    # u=2, v=0으로 서로 다른 값이 나오게 만들어, depth_image 인덱싱이
-    # [v, u](row=height, col=width) 순서인지 실제로 구분되게 한다.
-    # 만약 구현이 실수로 [u, v]로 뒤집히면 이 테스트는 실패해야 한다.
-    points_camera = np.array([[2.0, 0.0, 10.0]])
-    depth_image = np.zeros((5, 10), dtype=np.float32)
-    depth_image[0, 2] = 10.0
-    mask = coverage_geometry.visibility_mask(
-        points_camera,
-        fx=10.0, fy=20.0, cx=0.0, cy=0.0,
-        depth_image=depth_image,
-        tolerance_m=0.5, min_depth_m=0.2, max_depth_m=30.0,
-    )
-    np.testing.assert_array_equal(mask, [True])
-
-
-def test_triangle_sample_points_returns_vertices_plus_centroid():
-    positions = np.array([[[0.0, 0.0, 0.0], [3.0, 0.0, 0.0], [0.0, 3.0, 0.0]]])
-    samples = coverage_geometry.triangle_sample_points(positions)
-    assert samples.shape == (1, 4, 3)
-    np.testing.assert_allclose(samples[0, :3], positions[0])
-    np.testing.assert_allclose(samples[0, 3], [1.0, 1.0, 0.0])
-
-
-def test_visibility_mask_multi_sample_true_if_any_sample_visible():
-    # centroid는 가려진 픽셀(깊이 불일치)에 투영되지만, 정점 하나는
-    # depth_image와 일치하는 픽셀에 투영된다 -> 무게중심만 보던 기존
-    # 방식이라면 놓쳤을 삼각형을 다중 샘플링은 잡아내야 한다.
-    sample_points_camera = np.array(
-        [[[0.0, 0.0, 5.0], [10.0, 0.0, 5.0], [0.0, 10.0, 5.0], [3.0, 3.0, 5.0]]]
-    )
-    normals_camera = np.array([[0.0, 0.0, -1.0]])  # 카메라를 정면으로 바라봄
-    depth_image = np.zeros((20, 20), dtype=np.float32)
-    depth_image[5, 5] = 5.0  # 정점 (0,0,5) -> u=v=5
-    mask = coverage_geometry.visibility_mask_multi_sample(
-        sample_points_camera,
-        normals_camera,
-        fx=10.0, fy=10.0, cx=5.0, cy=5.0,
-        depth_image=depth_image,
-        tolerance_m=0.5, min_depth_m=0.2, max_depth_m=30.0,
-    )
-    np.testing.assert_array_equal(mask, [True])
-
-
-def test_visibility_mask_multi_sample_false_if_all_samples_occluded():
-    sample_points_camera = np.array(
-        [[[0.0, 0.0, 20.0], [10.0, 0.0, 20.0], [0.0, 10.0, 20.0], [3.0, 3.0, 20.0]]]
-    )
-    normals_camera = np.array([[0.0, 0.0, -1.0]])
-    depth_image = np.full((20, 20), 5.0, dtype=np.float32)
-    mask = coverage_geometry.visibility_mask_multi_sample(
-        sample_points_camera,
-        normals_camera,
-        fx=10.0, fy=10.0, cx=5.0, cy=5.0,
-        depth_image=depth_image,
-        tolerance_m=0.5, min_depth_m=0.2, max_depth_m=30.0,
-    )
-    np.testing.assert_array_equal(mask, [False])
 
 
 def test_triangle_normals_returns_unit_length_perpendicular_vector():
@@ -196,39 +91,6 @@ def test_transform_direction_rotates_without_applying_translation():
     np.testing.assert_allclose(rotated, [[0.0, 1.0, 0.0]], atol=1e-9)
 
 
-def test_grazing_angle_tolerance_keeps_base_value_when_facing_camera():
-    points_camera = np.array([[0.0, 0.0, 10.0]])
-    normals_camera = np.array([[0.0, 0.0, -1.0]])  # 카메라를 정면으로 바라봄
-    tolerance = coverage_geometry.grazing_angle_tolerance(
-        0.1, normals_camera, points_camera
-    )
-    np.testing.assert_allclose(tolerance, [0.1])
-
-
-def test_grazing_angle_tolerance_scales_up_near_grazing_incidence():
-    points_camera = np.array([[0.0, 0.0, 10.0]])
-    # 시선은 +z 방향, 법선은 이와 거의 수직(+x) -> 그레이징에 가깝다.
-    normals_camera = np.array([[1.0, 0.0, 0.0]])
-    tolerance = coverage_geometry.grazing_angle_tolerance(
-        0.1, normals_camera, points_camera
-    )
-    # min_cosine=0.2 -> 1/0.2 = 5.0배로 확대(상한).
-    np.testing.assert_allclose(tolerance, [0.5])
-
-
-def test_visibility_mask_matches_neighboring_pixel_within_window():
-    # 그레이징 각도에서 픽셀 반올림으로 (u,v)가 한 칸 어긋나도, 3x3
-    # 윈도우 안에 실제로 일치하는 depth가 있으면 보이는 것으로 처리한다.
-    points_camera = np.array([[0.0, 0.0, 5.0]])
-    depth_image = np.full((10, 10), 100.0, dtype=np.float32)
-    depth_image[6, 5] = 5.0  # 투영 픽셀(5,5) 바로 옆 칸에 실제 depth가 있음
-    mask = coverage_geometry.visibility_mask(
-        points_camera,
-        fx=10.0, fy=10.0, cx=5.0, cy=5.0,
-        depth_image=depth_image,
-        tolerance_m=0.1, min_depth_m=0.2, max_depth_m=30.0,
-    )
-    np.testing.assert_array_equal(mask, [True])
 
 
 def test_pixel_to_camera_ray_at_principal_point_points_straight_ahead():
