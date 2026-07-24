@@ -69,8 +69,24 @@ class VictimLocalizerNode(TimestampedNode):
         self.declare_parameter("tf_retry_max_points", 40)
         self.declare_parameter("log_period_sec", 10.0)
         self.declare_parameter("mission_state_topic", "/mission/state")
+        self.declare_parameter(
+            "active_localization_states",
+            [
+                "SEARCHING",
+                "COOP_SEARCH_TRANSIT",
+                "COOP_SEARCHING",
+                "VICTIM_DETECTED",
+                "VICTIM_LOCATED",
+            ],
+        )
 
         self.drone_id = str(self.get_parameter("drone_id").value)
+        self.active_localization_states = {
+            str(value).strip().upper()
+            for value in self.get_parameter(
+                "active_localization_states"
+            ).value
+        }
 
         self.bridge = CvBridge()
         self.latest_depth = None
@@ -139,7 +155,10 @@ class VictimLocalizerNode(TimestampedNode):
 
     def _mission_state_callback(self, message):
         state = message.data.strip().upper()
-        if state == "SEARCHING" and self.mission_state != "SEARCHING":
+        if (
+            state in self.active_localization_states
+            and self.mission_state not in self.active_localization_states
+        ):
             self.position_locked = False
             self.pending_tf_points.clear()
             self.last_tf_error = None
@@ -179,11 +198,7 @@ class VictimLocalizerNode(TimestampedNode):
         self.camera_info = message
 
     def _detection_callback(self, detection):
-        if self.mission_state not in (
-            "SEARCHING",
-            "VICTIM_DETECTED",
-            "VICTIM_LOCATED",
-        ):
+        if self.mission_state not in self.active_localization_states:
             return
         if self.position_locked:
             return

@@ -34,6 +34,7 @@ setup(
             "mapping_manager = forest_rescue_system.mapping_manager_node:main",
             "drone_controller = forest_rescue_system.drone_controller_node:main",
             "sensor_tf = forest_rescue_system.sensor_tf_node:main",
+            "pointcloud_local_mapper = forest_rescue_system.pointcloud_local_mapper_node:main",
             "obstacle_monitor = forest_rescue_system.obstacle_monitor_node:main",
             "rviz_visualization = forest_rescue_system.rviz_visualization_node:main",
         ],

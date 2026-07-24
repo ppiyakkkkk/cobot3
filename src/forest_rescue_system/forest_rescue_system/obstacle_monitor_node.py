@@ -7,9 +7,10 @@ import math
 import time
 
 import numpy as np
-from geometry_msgs.msg import Vector3Stamped
+from geometry_msgs.msg import PoseStamped, Vector3Stamped
 import rclpy
 from rclpy.qos import qos_profile_sensor_data
+from nav_msgs.msg import Path as NavPath
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Bool, Float32, String
@@ -26,14 +27,28 @@ class ObstacleMonitorNode(TimestampedNode):
             "point_cloud_topic", "/quadrotor_01/point_cloud"
         )
         self.declare_parameter(
+            "accumulated_point_cloud_topic",
+            "/drone_01/obstacle/accumulated_cloud_body",
+        )
+        self.declare_parameter("use_accumulated_cloud_for_astar", True)
+        self.declare_parameter("accumulated_cloud_max_age_sec", 0.8)
+        self.declare_parameter(
+            "local_astar_path_topic",
+            "/drone_01/obstacle/local_astar_path",
+        )
+        self.declare_parameter(
             "blocked_topic", "/drone_01/obstacle/blocked"
         )
         self.declare_parameter(
             "distance_topic", "/drone_01/obstacle/min_distance"
         )
+        self.declare_parameter(
+            "planning_obstacle_distance_topic",
+            "/drone_01/obstacle/planning_distance",
+        )
         self.declare_parameter("mission_state_topic", "/mission/state")
         self.declare_parameter("safety_distance_m", 4.0)
-        self.declare_parameter("emergency_distance_m", 0.9)
+        self.declare_parameter("emergency_distance_m", 1.2)
         self.declare_parameter("front_sector_half_angle_deg", 45.0)
         self.declare_parameter("side_sector_offset_deg", 70.0)
         self.declare_parameter("side_sector_half_angle_deg", 30.0)
@@ -73,12 +88,19 @@ class ObstacleMonitorNode(TimestampedNode):
         self.declare_parameter("candidate_side_switch_penalty", 4.0)
         self.declare_parameter("candidate_side_hold_sec", 2.0)
         self.declare_parameter("candidate_max_offset_deg", 80.0)
-        self.declare_parameter("local_grid_size_m", 24.0)
+        self.declare_parameter("local_grid_size_m", 30.0)
         self.declare_parameter("local_grid_resolution_m", 0.25)
-        self.declare_parameter("obstacle_inflation_radius_m", 1.0)
-        self.declare_parameter("local_planner_goal_distance_m", 8.0)
-        self.declare_parameter("local_planner_lookahead_m", 3.0)
+        self.declare_parameter("obstacle_inflation_radius_m", 1.1)
+        self.declare_parameter("local_planner_goal_distance_m", 10.0)
+        self.declare_parameter("local_planner_lookahead_m", 3.5)
         self.declare_parameter("local_planner_period_sec", 0.40)
+        # 누적 코스트맵에서 원래 진행 통로가 앞으로 막힐 것으로 보이면
+        # 근거리 blocked 판정 전에도 A*를 선제적으로 요청한다.
+        self.declare_parameter("proactive_avoidance_enabled", True)
+        self.declare_parameter("proactive_planning_distance_m", 10.0)
+        self.declare_parameter("proactive_corridor_half_width_m", 1.10)
+        self.declare_parameter("proactive_ignore_near_m", 0.80)
+        self.declare_parameter("proactive_min_obstacle_voxels", 2)
         self.declare_parameter("planner_start_release_radius_m", 0.50)
         # A* 경로의 첫 구간이 목표 반대편으로 과도하게 후퇴하면
         # 로컬 우회점으로 사용하지 않는다. 0은 측면 이동까지 허용한다.
@@ -108,6 +130,15 @@ class ObstacleMonitorNode(TimestampedNode):
             str(self.get_parameter("distance_topic").value),
             10,
         )
+        self.planning_distance_publisher = self.create_publisher(
+            Float32,
+            str(
+                self.get_parameter(
+                    "planning_obstacle_distance_topic"
+                ).value
+            ),
+            10,
+        )
         self.clearances_publisher = self.create_publisher(
             Vector3Stamped,
             str(self.get_parameter("clearances_topic").value),
@@ -123,10 +154,21 @@ class ObstacleMonitorNode(TimestampedNode):
             str(self.get_parameter("local_detour_topic").value),
             10,
         )
+        self.local_astar_path_publisher = self.create_publisher(
+            NavPath,
+            str(self.get_parameter("local_astar_path_topic").value),
+            10,
+        )
         self.create_subscription(
             PointCloud2,
             self.get_parameter("point_cloud_topic").value,
             self._point_cloud_callback,
+            qos_profile_sensor_data,
+        )
+        self.create_subscription(
+            PointCloud2,
+            str(self.get_parameter("accumulated_point_cloud_topic").value),
+            self._accumulated_point_cloud_callback,
             qos_profile_sensor_data,
         )
         self.create_subscription(
@@ -152,6 +194,12 @@ class ObstacleMonitorNode(TimestampedNode):
         self.local_detour_x_m = 0.0
         self.local_detour_y_m = 0.0
         self.local_detour_valid = False
+        self.local_astar_path_body = []
+        self.local_plan_source = "NONE"
+        self.latest_accumulated_x = np.empty(0, dtype=np.float32)
+        self.latest_accumulated_y = np.empty(0, dtype=np.float32)
+        self.latest_accumulated_stamp_sec = float("-inf")
+        self.latest_accumulated_receive_wall = float("-inf")
         # VFH가 매 스캔마다 좌우를 바꾸지 않도록 최근 회피 측을 기억한다.
         # +1은 목표 방향 기준 왼쪽, -1은 오른쪽이다.
         self.preferred_avoidance_side = 0
@@ -194,6 +242,12 @@ class ObstacleMonitorNode(TimestampedNode):
         self.clear_scan_count = 0
         self.preferred_avoidance_side = 0
         self.preferred_avoidance_side_until = float("-inf")
+        self.local_astar_path_body = []
+        self.local_plan_source = "NONE"
+        self.latest_accumulated_x = np.empty(0, dtype=np.float32)
+        self.latest_accumulated_y = np.empty(0, dtype=np.float32)
+        self.latest_accumulated_stamp_sec = float("-inf")
+        self.latest_accumulated_receive_wall = float("-inf")
         if enabled:
             self.get_logger().info(
                 f"LiDAR 장애물 감시 활성화: mission_state={state}"
@@ -207,6 +261,41 @@ class ObstacleMonitorNode(TimestampedNode):
             self.get_logger().info(
                 f"LiDAR 장애물 감시 비활성화: mission_state={state}"
             )
+
+    def _accumulated_point_cloud_callback(self, message):
+        """현재 body frame으로 변환된 최근 누적 장애물 점군을 보관한다."""
+        if not self.monitoring_enabled:
+            return
+        try:
+            points = point_cloud2.read_points_numpy(
+                message,
+                field_names=("x", "y", "z"),
+                skip_nans=True,
+            )
+        except (AttributeError, ValueError):
+            points = np.asarray(
+                list(
+                    point_cloud2.read_points(
+                        message,
+                        field_names=("x", "y", "z"),
+                        skip_nans=True,
+                    )
+                ),
+                dtype=np.float32,
+            )
+        points = np.asarray(points, dtype=np.float32)
+        if points.size == 0:
+            self.latest_accumulated_x = np.empty(0, dtype=np.float32)
+            self.latest_accumulated_y = np.empty(0, dtype=np.float32)
+        else:
+            points = points.reshape(-1, 3)
+            finite = np.all(np.isfinite(points[:, :2]), axis=1)
+            self.latest_accumulated_x = points[finite, 0].copy()
+            self.latest_accumulated_y = points[finite, 1].copy()
+        self.latest_accumulated_stamp_sec = self._stamp_to_seconds(
+            message.header.stamp
+        )
+        self.latest_accumulated_receive_wall = time.monotonic()
 
     def _point_cloud_callback(self, message):
         if not self.monitoring_enabled:
@@ -314,16 +403,38 @@ class ObstacleMonitorNode(TimestampedNode):
         close_360_points = int(
             np.count_nonzero(distances < emergency_distance)
         )
-        raw_blocked = (
-            close_front_points >= minimum_points
-            or close_360_points >= minimum_points
-        )
-        blocked = self._apply_blocked_hysteresis(raw_blocked)
+        front_blocked = close_front_points >= minimum_points
+        emergency_blocked = close_360_points >= minimum_points
+        reactive_blocked = front_blocked or emergency_blocked
+        (
+            proactive_blocked,
+            proactive_nearest_m,
+            proactive_voxel_count,
+        ) = self._proactive_corridor_check(center, measurement_time)
 
-        # 장애물 크기를 가정하지 않고 현재 높이의 실제 점군을 로컬
-        # occupancy grid로 만든다. 장애물은 드론 반경+안전여유만큼
-        # 팽창하고, 목표 방향의 가상 지점까지 A* 경로를 계산한다.
-        if raw_blocked:
+        # 누적 PointCloud의 선제 통로 판정은 경로계획에만 사용한다.
+        # 오래 남은 voxel이나 시야 전환 흔적만으로 드론을 Hover시키지 않는다.
+        # 실제 blocked 토픽은 현재 LiDAR의 전방 장애물 또는 360° 비상
+        # 근접 장애물만으로 결정한다.
+        if emergency_blocked:
+            # 충돌 임박은 확인 스캔을 기다리지 않고 즉시 정지시킨다.
+            self.last_blocked = True
+            self.blocked_scan_count = max(
+                self.blocked_scan_count,
+                int(self.get_parameter("blocked_confirm_scans").value),
+            )
+            self.clear_scan_count = 0
+            blocked = True
+        else:
+            blocked = self._apply_blocked_hysteresis(front_blocked)
+
+        # 현재 스캔이 아직 blocked 확정 전이거나 누적맵만 통로를 예고해도
+        # 로컬 A*는 미리 계산한다. 따라서 실제 근거리 장애물이 확인되는
+        # 순간에는 이미 준비된 우회점을 사용할 수 있다.
+        planning_requested = (
+            blocked or reactive_blocked or proactive_blocked
+        )
+        if planning_requested:
             planner_period = float(
                 self.get_parameter("local_planner_period_sec").value
             )
@@ -331,18 +442,27 @@ class ObstacleMonitorNode(TimestampedNode):
                 # Isaac 재시작 등으로 시간이 되감기면 이전 실행의 제한값을 폐기한다.
                 self.last_local_plan_time = float("-inf")
             if measurement_time - self.last_local_plan_time >= planner_period:
+                obstacle_x = x[height_mask]
+                obstacle_y = y[height_mask]
+                self.local_plan_source = "latest_scan"
+                if self._accumulated_cloud_is_fresh(measurement_time):
+                    obstacle_x = self.latest_accumulated_x
+                    obstacle_y = self.latest_accumulated_y
+                    self.local_plan_source = "accumulated_3s"
                 (
                     self.local_detour_x_m,
                     self.local_detour_y_m,
                     self.local_detour_valid,
                 ) = self._plan_local_detour(
-                    x[height_mask],
-                    y[height_mask],
+                    obstacle_x,
+                    obstacle_y,
                     center,
                 )
                 self.last_local_plan_time = measurement_time
         else:
             self.local_detour_valid = False
+            self.local_astar_path_body = []
+            self.local_plan_source = "NONE"
 
         self._publish_result(
             front_distance,
@@ -353,7 +473,101 @@ class ObstacleMonitorNode(TimestampedNode):
             recommended_direction_rad=recommended_direction_rad,
             recommended_clearance_m=recommended_clearance_m,
             recommended_valid=recommended_valid,
+            reactive_blocked=reactive_blocked,
+            emergency_blocked=emergency_blocked,
+            proactive_blocked=proactive_blocked,
+            proactive_nearest_m=proactive_nearest_m,
+            proactive_voxel_count=proactive_voxel_count,
         )
+
+    def _proactive_corridor_check(self, center_angle, measurement_time):
+        """누적 점군에서 앞으로 지나갈 통로가 막혔는지 확인한다.
+
+        A*를 실제 충돌 직전에만 호출하지 않도록, 목표 진행축 기준의
+        캡슐형 통로를 근사한 직사각형 영역 안에 확정 voxel이 있는지 본다.
+        누적맵이 오래됐거나 준비되지 않았으면 선제 판정을 사용하지 않는다.
+        """
+        if not bool(
+            self.get_parameter("proactive_avoidance_enabled").value
+        ):
+            return False, float("inf"), 0
+        if not self._accumulated_cloud_is_fresh(measurement_time):
+            return False, float("inf"), 0
+
+        planning_distance = max(
+            2.0,
+            float(
+                self.get_parameter("proactive_planning_distance_m").value
+            ),
+        )
+        half_width = max(
+            0.3,
+            float(
+                self.get_parameter("proactive_corridor_half_width_m").value
+            ),
+        )
+        ignore_near = max(
+            0.0,
+            float(self.get_parameter("proactive_ignore_near_m").value),
+        )
+        minimum_voxels = max(
+            1,
+            int(
+                self.get_parameter("proactive_min_obstacle_voxels").value
+            ),
+        )
+
+        cos_center = math.cos(center_angle)
+        sin_center = math.sin(center_angle)
+        forward = (
+            self.latest_accumulated_x * cos_center
+            + self.latest_accumulated_y * sin_center
+        )
+        lateral = (
+            -self.latest_accumulated_x * sin_center
+            + self.latest_accumulated_y * cos_center
+        )
+        corridor_mask = (
+            (forward >= ignore_near)
+            & (forward <= planning_distance)
+            & (np.abs(lateral) <= half_width)
+        )
+        voxel_count = int(np.count_nonzero(corridor_mask))
+        if voxel_count <= 0:
+            return False, float("inf"), 0
+        nearest = float(np.min(forward[corridor_mask]))
+        return voxel_count >= minimum_voxels, nearest, voxel_count
+
+    def _accumulated_cloud_is_fresh(self, measurement_time):
+        if not bool(
+            self.get_parameter("use_accumulated_cloud_for_astar").value
+        ):
+            return False
+        if self.latest_accumulated_x.size == 0:
+            return False
+        max_age = max(
+            0.05,
+            float(self.get_parameter("accumulated_cloud_max_age_sec").value),
+        )
+        sim_age = abs(
+            float(measurement_time) - self.latest_accumulated_stamp_sec
+        )
+        wall_age = time.monotonic() - self.latest_accumulated_receive_wall
+        return sim_age <= max_age and wall_age <= max_age * 2.0
+
+    def _publish_local_astar_path(self, header):
+        message = NavPath()
+        message.header = header
+        if self.local_detour_valid:
+            for x_m, y_m in self.local_astar_path_body:
+                pose = PoseStamped()
+                pose.header = header
+                pose.pose.position.x = float(x_m)
+                pose.pose.position.y = float(y_m)
+                pose.pose.position.z = 0.0
+                pose.pose.orientation.w = 1.0
+                message.poses.append(pose)
+        self.local_astar_path_publisher.publish(message)
 
     def _publish_result(
         self,
@@ -366,12 +580,29 @@ class ObstacleMonitorNode(TimestampedNode):
         recommended_direction_rad=0.0,
         recommended_clearance_m=0.0,
         recommended_valid=False,
+        reactive_blocked=False,
+        emergency_blocked=False,
+        proactive_blocked=False,
+        proactive_nearest_m=float("inf"),
+        proactive_voxel_count=0,
     ):
-        if not blocked:
+        # 선제 통로에서 계산한 A* 경로는 blocked=False여도 유지한다.
+        # 컨트롤러는 계속 수색하고, 실제 근거리 차단 시 이 최신 경로를 쓴다.
+        if not blocked and not proactive_blocked:
             self.local_detour_valid = False
+            self.local_astar_path_body = []
+            self.local_plan_source = "NONE"
         distance_message = Float32()
         distance_message.data = front_distance
         self.distance_publisher.publish(distance_message)
+
+        planning_distance_message = Float32()
+        planning_distance_message.data = (
+            float(proactive_nearest_m)
+            if proactive_blocked
+            else float("inf")
+        )
+        self.planning_distance_publisher.publish(planning_distance_message)
 
         clearances = Vector3Stamped()
         clearances.header.stamp = self.get_clock().now().to_msg()
@@ -405,6 +636,7 @@ class ObstacleMonitorNode(TimestampedNode):
             else -(float(nearest_360_distance) + 1.0e-6)
         )
         self.local_detour_publisher.publish(local_detour)
+        self._publish_local_astar_path(clearances.header)
 
         blocked_message = Bool()
         blocked_message.data = blocked
@@ -413,7 +645,7 @@ class ObstacleMonitorNode(TimestampedNode):
         now = time.monotonic()
         if (
             allow_warning
-            and blocked
+            and (blocked or proactive_blocked)
             and now - self.last_warning_time >= self.warning_period_sec
         ):
             recommendation = (
@@ -423,17 +655,41 @@ class ObstacleMonitorNode(TimestampedNode):
                 else "NONE"
             )
             local_plan = (
+                f"{self.local_plan_source}:"
                 f"({self.local_detour_x_m:.2f}, "
                 f"{self.local_detour_y_m:.2f})m"
                 if self.local_detour_valid
                 else "NONE"
             )
-            self.get_logger().warning(
-                f"이동 방향 장애물: 전방={front_distance:.2f}m, "
-                f"좌측={left_distance:.2f}m, 우측={right_distance:.2f}m, "
-                f"360°최소={nearest_360_distance:.2f}m, "
-                f"VFH참고={recommendation}, 로컬A*={local_plan}"
-            )
+            if blocked:
+                trigger_parts = []
+                if emergency_blocked:
+                    trigger_parts.append("비상근접")
+                elif reactive_blocked:
+                    trigger_parts.append("현재전방")
+                if proactive_blocked:
+                    trigger_parts.append(
+                        f"선제통로={proactive_nearest_m:.2f}m/"
+                        f"{int(proactive_voxel_count)}vox"
+                    )
+                trigger_text = (
+                    "+".join(trigger_parts) if trigger_parts else "유지"
+                )
+                self.get_logger().warning(
+                    f"이동 방향 장애물[{trigger_text}]: "
+                    f"전방={front_distance:.2f}m, "
+                    f"좌측={left_distance:.2f}m, "
+                    f"우측={right_distance:.2f}m, "
+                    f"360°최소={nearest_360_distance:.2f}m, "
+                    f"VFH참고={recommendation}, 로컬A*={local_plan}"
+                )
+            else:
+                self.get_logger().info(
+                    "선제 통로 장애물 예고(정지하지 않음): "
+                    f"거리={proactive_nearest_m:.2f}m/"
+                    f"{int(proactive_voxel_count)}vox, "
+                    f"VFH참고={recommendation}, 로컬A*={local_plan}"
+                )
             self.last_warning_time = now
         self.last_blocked = blocked
 
@@ -591,6 +847,7 @@ class ObstacleMonitorNode(TimestampedNode):
 
     def _plan_local_detour(self, obstacle_x, obstacle_y, target_angle):
         """팽창된 로컬 격자에서 목표 방향까지 A* 우회점을 구한다."""
+        self.local_astar_path_body = []
         grid_size_m = float(self.get_parameter("local_grid_size_m").value)
         resolution = float(
             self.get_parameter("local_grid_resolution_m").value
@@ -681,6 +938,14 @@ class ObstacleMonitorNode(TimestampedNode):
         if len(path) < 2:
             return 0.0, 0.0, False
 
+        self.local_astar_path_body = [
+            (
+                (cell[1] - center_cell) * resolution,
+                (center_cell - cell[0]) * resolution,
+            )
+            for cell in path
+        ]
+
         lookahead = max(
             resolution,
             float(self.get_parameter("local_planner_lookahead_m").value),
@@ -707,6 +972,7 @@ class ObstacleMonitorNode(TimestampedNode):
         detour_y = (center_cell - selected[0]) * resolution
         detour_distance = math.hypot(detour_x, detour_y)
         if detour_distance < 0.5:
+            self.local_astar_path_body = []
             return 0.0, 0.0, False
 
         target_forward_progress = (
@@ -719,6 +985,7 @@ class ObstacleMonitorNode(TimestampedNode):
             ).value
         )
         if target_forward_progress < minimum_progress:
+            self.local_astar_path_body = []
             return 0.0, 0.0, False
 
         return float(detour_x), float(detour_y), True

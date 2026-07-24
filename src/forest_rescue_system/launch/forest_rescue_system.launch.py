@@ -30,6 +30,10 @@ RESCUE_OBSTACLE_STATES = [
     "INITIAL_HOVER",
     "READY",
     "SEARCHING",
+    "COOP_SEARCH_PREPARING",
+    "COOP_SEARCH_TRANSIT",
+    "COOP_SEARCHING",
+    "COOP_SEARCH_COMPLETE",
     "VICTIM_DETECTED",
     "RETURNING_NO_VICTIM",
     "COMPLETE",
@@ -192,6 +196,19 @@ def _launch_nodes(context):
                     **common,
                     executable="sensor_tf",
                     name=f"sensor_tf_{suffix}",
+                ),
+                Node(
+                    package="forest_rescue_system",
+                    executable="pointcloud_local_mapper",
+                    name=f"pointcloud_local_mapper_{suffix}",
+                    output="screen",
+                    parameters=[
+                        config,
+                        {
+                            "use_sim_time": use_sim_time,
+                            "active_mission_states": obstacle_states,
+                        },
+                    ],
                 ),
                 Node(
                     package="forest_rescue_system",

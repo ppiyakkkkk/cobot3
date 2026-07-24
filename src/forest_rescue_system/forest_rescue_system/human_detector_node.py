@@ -57,6 +57,15 @@ class HumanDetectorNode(TimestampedNode):
         # 일정 시간 동안 실제/Mock 탐지를 모두 비활성화한다.
         self.declare_parameter("detection_start_delay_sec", 60.0)
         self.declare_parameter("detect_only_while_searching", True)
+        self.declare_parameter(
+            "active_detection_states",
+            [
+                "SEARCHING",
+                "COOP_SEARCH_PREPARING",
+                "COOP_SEARCH_TRANSIT",
+                "COOP_SEARCHING",
+            ],
+        )
         self.declare_parameter("mock_delay_sec", 8.0)
         self.declare_parameter("mock_confidence", 0.95)
         self.declare_parameter("mock_x_min_ratio", 0.46)
@@ -87,6 +96,10 @@ class HumanDetectorNode(TimestampedNode):
         self.detect_only_while_searching = bool(
             self.get_parameter("detect_only_while_searching").value
         )
+        self.active_detection_states = {
+            str(value).strip().upper()
+            for value in self.get_parameter("active_detection_states").value
+        }
 
         self.bridge = CvBridge()
         self.last_inference_time = 0.0
@@ -152,18 +165,21 @@ class HumanDetectorNode(TimestampedNode):
 
     def _mission_state_callback(self, message):
         state = message.data.strip().upper()
-        if state == "SEARCHING" and self.mission_state != "SEARCHING":
-            # 탐지 유예시간은 시뮬레이션을 Pause하면 함께 멈춰야 한다.
+        was_active = self.mission_state in self.active_detection_states
+        is_active = state in self.active_detection_states
+        if is_active and not was_active:
+            # 기본 수색에서 협동 수색으로 전환할 때는 기존 유예시간을
+            # 다시 시작하지 않는다. 비활성 상태에서 처음 진입할 때만 초기화한다.
             self.search_started_at = self._sim_time_sec()
             self.delay_notice_printed = False
             self.latest_detected_image = None
             self.latest_detection_stamp_ns = None
             self.confirmed_image_saved = False
             self.get_logger().info(
-                "SEARCHING 진입: "
-                f"{self.detection_start_delay_sec:.1f}초 후 사람 탐지를 시작합니다."
+                f"{state} 진입: {self.detection_start_delay_sec:.1f}초 후 "
+                "사람 탐지를 시작합니다."
             )
-        elif state != "SEARCHING":
+        elif not is_active:
             self.search_started_at = None
             self.delay_notice_printed = False
         self.mission_state = state
@@ -271,7 +287,10 @@ class HumanDetectorNode(TimestampedNode):
 
     def _detection_is_enabled(self):
         """수색 전 또는 초기 유예시간에는 사람 탐지 결과를 차단한다."""
-        if self.detect_only_while_searching and self.mission_state != "SEARCHING":
+        if (
+            self.detect_only_while_searching
+            and self.mission_state not in self.active_detection_states
+        ):
             return False
         if self.search_started_at is None:
             return not self.detect_only_while_searching
@@ -301,7 +320,7 @@ class HumanDetectorNode(TimestampedNode):
     def _run_mock_detection(self, image_message, image):
         """전체 파이프라인 검증을 위한 가상 Bounding Box를 만든다."""
         detection = self._empty_detection(image_message)
-        if self.mission_state != "SEARCHING":
+        if self.mission_state not in self.active_detection_states:
             return detection
         if self.search_started_at is None:
             return detection

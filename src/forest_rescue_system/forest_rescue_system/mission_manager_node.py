@@ -8,12 +8,17 @@ import math
 from pathlib import Path
 import time
 
-from geometry_msgs.msg import PointStamped
+from geometry_msgs.msg import Point, PointStamped
 import rclpy
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
+from visualization_msgs.msg import Marker, MarkerArray
 
 from forest_rescue_interfaces.msg import VictimDetection
+from forest_rescue_system.cooperative_search_planner import (
+    CooperativeSearchPlanner,
+)
 from forest_rescue_system.log_utils import TimestampedNode
 
 
@@ -63,6 +68,25 @@ class MissionManagerNode(TimestampedNode):
         )
         self.declare_parameter("auto_takeoff_on_connect", True)
 
+        # 특정 드론 담당 구역을 런타임에 다시 나누는 협동 수색 설정이다.
+        self.declare_parameter(
+            "terrain_mesh_path",
+            "~/b3_cobot3_ws/isaac_sim/generated_terrain_mesh.npz",
+        )
+        self.declare_parameter("cooperative_lane_spacing_m", 4.0)
+        self.declare_parameter("cooperative_sample_spacing_m", 4.0)
+        self.declare_parameter(
+            "cooperative_terrain_profile_spacing_m",
+            1.0,
+        )
+        self.declare_parameter("cooperative_transit_altitude_step_m", 2.0)
+        self.declare_parameter("cooperative_subzone_margin_m", 0.6)
+        self.declare_parameter("cooperative_prepare_timeout_sec", 20.0)
+        self.declare_parameter(
+            "cooperative_marker_topic",
+            "/mission/cooperative_search/markers",
+        )
+
         self.operation_mode = str(
             self.get_parameter("operation_mode").value
         ).strip().lower()
@@ -78,9 +102,38 @@ class MissionManagerNode(TimestampedNode):
         if not self.drone_ids:
             raise RuntimeError("drone_ids가 비어 있습니다.")
         self.search_zone_bounds = {}
+        self.drone_home_world_enu = {}
         self.start_exclusion_centers = []
         self._load_search_plan_metadata(log_result=True)
+        self.cooperative_planner = CooperativeSearchPlanner(
+            search_plan_path=str(
+                self.get_parameter("search_plan_path").value
+            ),
+            terrain_mesh_path=str(
+                self.get_parameter("terrain_mesh_path").value
+            ),
+            lane_spacing_m=float(
+                self.get_parameter("cooperative_lane_spacing_m").value
+            ),
+            sample_spacing_m=float(
+                self.get_parameter("cooperative_sample_spacing_m").value
+            ),
+            terrain_profile_spacing_m=float(
+                self.get_parameter(
+                    "cooperative_terrain_profile_spacing_m"
+                ).value
+            ),
+            transit_altitude_step_m=float(
+                self.get_parameter(
+                    "cooperative_transit_altitude_step_m"
+                ).value
+            ),
+            subzone_margin_m=float(
+                self.get_parameter("cooperative_subzone_margin_m").value
+            ),
+        )
         self.command_publishers = {}
+        self.cooperative_plan_publishers = {}
         self.drone_status = {drone_id: "UNKNOWN" for drone_id in self.drone_ids}
         self.detection_counts = {drone_id: 0 for drone_id in self.drone_ids}
         self.detection_miss_counts = {
@@ -103,12 +156,34 @@ class MissionManagerNode(TimestampedNode):
         self.last_detection_delay_log_at = 0.0
         self.last_exclusion_log_at = {drone_id: 0.0 for drone_id in self.drone_ids}
         self.last_zone_log_at = {drone_id: 0.0 for drone_id in self.drone_ids}
+        self.latest_drone_local_positions = {}
+        self.cooperative_plan = None
+        self.cooperative_active_drones = []
+        self.cooperative_plan_acks = set()
+        self.cooperative_finished_drones = set()
+        self.cooperative_started_at = None
+        self.cooperative_owner_drone = None
+        self.cooperative_target_bounds = None
+
+        marker_qos = QoSProfile(depth=1)
+        marker_qos.reliability = ReliabilityPolicy.RELIABLE
+        marker_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        self.cooperative_marker_publisher = self.create_publisher(
+            MarkerArray,
+            str(self.get_parameter("cooperative_marker_topic").value),
+            marker_qos,
+        )
 
         for index, drone_id in enumerate(self.drone_ids, start=1):
             prefix = f"/drone_{index:02d}"
             self.command_publishers[drone_id] = self.create_publisher(
                 String,
                 f"{prefix}/command",
+                10,
+            )
+            self.cooperative_plan_publishers[drone_id] = self.create_publisher(
+                String,
+                f"{prefix}/mission/cooperative_plan",
                 10,
             )
             self.create_subscription(
@@ -133,6 +208,18 @@ class MissionManagerNode(TimestampedNode):
                 PointStamped,
                 f"{prefix}/victim/position_map",
                 partial(self._map_position_callback, drone_id),
+                10,
+            )
+            self.create_subscription(
+                PointStamped,
+                f"{prefix}/local_position_ned",
+                partial(self._drone_position_callback, drone_id),
+                10,
+            )
+            self.create_subscription(
+                String,
+                f"{prefix}/mission/cooperative_plan_ack",
+                partial(self._cooperative_plan_ack_callback, drone_id),
                 10,
             )
 
@@ -161,6 +248,15 @@ class MissionManagerNode(TimestampedNode):
             "/mission/land",
             self._land_callback,
         )
+        self.cooperative_services = []
+        for index, drone_id in enumerate(self.drone_ids, start=1):
+            self.cooperative_services.append(
+                self.create_service(
+                    Trigger,
+                    f"/mission/cooperative_search/drone_{index:02d}",
+                    partial(self._cooperative_search_callback, drone_id),
+                )
+            )
 
         self.state = "IDLE"
         self.initial_takeoff_requested = False
@@ -173,6 +269,10 @@ class MissionManagerNode(TimestampedNode):
         self.republish_timer = self.create_timer(
             1.0,
             self._republish_mode_and_state,
+        )
+        self.cooperative_timer = self.create_timer(
+            0.2,
+            self._advance_cooperative_search,
         )
         self.get_logger().info(
             "구조 수색 모드 시작: "
@@ -217,6 +317,356 @@ class MissionManagerNode(TimestampedNode):
         response.success = True
         response.message = "모든 드론에 착륙 명령을 전송했습니다."
         return response
+
+    def _cooperative_search_callback(self, target_drone_id, _request, response):
+        """선택한 드론의 기존 담당 구역을 활성 드론 수만큼 재분할한다."""
+        if self.state != "SEARCHING":
+            response.success = False
+            response.message = (
+                "기본 SEARCHING 상태에서만 협동 수색을 요청할 수 있습니다: "
+                f"{self.state}"
+            )
+            return response
+        if self.finder_drone is not None or self.cooperative_plan is not None:
+            response.success = False
+            response.message = "이미 탐지 또는 협동 수색 절차가 진행 중입니다."
+            return response
+
+        active_drones = [
+            drone_id
+            for drone_id in self.drone_ids
+            if drone_id not in self.failed_drones
+            and self.drone_status.get(drone_id) != "LANDED"
+            and not self.drone_status.get(drone_id, "").startswith("ERROR")
+        ]
+        if target_drone_id not in active_drones:
+            response.success = False
+            response.message = (
+                f"{target_drone_id}가 현재 협동 수색에 참여할 수 없습니다."
+            )
+            return response
+
+        missing_positions = [
+            drone_id
+            for drone_id in active_drones
+            if drone_id not in self.latest_drone_local_positions
+            or drone_id not in self.drone_home_world_enu
+        ]
+        if missing_positions:
+            response.success = False
+            response.message = (
+                "현재 위치 또는 홈 좌표를 아직 받지 못한 드론: "
+                + ", ".join(missing_positions)
+            )
+            return response
+
+        try:
+            self.cooperative_planner.reload()
+            world_positions = {
+                drone_id: self._drone_world_position(drone_id)
+                for drone_id in active_drones
+            }
+            plan = self.cooperative_planner.create_plan(
+                target_drone_id=target_drone_id,
+                active_drone_ids=active_drones,
+                world_positions=world_positions,
+            )
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            response.success = False
+            response.message = f"협동 수색 계획 생성 실패: {error}"
+            self.get_logger().error(response.message)
+            return response
+
+        self.cooperative_plan = plan
+        self.cooperative_active_drones = list(active_drones)
+        self.cooperative_plan_acks.clear()
+        self.cooperative_finished_drones.clear()
+        self.cooperative_started_at = time.monotonic()
+        self.cooperative_owner_drone = target_drone_id
+        self.cooperative_target_bounds = tuple(
+            float(value) for value in plan["target_zone_bounds_xy"]
+        )
+        self._publish_state("COOP_SEARCH_PREPARING")
+
+        # 각 드론은 중앙점으로 모이지 않는다. 계획을 먼저 보관한 뒤 Hover가
+        # 확인되면 자기 소구역의 첫 웨이포인트로 직접 이동한다.
+        for drone_id in active_drones:
+            self._send_command(drone_id, "HOVER")
+            assignment = dict(plan["assignments"][drone_id])
+            assignment.update(
+                {
+                    "plan_id": plan["plan_id"],
+                    "plan_type": plan["plan_type"],
+                    "target_drone_id": target_drone_id,
+                    "target_zone_bounds_xy": plan[
+                        "target_zone_bounds_xy"
+                    ],
+                    "search_repeat_mode": "infinite",
+                }
+            )
+            message = String()
+            message.data = json.dumps(
+                assignment,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            self.cooperative_plan_publishers[drone_id].publish(message)
+
+        self.cooperative_marker_publisher.publish(
+            self._build_cooperative_markers(plan)
+        )
+        response.success = True
+        response.message = (
+            f"{target_drone_id} 담당 구역을 {len(active_drones)}개로 재분할했습니다. "
+            f"plan_id={plan['plan_id']}"
+        )
+        self.get_logger().warning(response.message)
+        return response
+
+    def _drone_position_callback(self, drone_id, message):
+        self.latest_drone_local_positions[drone_id] = message
+
+    def _drone_world_position(self, drone_id):
+        local = self.latest_drone_local_positions[drone_id].point
+        home = self.drone_home_world_enu[drone_id]
+        return [
+            float(home[0]) + float(local.y),
+            float(home[1]) + float(local.x),
+            float(home[2]) - float(local.z),
+        ]
+
+    def _cooperative_plan_ack_callback(self, drone_id, message):
+        if self.cooperative_plan is None:
+            return
+        if message.data.strip() != self.cooperative_plan["plan_id"]:
+            return
+        self.cooperative_plan_acks.add(drone_id)
+        self.get_logger().info(
+            "협동 계획 ACK: "
+            f"{drone_id} ({len(self.cooperative_plan_acks)}/"
+            f"{len(self.cooperative_active_drones)})"
+        )
+
+    def _advance_cooperative_search(self):
+        if self.cooperative_plan is None:
+            return
+        active = [
+            drone_id
+            for drone_id in self.cooperative_active_drones
+            if drone_id not in self.failed_drones
+        ]
+        if not active:
+            self._abort_cooperative_search("협동 수색 가능한 드론이 없습니다.")
+            return
+
+        if self.state == "COOP_SEARCH_PREPARING":
+            timeout = float(
+                self.get_parameter("cooperative_prepare_timeout_sec").value
+            )
+            if (
+                self.cooperative_started_at is not None
+                and time.monotonic() - self.cooperative_started_at > timeout
+            ):
+                self._abort_cooperative_search(
+                    "Hover 또는 협동 계획 ACK 준비시간을 초과했습니다."
+                )
+                return
+            all_hovering = all(
+                self.drone_status.get(drone_id) == "HOVERING"
+                for drone_id in active
+            )
+            all_acked = all(
+                drone_id in self.cooperative_plan_acks
+                for drone_id in active
+            )
+            if all_hovering and all_acked:
+                plan_id = self.cooperative_plan["plan_id"]
+                self._publish_state("COOP_SEARCH_TRANSIT")
+                for drone_id in active:
+                    self._send_command(
+                        drone_id,
+                        f"START_COOPERATIVE_SEARCH:{plan_id}",
+                    )
+                self.get_logger().warning(
+                    "협동 수색 진입 시작: 각 드론은 서로 다른 고도로 "
+                    "자기 소구역 첫 웨이포인트로 직접 이동합니다."
+                )
+            return
+
+        if self.state in {"COOP_SEARCH_TRANSIT", "COOP_SEARCHING"}:
+            resolved = all(
+                drone_id in self.cooperative_finished_drones
+                or drone_id in self.failed_drones
+                for drone_id in self.cooperative_active_drones
+            )
+            if resolved:
+                self._finish_cooperative_search()
+
+    def _finish_cooperative_search(self):
+        owner = self.cooperative_owner_drone
+        active = list(self.cooperative_active_drones)
+        self._publish_state("COOP_SEARCH_COMPLETE")
+
+        # 대상 구역은 모든 참여 드론이 정방향+역순으로 다시 확인했으므로
+        # 원래 담당 드론의 기본 구역은 완료 처리한다. 지원 드론은 중단 전
+        # 기본 웨이포인트 인덱스부터 수색을 재개한다.
+        if owner and owner not in self.failed_drones:
+            self.search_finished.add(owner)
+            self._send_command(owner, "MARK_PRIMARY_COMPLETE")
+        for drone_id in active:
+            if drone_id == owner or drone_id in self.failed_drones:
+                continue
+            self._send_command(drone_id, "RESUME_SEARCH")
+
+        self._clear_cooperative_markers()
+        self._clear_cooperative_context()
+        self._publish_state("SEARCHING")
+        self._try_finish_search_without_victim()
+
+    def _abort_cooperative_search(self, reason):
+        self.get_logger().error(f"협동 수색 취소: {reason}")
+        for drone_id in self.cooperative_active_drones:
+            if drone_id not in self.failed_drones:
+                self._send_command(drone_id, "RESUME_SEARCH")
+        self._clear_cooperative_markers()
+        self._clear_cooperative_context()
+        self._publish_state("SEARCHING")
+
+    def _clear_cooperative_context(self):
+        self.cooperative_plan = None
+        self.cooperative_active_drones = []
+        self.cooperative_plan_acks.clear()
+        self.cooperative_finished_drones.clear()
+        self.cooperative_started_at = None
+        self.cooperative_owner_drone = None
+        self.cooperative_target_bounds = None
+
+    def _clear_cooperative_markers(self):
+        marker_array = MarkerArray()
+        marker = Marker()
+        marker.header.frame_id = "map"
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.action = Marker.DELETEALL
+        marker_array.markers.append(marker)
+        self.cooperative_marker_publisher.publish(marker_array)
+
+    @staticmethod
+    def _marker_point(x, y, z):
+        point = Point()
+        point.x = float(x)
+        point.y = float(y)
+        point.z = float(z)
+        return point
+
+    def _build_cooperative_markers(self, plan):
+        marker_array = MarkerArray()
+        stamp = self.get_clock().now().to_msg()
+        colors = (
+            (1.0, 0.20, 0.20),
+            (0.20, 1.0, 0.20),
+            (0.20, 0.45, 1.0),
+            (1.0, 0.75, 0.10),
+        )
+        marker_id = 0
+
+        target = plan["target_zone_bounds_xy"]
+        target_z = max(
+            item["entry_world_enu"][2]
+            for item in plan["assignments"].values()
+        ) + 1.0
+        outline = Marker()
+        outline.header.frame_id = "map"
+        outline.header.stamp = stamp
+        outline.ns = "cooperative_target"
+        outline.id = marker_id
+        marker_id += 1
+        outline.type = Marker.LINE_STRIP
+        outline.action = Marker.ADD
+        outline.pose.orientation.w = 1.0
+        outline.scale.x = 0.45
+        outline.color.r = 1.0
+        outline.color.g = 1.0
+        outline.color.b = 1.0
+        outline.color.a = 1.0
+        x_min, x_max, y_min, y_max = target
+        outline.points = [
+            self._marker_point(x_min, y_min, target_z),
+            self._marker_point(x_max, y_min, target_z),
+            self._marker_point(x_max, y_max, target_z),
+            self._marker_point(x_min, y_max, target_z),
+            self._marker_point(x_min, y_min, target_z),
+        ]
+        marker_array.markers.append(outline)
+
+        for drone_index, drone_id in enumerate(plan["active_drone_ids"]):
+            assignment = plan["assignments"][drone_id]
+            bounds = assignment["subzone_bounds_xy"]
+            entry = assignment["entry_world_enu"]
+            red, green, blue = colors[drone_index % len(colors)]
+            x_min, x_max, y_min, y_max = bounds
+
+            zone = Marker()
+            zone.header.frame_id = "map"
+            zone.header.stamp = stamp
+            zone.ns = "cooperative_subzones"
+            zone.id = marker_id
+            marker_id += 1
+            zone.type = Marker.CUBE
+            zone.action = Marker.ADD
+            zone.pose.orientation.w = 1.0
+            zone.pose.position.x = (x_min + x_max) * 0.5
+            zone.pose.position.y = (y_min + y_max) * 0.5
+            zone.pose.position.z = target_z - 0.5
+            zone.scale.x = max(0.1, x_max - x_min)
+            zone.scale.y = max(0.1, y_max - y_min)
+            zone.scale.z = 0.18
+            zone.color.r = red
+            zone.color.g = green
+            zone.color.b = blue
+            zone.color.a = 0.28
+            marker_array.markers.append(zone)
+
+            entry_marker = Marker()
+            entry_marker.header.frame_id = "map"
+            entry_marker.header.stamp = stamp
+            entry_marker.ns = "cooperative_entries"
+            entry_marker.id = marker_id
+            marker_id += 1
+            entry_marker.type = Marker.SPHERE
+            entry_marker.action = Marker.ADD
+            entry_marker.pose.orientation.w = 1.0
+            entry_marker.pose.position.x = float(entry[0])
+            entry_marker.pose.position.y = float(entry[1])
+            entry_marker.pose.position.z = float(entry[2])
+            entry_marker.scale.x = 1.2
+            entry_marker.scale.y = 1.2
+            entry_marker.scale.z = 1.2
+            entry_marker.color.r = red
+            entry_marker.color.g = green
+            entry_marker.color.b = blue
+            entry_marker.color.a = 1.0
+            marker_array.markers.append(entry_marker)
+
+            label = Marker()
+            label.header.frame_id = "map"
+            label.header.stamp = stamp
+            label.ns = "cooperative_labels"
+            label.id = marker_id
+            marker_id += 1
+            label.type = Marker.TEXT_VIEW_FACING
+            label.action = Marker.ADD
+            label.pose.orientation.w = 1.0
+            label.pose.position.x = (x_min + x_max) * 0.5
+            label.pose.position.y = (y_min + y_max) * 0.5
+            label.pose.position.z = target_z + 1.2
+            label.scale.z = 1.5
+            label.color.r = red
+            label.color.g = green
+            label.color.b = blue
+            label.color.a = 1.0
+            label.text = f"{drone_id}\nENTRY"
+            marker_array.markers.append(label)
+        return marker_array
 
     def _reset_detection_state(self):
         self.finder_drone = None
@@ -280,6 +730,15 @@ class MissionManagerNode(TimestampedNode):
             )
             return
 
+        if status.startswith("COOP_SEARCHING"):
+            if self.state == "COOP_SEARCH_TRANSIT":
+                self._publish_state("COOP_SEARCHING")
+
+        if status == "COOP_SEARCH_FINISHED":
+            self.cooperative_finished_drones.add(drone_id)
+            self._advance_cooperative_search()
+            return
+
         if status == "SEARCH_FINISHED_NO_VICTIM":
             self.search_finished.add(drone_id)
             self._try_finish_search_without_victim()
@@ -320,9 +779,14 @@ class MissionManagerNode(TimestampedNode):
             else:
                 self._try_finish_search_without_victim()
                 self._try_complete_mission()
+                self._advance_cooperative_search()
 
     def _detection_callback(self, drone_id, detection):
-        if self.state != "SEARCHING" or self.finder_drone is not None:
+        if self.state not in {
+            "SEARCHING",
+            "COOP_SEARCH_TRANSIT",
+            "COOP_SEARCHING",
+        } or self.finder_drone is not None:
             return
         if drone_id in self.failed_drones:
             return
@@ -437,7 +901,11 @@ class MissionManagerNode(TimestampedNode):
 
     def _validate_synchronized_detection(self, drone_id, message):
         """동일 영상 stamp의 위치가 연속해서 일치할 때만 확정한다."""
-        if self.state != "SEARCHING" or self.finder_drone is not None:
+        if self.state not in {
+            "SEARCHING",
+            "COOP_SEARCH_TRANSIT",
+            "COOP_SEARCHING",
+        } or self.finder_drone is not None:
             return
         if drone_id in self.failed_drones:
             return
@@ -528,6 +996,9 @@ class MissionManagerNode(TimestampedNode):
             self.get_parameter("victim_approach_height_m").value
         )
 
+        if self.cooperative_plan is not None:
+            self._clear_cooperative_markers()
+            self._clear_cooperative_context()
         self.finder_drone = drone_id
         self.camera_position_received = drone_id in self.latest_camera_positions
         self.map_position_received = True
@@ -689,6 +1160,7 @@ class MissionManagerNode(TimestampedNode):
             json.JSONDecodeError,
         ) as error:
             self.search_zone_bounds = {}
+            self.drone_home_world_enu = {}
             self.start_exclusion_centers = []
             if log_result:
                 self.get_logger().warning(
@@ -698,6 +1170,7 @@ class MissionManagerNode(TimestampedNode):
             return False
 
         loaded_zones = {}
+        loaded_homes = {}
         loaded_centers = []
         terrain_bounds = plan.get("terrain_bounds", {})
         terrain_x_min = terrain_bounds.get("x_min")
@@ -733,9 +1206,12 @@ class MissionManagerNode(TimestampedNode):
                         f"{drone_id} 홈 좌표 형식이 잘못됐습니다: {home}"
                     )
                 return False
-            loaded_centers.extend([float(home[0]), float(home[1])])
+            loaded_home = [float(value) for value in home[:3]]
+            loaded_homes[drone_id] = loaded_home
+            loaded_centers.extend([loaded_home[0], loaded_home[1]])
 
         self.search_zone_bounds = loaded_zones
+        self.drone_home_world_enu = loaded_homes
         self.start_exclusion_centers = loaded_centers
         if log_result:
             self.get_logger().info(
@@ -765,6 +1241,17 @@ class MissionManagerNode(TimestampedNode):
         return False
 
     def _is_in_assigned_search_zone(self, drone_id, x, y):
+        if (
+            self.cooperative_target_bounds is not None
+            and self.state in {
+                "COOP_SEARCH_PREPARING",
+                "COOP_SEARCH_TRANSIT",
+                "COOP_SEARCHING",
+            }
+        ):
+            x_min, x_max, y_min, y_max = self.cooperative_target_bounds
+            return x_min <= x <= x_max and y_min <= y <= y_max
+
         zone = self.search_zone_bounds.get(drone_id)
         if zone is None:
             # Isaac Sim이 JSON을 생성한 직후 ROS가 시작되는 경우를 고려해 재시도한다.

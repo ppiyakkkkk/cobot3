@@ -54,6 +54,14 @@ mission_manager_node:
     # generated_search_plan.json을 우선 사용하며, 아래 값은 V1 호환용이다.
     search_zone_bounds_xy: [-46.7, 46.7, 13.55, 46.7, -46.7, 46.7, -13.55, 13.55, -46.7, 46.7, -46.7, -13.55]
     auto_takeoff_on_connect: true
+    terrain_mesh_path: ~/b3_cobot3_ws/isaac_sim/generated_terrain_mesh.npz
+    cooperative_lane_spacing_m: 4.0
+    cooperative_sample_spacing_m: 4.0
+    cooperative_terrain_profile_spacing_m: 1.0
+    cooperative_transit_altitude_step_m: 2.0
+    cooperative_subzone_margin_m: 0.6
+    cooperative_prepare_timeout_sec: 20.0
+    cooperative_marker_topic: /mission/cooperative_search/markers
 
 mapping_manager_node:
   ros__parameters:
@@ -87,6 +95,7 @@ human_detector_01:
     saved_image_jpeg_quality: 95
     detection_start_delay_sec: 5.0
     detect_only_while_searching: true
+    active_detection_states: [SEARCHING, COOP_SEARCH_PREPARING, COOP_SEARCH_TRANSIT, COOP_SEARCHING]
     mock_delay_sec: 8.0
     mock_confidence: 0.95
     mock_x_min_ratio: 0.46
@@ -103,6 +112,7 @@ victim_localizer_01:
     camera_position_topic: /drone_01/victim/position_camera
     map_position_topic: /drone_01/victim/position_map
     mission_state_topic: /mission/state
+    active_localization_states: [SEARCHING, COOP_SEARCH_TRANSIT, COOP_SEARCHING, VICTIM_DETECTED, VICTIM_LOCATED]
     camera_frame_override: quadrotor_01/camera_optical_frame
     map_frame: map
     roi_center_ratio: 0.50
@@ -130,46 +140,90 @@ sensor_tf_01:
     lidar_translation: [0.0, 0.0, 0.15]
     lidar_quaternion_xyzw: [0.0, 0.0, 0.0, 1.0]
 
+pointcloud_local_mapper_01:
+  ros__parameters:
+    drone_id: quadrotor_01
+    point_cloud_topic: /quadrotor_01/point_cloud
+    mission_state_topic: /mission/state
+    map_frame: map
+    body_frame: quadrotor_01/base_scan
+    accumulated_cloud_topic: /drone_01/obstacle/accumulated_cloud
+    accumulated_cloud_body_topic: /drone_01/obstacle/accumulated_cloud_body
+    local_costmap_topic: /drone_01/obstacle/local_costmap
+    # 최근 3초를 슬라이딩 윈도우로 유지한다.
+    accumulation_sec: 3.0
+    processing_period_sec: 0.10
+    publish_period_sec: 0.20
+    # PointCloud가 먼저 도착해도 콜백을 막지 않고 exact timestamp TF를 기다린다.
+    tf_retry_period_sec: 0.02
+    # 시뮬레이션이 느릴 때도 한두 TF 주기를 충분히 기다리도록 wall time 1초.
+    tf_exact_wait_sec: 1.00
+    # 누적 지도에는 exact timestamp TF만 사용하며 latest TF로 대체하지 않는다.
+    pending_cloud_queue_size: 30
+    # 잘못된 한 프레임이 뒤 프레임 처리를 막지 않도록 매 주기 여러 개를 검사한다.
+    max_pending_clouds_per_cycle: 8
+    voxel_size_m: 0.25
+    minimum_voxel_observations: 2
+    maximum_points_per_scan: 30000
+    minimum_height_m: -1.2
+    maximum_height_m: 1.8
+    local_costmap_size_m: 30.0
+    local_costmap_resolution_m: 0.25
+    obstacle_inflation_radius_m: 1.10
+    self_filter_radius_m: 0.65
+    active_mission_states: [INITIAL_TAKEOFF, INITIAL_HOVER, READY, SEARCHING, COOP_SEARCH_PREPARING, COOP_SEARCH_TRANSIT, COOP_SEARCHING, COOP_SEARCH_COMPLETE, VICTIM_DETECTED, RETURNING_NO_VICTIM, COMPLETE, MISSION_FAILED]
+    warning_period_sec: 5.0
+
 obstacle_monitor_01:
   ros__parameters:
     drone_id: quadrotor_01
     point_cloud_topic: /quadrotor_01/point_cloud
+    accumulated_point_cloud_topic: /drone_01/obstacle/accumulated_cloud_body
+    use_accumulated_cloud_for_astar: true
+    accumulated_cloud_max_age_sec: 0.8
+    local_astar_path_topic: /drone_01/obstacle/local_astar_path
     blocked_topic: /drone_01/obstacle/blocked
     distance_topic: /drone_01/obstacle/min_distance
+    planning_obstacle_distance_topic: /drone_01/obstacle/planning_distance
     clearances_topic: /drone_01/obstacle/clearances
     avoidance_vector_topic: /drone_01/obstacle/avoidance_vector
     local_detour_topic: /drone_01/obstacle/local_detour_body
     movement_direction_topic: /drone_01/navigation/direction_body_rad
     mission_state_topic: /mission/state
-    safety_distance_m: 3.2
+    safety_distance_m: 4.0
     # 360° 비상 정지는 실제 충돌 임박 거리에서만 사용한다. 옆 나무가
     # 1~2m 떨어진 정상 통로까지 전방 차단으로 오인하지 않게 한다.
-    emergency_distance_m: 0.9
+    emergency_distance_m: 1.2
     front_sector_half_angle_deg: 35.0
     side_sector_offset_deg: 70.0
     side_sector_half_angle_deg: 30.0
     minimum_obstacle_points: 3
-    blocked_confirm_scans: 3
+    blocked_confirm_scans: 2
     clear_confirm_scans: 3
     processing_period_sec: 0.10
     minimum_height_m: -1.2
     maximum_height_m: 1.8
-    active_mission_states: [INITIAL_TAKEOFF, INITIAL_HOVER, READY, SEARCHING, VICTIM_DETECTED, RETURNING_NO_VICTIM, COMPLETE, MISSION_FAILED]
+    active_mission_states: [INITIAL_TAKEOFF, INITIAL_HOVER, READY, SEARCHING, COOP_SEARCH_PREPARING, COOP_SEARCH_TRANSIT, COOP_SEARCHING, COOP_SEARCH_COMPLETE, VICTIM_DETECTED, RETURNING_NO_VICTIM, COMPLETE, MISSION_FAILED]
     candidate_offsets_deg: [0.0, -15.0, 15.0, -30.0, 30.0, -45.0, 45.0, -60.0, 60.0, -75.0, 75.0]
     candidate_sector_half_angle_deg: 12.0
-    candidate_min_clearance_m: 2.8
+    candidate_min_clearance_m: 3.5
     candidate_score_distance_cap_m: 15.0
     candidate_turn_penalty: 1.2
     candidate_forward_progress_weight: 3.0
     candidate_side_switch_penalty: 4.0
     candidate_side_hold_sec: 2.0
     candidate_max_offset_deg: 80.0
-    local_grid_size_m: 24.0
+    local_grid_size_m: 30.0
     local_grid_resolution_m: 0.25
-    obstacle_inflation_radius_m: 0.85
-    local_planner_goal_distance_m: 6.0
-    local_planner_lookahead_m: 2.25
+    obstacle_inflation_radius_m: 1.10
+    local_planner_goal_distance_m: 10.0
+    local_planner_lookahead_m: 3.5
     local_planner_period_sec: 0.40
+    proactive_avoidance_enabled: true
+    proactive_planning_distance_m: 10.0
+    proactive_corridor_half_width_m: 1.10
+    proactive_ignore_near_m: 0.80
+    proactive_min_obstacle_voxels: 2
     planner_start_release_radius_m: 0.50
     local_planner_min_forward_progress_m: -0.10
     warning_period_sec: 5.0
@@ -184,10 +238,16 @@ drone_controller_01:
     position_topic: /drone_01/local_position_ned
     obstacle_topic: /drone_01/obstacle/blocked
     obstacle_clearances_topic: /drone_01/obstacle/clearances
+    planning_obstacle_distance_topic: /drone_01/obstacle/planning_distance
     avoidance_vector_topic: /drone_01/obstacle/avoidance_vector
     local_detour_topic: /drone_01/obstacle/local_detour_body
     movement_direction_topic: /drone_01/navigation/direction_body_rad
     path_topic: /drone_01/search_path
+    cooperative_plan_topic: /drone_01/mission/cooperative_plan
+    cooperative_plan_ack_topic: /drone_01/mission/cooperative_plan_ack
+    cooperative_transit_path_topic: /drone_01/cooperative_transit_path
+    cooperative_search_path_topic: /drone_01/cooperative_search_path
+    search_repeat_mode: infinite
     base_frame: quadrotor_01/base_link
     home_world_enu: [-34.0, 40.0, 31.0]
     search_plan_path: ~/b3_cobot3_ws/isaac_sim/generated_search_plan.json
@@ -229,24 +289,35 @@ drone_controller_01:
     avoidance_climb_timeout_sec: 15.0
     avoidance_altitude_tolerance_m: 0.5
     avoidance_climb_step_retries: 2
-    avoidance_replan_attempts: 4
-    avoidance_retry_hover_sec: 2.0
+    avoidance_replan_attempts: 1
+    avoidance_retry_hover_sec: 0.3
     avoidance_lateral_offset_m: 5.0
     avoidance_forward_offset_m: 2.0
     avoidance_side_clearance_m: 5.0
-    avoidance_xy_timeout_sec: 15.0
-    avoidance_brake_timeout_sec: 8.0
+    avoidance_xy_timeout_sec: 8.0
+    avoidance_brake_timeout_sec: 2.5
     avoidance_stopped_speed_m_s: 0.60
-    avoidance_direction_check_sec: 0.5
-    avoidance_front_clearance_m: 2.8
-    avoidance_probe_distance_m: 3.0
+    avoidance_direction_check_sec: 0.25
+    avoidance_front_clearance_m: 3.5
+    avoidance_probe_distance_m: 4.0
     avoidance_direction_attempts: 3
     avoidance_vector_max_age_sec: 1.2
     local_detour_max_age_sec: 1.2
-    local_detour_hard_stop_distance_m: 0.9
+    local_detour_hard_stop_distance_m: 1.2
     avoidance_keep_yaw_during_detour: true
-    avoidance_commit_sec: 0.70
-    avoidance_block_confirm_sec: 0.35
+    avoidance_commit_sec: 0.35
+    avoidance_block_confirm_sec: 0.20
+    vertical_escape_min_forward_m: 4.0
+    vertical_escape_max_forward_m: 12.0
+    vertical_escape_obstacle_pass_margin_m: 2.5
+    vertical_escape_extra_forward_m: 2.0
+    vertical_escape_clear_hold_sec: 1.2
+    vertical_escape_cross_timeout_sec: 20.0
+    vertical_escape_cross_tolerance_m: 0.8
+    vertical_escape_descent_step_m: 1.0
+    vertical_escape_descent_timeout_sec: 12.0
+    vertical_escape_descent_retries: 2
+    vertical_escape_descent_clear_sec: 0.6
     direction_yaw_enabled: true
     direction_yaw_min_distance_m: 0.50
     direction_yaw_tolerance_deg: 6.0
@@ -280,6 +351,7 @@ human_detector_02:
     saved_image_jpeg_quality: 95
     detection_start_delay_sec: 5.0
     detect_only_while_searching: true
+    active_detection_states: [SEARCHING, COOP_SEARCH_PREPARING, COOP_SEARCH_TRANSIT, COOP_SEARCHING]
     mock_delay_sec: 8.0
     mock_confidence: 0.95
     mock_x_min_ratio: 0.46
@@ -296,6 +368,7 @@ victim_localizer_02:
     camera_position_topic: /drone_02/victim/position_camera
     map_position_topic: /drone_02/victim/position_map
     mission_state_topic: /mission/state
+    active_localization_states: [SEARCHING, COOP_SEARCH_TRANSIT, COOP_SEARCHING, VICTIM_DETECTED, VICTIM_LOCATED]
     camera_frame_override: quadrotor_02/camera_optical_frame
     map_frame: map
     roi_center_ratio: 0.50
@@ -322,44 +395,88 @@ sensor_tf_02:
     lidar_translation: [0.0, 0.0, 0.15]
     lidar_quaternion_xyzw: [0.0, 0.0, 0.0, 1.0]
 
+pointcloud_local_mapper_02:
+  ros__parameters:
+    drone_id: quadrotor_02
+    point_cloud_topic: /quadrotor_02/point_cloud
+    mission_state_topic: /mission/state
+    map_frame: map
+    body_frame: quadrotor_02/base_scan
+    accumulated_cloud_topic: /drone_02/obstacle/accumulated_cloud
+    accumulated_cloud_body_topic: /drone_02/obstacle/accumulated_cloud_body
+    local_costmap_topic: /drone_02/obstacle/local_costmap
+    # 최근 3초를 슬라이딩 윈도우로 유지한다.
+    accumulation_sec: 3.0
+    processing_period_sec: 0.10
+    publish_period_sec: 0.20
+    # PointCloud가 먼저 도착해도 콜백을 막지 않고 exact timestamp TF를 기다린다.
+    tf_retry_period_sec: 0.02
+    # 시뮬레이션이 느릴 때도 한두 TF 주기를 충분히 기다리도록 wall time 1초.
+    tf_exact_wait_sec: 1.00
+    # 누적 지도에는 exact timestamp TF만 사용하며 latest TF로 대체하지 않는다.
+    pending_cloud_queue_size: 30
+    # 잘못된 한 프레임이 뒤 프레임 처리를 막지 않도록 매 주기 여러 개를 검사한다.
+    max_pending_clouds_per_cycle: 8
+    voxel_size_m: 0.25
+    minimum_voxel_observations: 2
+    maximum_points_per_scan: 30000
+    minimum_height_m: -1.2
+    maximum_height_m: 1.8
+    local_costmap_size_m: 30.0
+    local_costmap_resolution_m: 0.25
+    obstacle_inflation_radius_m: 1.10
+    self_filter_radius_m: 0.65
+    active_mission_states: [INITIAL_TAKEOFF, INITIAL_HOVER, READY, SEARCHING, COOP_SEARCH_PREPARING, COOP_SEARCH_TRANSIT, COOP_SEARCHING, COOP_SEARCH_COMPLETE, VICTIM_DETECTED, RETURNING_NO_VICTIM, COMPLETE, MISSION_FAILED]
+    warning_period_sec: 5.0
+
 obstacle_monitor_02:
   ros__parameters:
     drone_id: quadrotor_02
     point_cloud_topic: /quadrotor_02/point_cloud
+    accumulated_point_cloud_topic: /drone_02/obstacle/accumulated_cloud_body
+    use_accumulated_cloud_for_astar: true
+    accumulated_cloud_max_age_sec: 0.8
+    local_astar_path_topic: /drone_02/obstacle/local_astar_path
     blocked_topic: /drone_02/obstacle/blocked
     distance_topic: /drone_02/obstacle/min_distance
+    planning_obstacle_distance_topic: /drone_02/obstacle/planning_distance
     clearances_topic: /drone_02/obstacle/clearances
     avoidance_vector_topic: /drone_02/obstacle/avoidance_vector
     local_detour_topic: /drone_02/obstacle/local_detour_body
     movement_direction_topic: /drone_02/navigation/direction_body_rad
     mission_state_topic: /mission/state
-    safety_distance_m: 3.2
-    emergency_distance_m: 0.9
+    safety_distance_m: 4.0
+    emergency_distance_m: 1.2
     front_sector_half_angle_deg: 35.0
     side_sector_offset_deg: 70.0
     side_sector_half_angle_deg: 30.0
     minimum_obstacle_points: 3
-    blocked_confirm_scans: 3
+    blocked_confirm_scans: 2
     clear_confirm_scans: 3
     processing_period_sec: 0.10
     minimum_height_m: -1.2
     maximum_height_m: 1.8
-    active_mission_states: [INITIAL_TAKEOFF, INITIAL_HOVER, READY, SEARCHING, VICTIM_DETECTED, RETURNING_NO_VICTIM, COMPLETE, MISSION_FAILED]
+    active_mission_states: [INITIAL_TAKEOFF, INITIAL_HOVER, READY, SEARCHING, COOP_SEARCH_PREPARING, COOP_SEARCH_TRANSIT, COOP_SEARCHING, COOP_SEARCH_COMPLETE, VICTIM_DETECTED, RETURNING_NO_VICTIM, COMPLETE, MISSION_FAILED]
     candidate_offsets_deg: [0.0, -15.0, 15.0, -30.0, 30.0, -45.0, 45.0, -60.0, 60.0, -75.0, 75.0]
     candidate_sector_half_angle_deg: 12.0
-    candidate_min_clearance_m: 2.8
+    candidate_min_clearance_m: 3.5
     candidate_score_distance_cap_m: 15.0
     candidate_turn_penalty: 1.2
     candidate_forward_progress_weight: 3.0
     candidate_side_switch_penalty: 4.0
     candidate_side_hold_sec: 2.0
     candidate_max_offset_deg: 80.0
-    local_grid_size_m: 24.0
+    local_grid_size_m: 30.0
     local_grid_resolution_m: 0.25
-    obstacle_inflation_radius_m: 0.85
-    local_planner_goal_distance_m: 6.0
-    local_planner_lookahead_m: 2.25
+    obstacle_inflation_radius_m: 1.10
+    local_planner_goal_distance_m: 10.0
+    local_planner_lookahead_m: 3.5
     local_planner_period_sec: 0.40
+    proactive_avoidance_enabled: true
+    proactive_planning_distance_m: 10.0
+    proactive_corridor_half_width_m: 1.10
+    proactive_ignore_near_m: 0.80
+    proactive_min_obstacle_voxels: 2
     planner_start_release_radius_m: 0.50
     local_planner_min_forward_progress_m: -0.10
     warning_period_sec: 5.0
@@ -374,10 +491,16 @@ drone_controller_02:
     position_topic: /drone_02/local_position_ned
     obstacle_topic: /drone_02/obstacle/blocked
     obstacle_clearances_topic: /drone_02/obstacle/clearances
+    planning_obstacle_distance_topic: /drone_02/obstacle/planning_distance
     avoidance_vector_topic: /drone_02/obstacle/avoidance_vector
     local_detour_topic: /drone_02/obstacle/local_detour_body
     movement_direction_topic: /drone_02/navigation/direction_body_rad
     path_topic: /drone_02/search_path
+    cooperative_plan_topic: /drone_02/mission/cooperative_plan
+    cooperative_plan_ack_topic: /drone_02/mission/cooperative_plan_ack
+    cooperative_transit_path_topic: /drone_02/cooperative_transit_path
+    cooperative_search_path_topic: /drone_02/cooperative_search_path
+    search_repeat_mode: infinite
     base_frame: quadrotor_02/base_link
     home_world_enu: [-29.0, 40.0, 31.0]
     search_plan_path: ~/b3_cobot3_ws/isaac_sim/generated_search_plan.json
@@ -419,24 +542,35 @@ drone_controller_02:
     avoidance_climb_timeout_sec: 15.0
     avoidance_altitude_tolerance_m: 0.5
     avoidance_climb_step_retries: 2
-    avoidance_replan_attempts: 4
-    avoidance_retry_hover_sec: 2.0
+    avoidance_replan_attempts: 1
+    avoidance_retry_hover_sec: 0.3
     avoidance_lateral_offset_m: 5.0
     avoidance_forward_offset_m: 2.0
     avoidance_side_clearance_m: 5.0
-    avoidance_xy_timeout_sec: 15.0
-    avoidance_brake_timeout_sec: 8.0
+    avoidance_xy_timeout_sec: 8.0
+    avoidance_brake_timeout_sec: 2.5
     avoidance_stopped_speed_m_s: 0.60
-    avoidance_direction_check_sec: 0.5
-    avoidance_front_clearance_m: 2.8
-    avoidance_probe_distance_m: 3.0
+    avoidance_direction_check_sec: 0.25
+    avoidance_front_clearance_m: 3.5
+    avoidance_probe_distance_m: 4.0
     avoidance_direction_attempts: 3
     avoidance_vector_max_age_sec: 1.2
     local_detour_max_age_sec: 1.2
-    local_detour_hard_stop_distance_m: 0.9
+    local_detour_hard_stop_distance_m: 1.2
     avoidance_keep_yaw_during_detour: true
-    avoidance_commit_sec: 0.70
-    avoidance_block_confirm_sec: 0.35
+    avoidance_commit_sec: 0.35
+    avoidance_block_confirm_sec: 0.20
+    vertical_escape_min_forward_m: 4.0
+    vertical_escape_max_forward_m: 12.0
+    vertical_escape_obstacle_pass_margin_m: 2.5
+    vertical_escape_extra_forward_m: 2.0
+    vertical_escape_clear_hold_sec: 1.2
+    vertical_escape_cross_timeout_sec: 20.0
+    vertical_escape_cross_tolerance_m: 0.8
+    vertical_escape_descent_step_m: 1.0
+    vertical_escape_descent_timeout_sec: 12.0
+    vertical_escape_descent_retries: 2
+    vertical_escape_descent_clear_sec: 0.6
     direction_yaw_enabled: true
     direction_yaw_min_distance_m: 0.50
     direction_yaw_tolerance_deg: 6.0
@@ -470,6 +604,7 @@ human_detector_03:
     saved_image_jpeg_quality: 95
     detection_start_delay_sec: 5.0
     detect_only_while_searching: true
+    active_detection_states: [SEARCHING, COOP_SEARCH_PREPARING, COOP_SEARCH_TRANSIT, COOP_SEARCHING]
     mock_delay_sec: 8.0
     mock_confidence: 0.95
     mock_x_min_ratio: 0.46
@@ -486,6 +621,7 @@ victim_localizer_03:
     camera_position_topic: /drone_03/victim/position_camera
     map_position_topic: /drone_03/victim/position_map
     mission_state_topic: /mission/state
+    active_localization_states: [SEARCHING, COOP_SEARCH_TRANSIT, COOP_SEARCHING, VICTIM_DETECTED, VICTIM_LOCATED]
     camera_frame_override: quadrotor_03/camera_optical_frame
     map_frame: map
     roi_center_ratio: 0.50
@@ -512,44 +648,88 @@ sensor_tf_03:
     lidar_translation: [0.0, 0.0, 0.15]
     lidar_quaternion_xyzw: [0.0, 0.0, 0.0, 1.0]
 
+pointcloud_local_mapper_03:
+  ros__parameters:
+    drone_id: quadrotor_03
+    point_cloud_topic: /quadrotor_03/point_cloud
+    mission_state_topic: /mission/state
+    map_frame: map
+    body_frame: quadrotor_03/base_scan
+    accumulated_cloud_topic: /drone_03/obstacle/accumulated_cloud
+    accumulated_cloud_body_topic: /drone_03/obstacle/accumulated_cloud_body
+    local_costmap_topic: /drone_03/obstacle/local_costmap
+    # 최근 3초를 슬라이딩 윈도우로 유지한다.
+    accumulation_sec: 3.0
+    processing_period_sec: 0.10
+    publish_period_sec: 0.20
+    # PointCloud가 먼저 도착해도 콜백을 막지 않고 exact timestamp TF를 기다린다.
+    tf_retry_period_sec: 0.02
+    # 시뮬레이션이 느릴 때도 한두 TF 주기를 충분히 기다리도록 wall time 1초.
+    tf_exact_wait_sec: 1.00
+    # 누적 지도에는 exact timestamp TF만 사용하며 latest TF로 대체하지 않는다.
+    pending_cloud_queue_size: 30
+    # 잘못된 한 프레임이 뒤 프레임 처리를 막지 않도록 매 주기 여러 개를 검사한다.
+    max_pending_clouds_per_cycle: 8
+    voxel_size_m: 0.25
+    minimum_voxel_observations: 2
+    maximum_points_per_scan: 30000
+    minimum_height_m: -1.2
+    maximum_height_m: 1.8
+    local_costmap_size_m: 30.0
+    local_costmap_resolution_m: 0.25
+    obstacle_inflation_radius_m: 1.10
+    self_filter_radius_m: 0.65
+    active_mission_states: [INITIAL_TAKEOFF, INITIAL_HOVER, READY, SEARCHING, COOP_SEARCH_PREPARING, COOP_SEARCH_TRANSIT, COOP_SEARCHING, COOP_SEARCH_COMPLETE, VICTIM_DETECTED, RETURNING_NO_VICTIM, COMPLETE, MISSION_FAILED]
+    warning_period_sec: 5.0
+
 obstacle_monitor_03:
   ros__parameters:
     drone_id: quadrotor_03
     point_cloud_topic: /quadrotor_03/point_cloud
+    accumulated_point_cloud_topic: /drone_03/obstacle/accumulated_cloud_body
+    use_accumulated_cloud_for_astar: true
+    accumulated_cloud_max_age_sec: 0.8
+    local_astar_path_topic: /drone_03/obstacle/local_astar_path
     blocked_topic: /drone_03/obstacle/blocked
     distance_topic: /drone_03/obstacle/min_distance
+    planning_obstacle_distance_topic: /drone_03/obstacle/planning_distance
     clearances_topic: /drone_03/obstacle/clearances
     avoidance_vector_topic: /drone_03/obstacle/avoidance_vector
     local_detour_topic: /drone_03/obstacle/local_detour_body
     movement_direction_topic: /drone_03/navigation/direction_body_rad
     mission_state_topic: /mission/state
-    safety_distance_m: 3.2
-    emergency_distance_m: 0.9
+    safety_distance_m: 4.0
+    emergency_distance_m: 1.2
     front_sector_half_angle_deg: 35.0
     side_sector_offset_deg: 70.0
     side_sector_half_angle_deg: 30.0
     minimum_obstacle_points: 3
-    blocked_confirm_scans: 3
+    blocked_confirm_scans: 2
     clear_confirm_scans: 3
     processing_period_sec: 0.10
     minimum_height_m: -1.2
     maximum_height_m: 1.8
-    active_mission_states: [INITIAL_TAKEOFF, INITIAL_HOVER, READY, SEARCHING, VICTIM_DETECTED, RETURNING_NO_VICTIM, COMPLETE, MISSION_FAILED]
+    active_mission_states: [INITIAL_TAKEOFF, INITIAL_HOVER, READY, SEARCHING, COOP_SEARCH_PREPARING, COOP_SEARCH_TRANSIT, COOP_SEARCHING, COOP_SEARCH_COMPLETE, VICTIM_DETECTED, RETURNING_NO_VICTIM, COMPLETE, MISSION_FAILED]
     candidate_offsets_deg: [0.0, -15.0, 15.0, -30.0, 30.0, -45.0, 45.0, -60.0, 60.0, -75.0, 75.0]
     candidate_sector_half_angle_deg: 12.0
-    candidate_min_clearance_m: 2.8
+    candidate_min_clearance_m: 3.5
     candidate_score_distance_cap_m: 15.0
     candidate_turn_penalty: 1.2
     candidate_forward_progress_weight: 3.0
     candidate_side_switch_penalty: 4.0
     candidate_side_hold_sec: 2.0
     candidate_max_offset_deg: 80.0
-    local_grid_size_m: 24.0
+    local_grid_size_m: 30.0
     local_grid_resolution_m: 0.25
-    obstacle_inflation_radius_m: 0.85
-    local_planner_goal_distance_m: 6.0
-    local_planner_lookahead_m: 2.25
+    obstacle_inflation_radius_m: 1.10
+    local_planner_goal_distance_m: 10.0
+    local_planner_lookahead_m: 3.5
     local_planner_period_sec: 0.40
+    proactive_avoidance_enabled: true
+    proactive_planning_distance_m: 10.0
+    proactive_corridor_half_width_m: 1.10
+    proactive_ignore_near_m: 0.80
+    proactive_min_obstacle_voxels: 2
     planner_start_release_radius_m: 0.50
     local_planner_min_forward_progress_m: -0.10
     warning_period_sec: 5.0
@@ -564,10 +744,16 @@ drone_controller_03:
     position_topic: /drone_03/local_position_ned
     obstacle_topic: /drone_03/obstacle/blocked
     obstacle_clearances_topic: /drone_03/obstacle/clearances
+    planning_obstacle_distance_topic: /drone_03/obstacle/planning_distance
     avoidance_vector_topic: /drone_03/obstacle/avoidance_vector
     local_detour_topic: /drone_03/obstacle/local_detour_body
     movement_direction_topic: /drone_03/navigation/direction_body_rad
     path_topic: /drone_03/search_path
+    cooperative_plan_topic: /drone_03/mission/cooperative_plan
+    cooperative_plan_ack_topic: /drone_03/mission/cooperative_plan_ack
+    cooperative_transit_path_topic: /drone_03/cooperative_transit_path
+    cooperative_search_path_topic: /drone_03/cooperative_search_path
+    search_repeat_mode: infinite
     base_frame: quadrotor_03/base_link
     home_world_enu: [-39.0, 40.0, 31.0]
     search_plan_path: ~/b3_cobot3_ws/isaac_sim/generated_search_plan.json
@@ -609,24 +795,35 @@ drone_controller_03:
     avoidance_climb_timeout_sec: 15.0
     avoidance_altitude_tolerance_m: 0.5
     avoidance_climb_step_retries: 2
-    avoidance_replan_attempts: 4
-    avoidance_retry_hover_sec: 2.0
+    avoidance_replan_attempts: 1
+    avoidance_retry_hover_sec: 0.3
     avoidance_lateral_offset_m: 5.0
     avoidance_forward_offset_m: 2.0
     avoidance_side_clearance_m: 5.0
-    avoidance_xy_timeout_sec: 15.0
-    avoidance_brake_timeout_sec: 8.0
+    avoidance_xy_timeout_sec: 8.0
+    avoidance_brake_timeout_sec: 2.5
     avoidance_stopped_speed_m_s: 0.60
-    avoidance_direction_check_sec: 0.5
-    avoidance_front_clearance_m: 2.8
-    avoidance_probe_distance_m: 3.0
+    avoidance_direction_check_sec: 0.25
+    avoidance_front_clearance_m: 3.5
+    avoidance_probe_distance_m: 4.0
     avoidance_direction_attempts: 3
     avoidance_vector_max_age_sec: 1.2
     local_detour_max_age_sec: 1.2
-    local_detour_hard_stop_distance_m: 0.9
+    local_detour_hard_stop_distance_m: 1.2
     avoidance_keep_yaw_during_detour: true
-    avoidance_commit_sec: 0.70
-    avoidance_block_confirm_sec: 0.35
+    avoidance_commit_sec: 0.35
+    avoidance_block_confirm_sec: 0.20
+    vertical_escape_min_forward_m: 4.0
+    vertical_escape_max_forward_m: 12.0
+    vertical_escape_obstacle_pass_margin_m: 2.5
+    vertical_escape_extra_forward_m: 2.0
+    vertical_escape_clear_hold_sec: 1.2
+    vertical_escape_cross_timeout_sec: 20.0
+    vertical_escape_cross_tolerance_m: 0.8
+    vertical_escape_descent_step_m: 1.0
+    vertical_escape_descent_timeout_sec: 12.0
+    vertical_escape_descent_retries: 2
+    vertical_escape_descent_clear_sec: 0.6
     direction_yaw_enabled: true
     direction_yaw_min_distance_m: 0.50
     direction_yaw_tolerance_deg: 6.0
@@ -660,6 +857,7 @@ human_detector_04:
     saved_image_jpeg_quality: 95
     detection_start_delay_sec: 5.0
     detect_only_while_searching: true
+    active_detection_states: [SEARCHING, COOP_SEARCH_PREPARING, COOP_SEARCH_TRANSIT, COOP_SEARCHING]
     mock_delay_sec: 8.0
     mock_confidence: 0.95
     mock_x_min_ratio: 0.46
@@ -676,6 +874,7 @@ victim_localizer_04:
     camera_position_topic: /drone_04/victim/position_camera
     map_position_topic: /drone_04/victim/position_map
     mission_state_topic: /mission/state
+    active_localization_states: [SEARCHING, COOP_SEARCH_TRANSIT, COOP_SEARCHING, VICTIM_DETECTED, VICTIM_LOCATED]
     camera_frame_override: quadrotor_04/camera_optical_frame
     map_frame: map
     roi_center_ratio: 0.50
@@ -702,44 +901,88 @@ sensor_tf_04:
     lidar_translation: [0.0, 0.0, 0.15]
     lidar_quaternion_xyzw: [0.0, 0.0, 0.0, 1.0]
 
+pointcloud_local_mapper_04:
+  ros__parameters:
+    drone_id: quadrotor_04
+    point_cloud_topic: /quadrotor_04/point_cloud
+    mission_state_topic: /mission/state
+    map_frame: map
+    body_frame: quadrotor_04/base_scan
+    accumulated_cloud_topic: /drone_04/obstacle/accumulated_cloud
+    accumulated_cloud_body_topic: /drone_04/obstacle/accumulated_cloud_body
+    local_costmap_topic: /drone_04/obstacle/local_costmap
+    # 최근 3초를 슬라이딩 윈도우로 유지한다.
+    accumulation_sec: 3.0
+    processing_period_sec: 0.10
+    publish_period_sec: 0.20
+    # PointCloud가 먼저 도착해도 콜백을 막지 않고 exact timestamp TF를 기다린다.
+    tf_retry_period_sec: 0.02
+    # 시뮬레이션이 느릴 때도 한두 TF 주기를 충분히 기다리도록 wall time 1초.
+    tf_exact_wait_sec: 1.00
+    # 누적 지도에는 exact timestamp TF만 사용하며 latest TF로 대체하지 않는다.
+    pending_cloud_queue_size: 30
+    # 잘못된 한 프레임이 뒤 프레임 처리를 막지 않도록 매 주기 여러 개를 검사한다.
+    max_pending_clouds_per_cycle: 8
+    voxel_size_m: 0.25
+    minimum_voxel_observations: 2
+    maximum_points_per_scan: 30000
+    minimum_height_m: -1.2
+    maximum_height_m: 1.8
+    local_costmap_size_m: 30.0
+    local_costmap_resolution_m: 0.25
+    obstacle_inflation_radius_m: 1.10
+    self_filter_radius_m: 0.65
+    active_mission_states: [INITIAL_TAKEOFF, INITIAL_HOVER, READY, SEARCHING, COOP_SEARCH_PREPARING, COOP_SEARCH_TRANSIT, COOP_SEARCHING, COOP_SEARCH_COMPLETE, VICTIM_DETECTED, RETURNING_NO_VICTIM, COMPLETE, MISSION_FAILED]
+    warning_period_sec: 5.0
+
 obstacle_monitor_04:
   ros__parameters:
     drone_id: quadrotor_04
     point_cloud_topic: /quadrotor_04/point_cloud
+    accumulated_point_cloud_topic: /drone_04/obstacle/accumulated_cloud_body
+    use_accumulated_cloud_for_astar: true
+    accumulated_cloud_max_age_sec: 0.8
+    local_astar_path_topic: /drone_04/obstacle/local_astar_path
     blocked_topic: /drone_04/obstacle/blocked
     distance_topic: /drone_04/obstacle/min_distance
+    planning_obstacle_distance_topic: /drone_04/obstacle/planning_distance
     clearances_topic: /drone_04/obstacle/clearances
     avoidance_vector_topic: /drone_04/obstacle/avoidance_vector
     local_detour_topic: /drone_04/obstacle/local_detour_body
     movement_direction_topic: /drone_04/navigation/direction_body_rad
     mission_state_topic: /mission/state
-    safety_distance_m: 3.2
-    emergency_distance_m: 0.9
+    safety_distance_m: 4.0
+    emergency_distance_m: 1.2
     front_sector_half_angle_deg: 35.0
     side_sector_offset_deg: 70.0
     side_sector_half_angle_deg: 30.0
     minimum_obstacle_points: 3
-    blocked_confirm_scans: 3
+    blocked_confirm_scans: 2
     clear_confirm_scans: 3
     processing_period_sec: 0.10
     minimum_height_m: -1.2
     maximum_height_m: 1.8
-    active_mission_states: [INITIAL_TAKEOFF, INITIAL_HOVER, READY, SEARCHING, VICTIM_DETECTED, RETURNING_NO_VICTIM, COMPLETE, MISSION_FAILED]
+    active_mission_states: [INITIAL_TAKEOFF, INITIAL_HOVER, READY, SEARCHING, COOP_SEARCH_PREPARING, COOP_SEARCH_TRANSIT, COOP_SEARCHING, COOP_SEARCH_COMPLETE, VICTIM_DETECTED, RETURNING_NO_VICTIM, COMPLETE, MISSION_FAILED]
     candidate_offsets_deg: [0.0, -15.0, 15.0, -30.0, 30.0, -45.0, 45.0, -60.0, 60.0, -75.0, 75.0]
     candidate_sector_half_angle_deg: 12.0
-    candidate_min_clearance_m: 2.8
+    candidate_min_clearance_m: 3.5
     candidate_score_distance_cap_m: 15.0
     candidate_turn_penalty: 1.2
     candidate_forward_progress_weight: 3.0
     candidate_side_switch_penalty: 4.0
     candidate_side_hold_sec: 2.0
     candidate_max_offset_deg: 80.0
-    local_grid_size_m: 24.0
+    local_grid_size_m: 30.0
     local_grid_resolution_m: 0.25
-    obstacle_inflation_radius_m: 0.85
-    local_planner_goal_distance_m: 6.0
-    local_planner_lookahead_m: 2.25
+    obstacle_inflation_radius_m: 1.10
+    local_planner_goal_distance_m: 10.0
+    local_planner_lookahead_m: 3.5
     local_planner_period_sec: 0.40
+    proactive_avoidance_enabled: true
+    proactive_planning_distance_m: 10.0
+    proactive_corridor_half_width_m: 1.10
+    proactive_ignore_near_m: 0.80
+    proactive_min_obstacle_voxels: 2
     planner_start_release_radius_m: 0.50
     local_planner_min_forward_progress_m: -0.10
     warning_period_sec: 5.0
@@ -754,10 +997,16 @@ drone_controller_04:
     position_topic: /drone_04/local_position_ned
     obstacle_topic: /drone_04/obstacle/blocked
     obstacle_clearances_topic: /drone_04/obstacle/clearances
+    planning_obstacle_distance_topic: /drone_04/obstacle/planning_distance
     avoidance_vector_topic: /drone_04/obstacle/avoidance_vector
     local_detour_topic: /drone_04/obstacle/local_detour_body
     movement_direction_topic: /drone_04/navigation/direction_body_rad
     path_topic: /drone_04/search_path
+    cooperative_plan_topic: /drone_04/mission/cooperative_plan
+    cooperative_plan_ack_topic: /drone_04/mission/cooperative_plan_ack
+    cooperative_transit_path_topic: /drone_04/cooperative_transit_path
+    cooperative_search_path_topic: /drone_04/cooperative_search_path
+    search_repeat_mode: infinite
     base_frame: quadrotor_04/base_link
     home_world_enu: [-34.0, 45.0, 31.0]
     search_plan_path: ~/b3_cobot3_ws/isaac_sim/generated_search_plan.json
@@ -799,24 +1048,35 @@ drone_controller_04:
     avoidance_climb_timeout_sec: 15.0
     avoidance_altitude_tolerance_m: 0.5
     avoidance_climb_step_retries: 2
-    avoidance_replan_attempts: 4
-    avoidance_retry_hover_sec: 2.0
+    avoidance_replan_attempts: 1
+    avoidance_retry_hover_sec: 0.3
     avoidance_lateral_offset_m: 5.0
     avoidance_forward_offset_m: 2.0
     avoidance_side_clearance_m: 5.0
-    avoidance_xy_timeout_sec: 15.0
-    avoidance_brake_timeout_sec: 8.0
+    avoidance_xy_timeout_sec: 8.0
+    avoidance_brake_timeout_sec: 2.5
     avoidance_stopped_speed_m_s: 0.60
-    avoidance_direction_check_sec: 0.5
-    avoidance_front_clearance_m: 2.8
-    avoidance_probe_distance_m: 3.0
+    avoidance_direction_check_sec: 0.25
+    avoidance_front_clearance_m: 3.5
+    avoidance_probe_distance_m: 4.0
     avoidance_direction_attempts: 3
     avoidance_vector_max_age_sec: 1.2
     local_detour_max_age_sec: 1.2
-    local_detour_hard_stop_distance_m: 0.9
+    local_detour_hard_stop_distance_m: 1.2
     avoidance_keep_yaw_during_detour: true
-    avoidance_commit_sec: 0.70
-    avoidance_block_confirm_sec: 0.35
+    avoidance_commit_sec: 0.35
+    avoidance_block_confirm_sec: 0.20
+    vertical_escape_min_forward_m: 4.0
+    vertical_escape_max_forward_m: 12.0
+    vertical_escape_obstacle_pass_margin_m: 2.5
+    vertical_escape_extra_forward_m: 2.0
+    vertical_escape_clear_hold_sec: 1.2
+    vertical_escape_cross_timeout_sec: 20.0
+    vertical_escape_cross_tolerance_m: 0.8
+    vertical_escape_descent_step_m: 1.0
+    vertical_escape_descent_timeout_sec: 12.0
+    vertical_escape_descent_retries: 2
+    vertical_escape_descent_clear_sec: 0.6
     direction_yaw_enabled: true
     direction_yaw_min_distance_m: 0.50
     direction_yaw_tolerance_deg: 6.0

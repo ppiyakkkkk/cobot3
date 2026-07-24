@@ -88,15 +88,15 @@ class DroneControllerNode(TimestampedNode):
         self.declare_parameter("avoidance_climb_timeout_sec", 15.0)
         self.declare_parameter("avoidance_altitude_tolerance_m", 0.5)
         self.declare_parameter("avoidance_climb_step_retries", 2)
-        self.declare_parameter("avoidance_replan_attempts", 4)
-        self.declare_parameter("avoidance_retry_hover_sec", 2.0)
+        self.declare_parameter("avoidance_replan_attempts", 1)
+        self.declare_parameter("avoidance_retry_hover_sec", 0.3)
         self.declare_parameter("avoidance_lateral_offset_m", 5.0)
         self.declare_parameter("avoidance_forward_offset_m", 2.0)
         self.declare_parameter("avoidance_side_clearance_m", 5.0)
-        self.declare_parameter("avoidance_xy_timeout_sec", 15.0)
-        self.declare_parameter("avoidance_brake_timeout_sec", 8.0)
+        self.declare_parameter("avoidance_xy_timeout_sec", 8.0)
+        self.declare_parameter("avoidance_brake_timeout_sec", 2.5)
         self.declare_parameter("avoidance_stopped_speed_m_s", 0.60)
-        self.declare_parameter("avoidance_direction_check_sec", 0.8)
+        self.declare_parameter("avoidance_direction_check_sec", 0.25)
         self.declare_parameter("avoidance_front_clearance_m", 3.5)
         self.declare_parameter("avoidance_probe_distance_m", 5.0)
         self.declare_parameter("avoidance_direction_attempts", 4)
@@ -107,8 +107,21 @@ class DroneControllerNode(TimestampedNode):
         # 유지한다. 이동 직후 센서 방향이 안정될 때까지 일반 차단 판정은
         # 잠시 유예하고, 이후에도 일정 시간 연속 차단일 때만 재계획한다.
         self.declare_parameter("avoidance_keep_yaw_during_detour", True)
-        self.declare_parameter("avoidance_commit_sec", 0.70)
-        self.declare_parameter("avoidance_block_confirm_sec", 0.35)
+        self.declare_parameter("avoidance_commit_sec", 0.35)
+        self.declare_parameter("avoidance_block_confirm_sec", 0.20)
+        # 수평 A*/VFH가 모두 실패했을 때 상승한 뒤 원래 진행 방향으로
+        # 장애물을 충분히 건너고, 연속 clear 확인 후 단계적으로 하강한다.
+        self.declare_parameter("vertical_escape_min_forward_m", 4.0)
+        self.declare_parameter("vertical_escape_max_forward_m", 12.0)
+        self.declare_parameter("vertical_escape_obstacle_pass_margin_m", 2.5)
+        self.declare_parameter("vertical_escape_extra_forward_m", 2.0)
+        self.declare_parameter("vertical_escape_clear_hold_sec", 1.2)
+        self.declare_parameter("vertical_escape_cross_timeout_sec", 20.0)
+        self.declare_parameter("vertical_escape_cross_tolerance_m", 0.8)
+        self.declare_parameter("vertical_escape_descent_step_m", 1.0)
+        self.declare_parameter("vertical_escape_descent_timeout_sec", 12.0)
+        self.declare_parameter("vertical_escape_descent_retries", 2)
+        self.declare_parameter("vertical_escape_descent_clear_sec", 0.6)
         self.declare_parameter("victim_approach_timeout_sec", 120.0)
 
         # 수평 이동 전에 기체 전방과 RGB 카메라가 목표 진행방향을
@@ -142,6 +155,10 @@ class DroneControllerNode(TimestampedNode):
             "/drone_01/obstacle/clearances",
         )
         self.declare_parameter(
+            "planning_obstacle_distance_topic",
+            "/drone_01/obstacle/planning_distance",
+        )
+        self.declare_parameter(
             "movement_direction_topic",
             "/drone_01/navigation/direction_body_rad",
         )
@@ -154,6 +171,27 @@ class DroneControllerNode(TimestampedNode):
             "/drone_01/obstacle/local_detour_body",
         )
         self.declare_parameter("path_topic", "/drone_01/search_path")
+        self.declare_parameter(
+            "cooperative_plan_topic",
+            "/drone_01/mission/cooperative_plan",
+        )
+        self.declare_parameter(
+            "cooperative_plan_ack_topic",
+            "/drone_01/mission/cooperative_plan_ack",
+        )
+        self.declare_parameter(
+            "cooperative_transit_path_topic",
+            "/drone_01/cooperative_transit_path",
+        )
+        self.declare_parameter(
+            "cooperative_search_path_topic",
+            "/drone_01/cooperative_search_path",
+        )
+        # 수색 경로 반복 방식이다.
+        # - once: 정방향 한 번
+        # - forward_reverse_once: 정방향 한 번 + 역방향 한 번
+        # - infinite: 정방향과 역방향을 조난자 탐지 또는 외부 명령 전까지 반복
+        self.declare_parameter("search_repeat_mode", "infinite")
 
         self.drone_id = str(self.get_parameter("drone_id").value)
         self.home_world_enu = [
@@ -163,7 +201,24 @@ class DroneControllerNode(TimestampedNode):
         self.safe_return_down_m = float(
             self.get_parameter("safe_return_down_m").value
         )
+        self.primary_waypoints = []
         self.search_waypoints = []
+        self.primary_next_index = 0
+        self.primary_search_direction = "FORWARD"
+        self.primary_search_completed = False
+        self.search_repeat_mode = str(
+            self.get_parameter("search_repeat_mode").value
+        ).strip().lower()
+        supported_repeat_modes = {
+            "once",
+            "forward_reverse_once",
+            "infinite",
+        }
+        if self.search_repeat_mode not in supported_repeat_modes:
+            raise ValueError(
+                "search_repeat_mode는 once, forward_reverse_once, "
+                f"infinite 중 하나여야 합니다: {self.search_repeat_mode!r}"
+            )
         self.search_plan_loaded = self._load_search_plan(log_failure=True)
         self.return_terrain_xy = None
         self.return_terrain_z = None
@@ -189,6 +244,33 @@ class DroneControllerNode(TimestampedNode):
             str(self.get_parameter("path_topic").value),
             path_qos,
         )
+        self.cooperative_transit_path_publisher = self.create_publisher(
+            NavPath,
+            str(
+                self.get_parameter(
+                    "cooperative_transit_path_topic"
+                ).value
+            ),
+            path_qos,
+        )
+        self.cooperative_search_path_publisher = self.create_publisher(
+            NavPath,
+            str(
+                self.get_parameter(
+                    "cooperative_search_path_topic"
+                ).value
+            ),
+            path_qos,
+        )
+        self.cooperative_plan_ack_publisher = self.create_publisher(
+            String,
+            str(
+                self.get_parameter(
+                    "cooperative_plan_ack_topic"
+                ).value
+            ),
+            10,
+        )
         self.movement_direction_publisher = self.create_publisher(
             Float32,
             str(self.get_parameter("movement_direction_topic").value),
@@ -203,6 +285,16 @@ class DroneControllerNode(TimestampedNode):
             10,
         )
         self.create_subscription(
+            String,
+            str(
+                self.get_parameter(
+                    "cooperative_plan_topic"
+                ).value
+            ),
+            self._cooperative_plan_callback,
+            10,
+        )
+        self.create_subscription(
             Bool,
             str(self.get_parameter("obstacle_topic").value),
             self._obstacle_callback,
@@ -212,6 +304,16 @@ class DroneControllerNode(TimestampedNode):
             Vector3Stamped,
             str(self.get_parameter("obstacle_clearances_topic").value),
             self._obstacle_clearances_callback,
+            10,
+        )
+        self.create_subscription(
+            Float32,
+            str(
+                self.get_parameter(
+                    "planning_obstacle_distance_topic"
+                ).value
+            ),
+            self._planning_obstacle_distance_callback,
             10,
         )
         self.create_subscription(
@@ -236,6 +338,12 @@ class DroneControllerNode(TimestampedNode):
         self.offboard_started = False
         self.flight_limits_applied = False
         self.search_task = None
+        self.active_search_mode = "NONE"
+        self.cooperative_plan_id = None
+        self.cooperative_transit_waypoints = []
+        self.cooperative_search_waypoints = []
+        self.cooperative_assignment = None
+        self.cooperative_repeat_mode = self.search_repeat_mode
         self.approach_task = None
         self.return_task = None
         self.landing_in_progress = False
@@ -249,6 +357,7 @@ class DroneControllerNode(TimestampedNode):
         self.latest_velocity_down_m_s = 0.0
         self.latest_yaw_deg = 0.0
         self.obstacle_blocked = False
+        self.proactive_obstacle_distance_m = float("inf")
         self.front_clearance_m = float("inf")
         self.left_clearance_m = float("inf")
         self.right_clearance_m = float("inf")
@@ -259,7 +368,7 @@ class DroneControllerNode(TimestampedNode):
         self.local_detour_body_x_m = 0.0
         self.local_detour_body_y_m = 0.0
         self.local_detour_valid = False
-        self.local_detour_nearest_360_m = 0.0
+        self.local_detour_nearest_360_m = float("inf")
         self.local_detour_received_at = float("-inf")
         self.current_status = "CREATED"
 
@@ -355,6 +464,9 @@ class DroneControllerNode(TimestampedNode):
                 if not waypoints:
                     raise ValueError(f"{self.drone_id} waypoints가 비어 있습니다")
                 self.search_waypoints = waypoints
+                self.primary_waypoints = list(waypoints)
+                if self.primary_next_index > len(self.primary_waypoints):
+                    self.primary_next_index = 0
                 self.search_plan_loaded = True
                 self.get_logger().info(
                     f"동적 수색 계획 로드: {self.drone_id}, "
@@ -383,6 +495,7 @@ class DroneControllerNode(TimestampedNode):
         self.search_waypoints = self._parse_waypoints(
             str(self.get_parameter("search_waypoints").value)
         )
+        self.primary_waypoints = list(self.search_waypoints)
         self.search_plan_loaded = False
         return False
 
@@ -626,8 +739,19 @@ class DroneControllerNode(TimestampedNode):
         if command == "TAKEOFF":
             self._submit(self._takeoff())
         elif command == "START_SEARCH":
-            self._submit(self._start_search())
+            self._submit(self._start_search(resume=False))
+        elif command == "RESUME_SEARCH":
+            self._submit(self._start_search(resume=True))
+        elif command.startswith("START_COOPERATIVE_SEARCH:"):
+            plan_id = raw_command.split(":", 1)[1].strip()
+            self._submit(self._start_cooperative_search(plan_id))
+        elif command == "MARK_PRIMARY_COMPLETE":
+            self.primary_next_index = len(self.primary_waypoints)
+            self.primary_search_completed = True
+            self._clear_cooperative_paths()
+            self._submit(self._hover())
         elif command.startswith("APPROACH_VICTIM:"):
+            self._clear_cooperative_paths()
             try:
                 fields = raw_command.split(":", 1)[1].split(",")
                 if len(fields) != 3:
@@ -640,11 +764,222 @@ class DroneControllerNode(TimestampedNode):
         elif command == "HOVER":
             self._submit(self._hover())
         elif command == "RETURN_HOME":
+            self._clear_cooperative_paths()
             self._submit(self._start_return_home())
         elif command == "LAND":
+            self._clear_cooperative_paths()
             self._submit(self._land())
         else:
             self.get_logger().warning(f"알 수 없는 명령: {command}")
+
+    def _cooperative_plan_callback(self, message):
+        """Mission Manager가 만든 드론별 협동 계획을 검증해 보관한다."""
+        try:
+            payload = json.loads(message.data)
+            if str(payload["drone_id"]) != self.drone_id:
+                return
+            plan_id = str(payload["plan_id"])
+            transit_world = payload["transit_waypoints_world_enu"]
+            search_world = payload["search_waypoints_world_enu"]
+            if not transit_world or not search_world:
+                raise ValueError("협동 계획 Waypoint가 비어 있습니다.")
+            self.cooperative_transit_waypoints = [
+                self._world_enu_to_local_ned(item)
+                for item in transit_world
+            ]
+            self.cooperative_search_waypoints = [
+                self._world_enu_to_local_ned(item)
+                for item in search_world
+            ]
+            repeat_mode = str(
+                payload.get("search_repeat_mode", self.search_repeat_mode)
+            ).strip().lower()
+            if repeat_mode not in {
+                "once",
+                "forward_reverse_once",
+                "infinite",
+            }:
+                raise ValueError(
+                    f"협동 search_repeat_mode 형식 오류: {repeat_mode!r}"
+                )
+            self.cooperative_plan_id = plan_id
+            self.cooperative_assignment = payload
+            self.cooperative_repeat_mode = repeat_mode
+            self._publish_cooperative_paths()
+
+            ack = String()
+            ack.data = plan_id
+            self.cooperative_plan_ack_publisher.publish(ack)
+            self.get_logger().info(
+                f"협동 수색 계획 수신: plan_id={plan_id}, "
+                f"transit={len(self.cooperative_transit_waypoints)}, "
+                f"search={len(self.cooperative_search_waypoints)}"
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            self.get_logger().error(f"협동 수색 계획 파싱 실패: {error}")
+
+    def _world_enu_to_local_ned(self, world_enu):
+        if not isinstance(world_enu, (list, tuple)) or len(world_enu) != 3:
+            raise ValueError(f"world_enu 형식 오류: {world_enu}")
+        world_x, world_y, world_z = [float(value) for value in world_enu]
+        return (
+            world_y - self.home_world_enu[1],
+            world_x - self.home_world_enu[0],
+            -(world_z - self.home_world_enu[2]),
+        )
+
+    async def _start_cooperative_search(self, plan_id):
+        if plan_id != self.cooperative_plan_id:
+            self.get_logger().error(
+                "협동 수색 시작 거부: 계획 ID 불일치 "
+                f"requested={plan_id}, loaded={self.cooperative_plan_id}"
+            )
+            self._publish_status("ERROR_COOP_PLAN_MISMATCH")
+            return
+        if not self.cooperative_search_waypoints:
+            self._publish_status("ERROR_COOP_PLAN_EMPTY")
+            return
+        await self._cancel_active_search()
+        self.stop_search_event.clear()
+        self.active_search_mode = "COOPERATIVE"
+        self.search_task = asyncio.create_task(self._cooperative_search_path())
+
+    async def _cooperative_search_path(self):
+        """협동 소구역을 설정 방식에 따라 반복 수색한다."""
+        try:
+            await self._ensure_offboard()
+            yaw_deg = float(self.get_parameter("search_yaw_deg").value)
+            hold_seconds = float(
+                self.get_parameter("waypoint_hold_seconds").value
+            )
+            self._publish_status("COOP_TRANSIT")
+            completed = await self._execute_waypoint_pass(
+                self.cooperative_transit_waypoints,
+                yaw_deg,
+                hold_seconds,
+                label="협동 진입",
+                status="COOP_TRANSIT",
+                allow_waypoint_skip=False,
+            )
+            if not completed:
+                return
+
+            mode = self.cooperative_repeat_mode
+            pass_count = 0
+            direction = "FORWARD"
+            cycle_count = 1
+
+            while not self.stop_search_event.is_set():
+                if direction == "FORWARD":
+                    # 역순 끝점에서 다시 출발할 때 첫 점 중복 명령을 피한다.
+                    waypoints = (
+                        self.cooperative_search_waypoints
+                        if pass_count == 0
+                        else self.cooperative_search_waypoints[1:]
+                    )
+                    status = "COOP_SEARCHING_FORWARD"
+                    label = f"협동 정방향 {cycle_count}회차"
+                else:
+                    # 정방향 마지막 점은 현재 위치이므로 제외한다.
+                    waypoints = list(
+                        reversed(self.cooperative_search_waypoints[:-1])
+                    )
+                    status = "COOP_SEARCHING_REVERSE"
+                    label = f"협동 역방향 {cycle_count}회차"
+
+                if waypoints:
+                    self._publish_status(status)
+                    completed = await self._execute_waypoint_pass(
+                        waypoints,
+                        yaw_deg,
+                        hold_seconds,
+                        label=label,
+                        status=status,
+                        allow_waypoint_skip=True,
+                    )
+                    if not completed:
+                        return
+
+                pass_count += 1
+                if mode == "once":
+                    break
+                if mode == "forward_reverse_once" and pass_count >= 2:
+                    break
+
+                if direction == "FORWARD":
+                    direction = "REVERSE"
+                    self.get_logger().warning(
+                        f"협동 수색 정방향 {cycle_count}회차 미탐: "
+                        "같은 소구역을 역방향으로 수색합니다."
+                    )
+                else:
+                    direction = "FORWARD"
+                    cycle_count += 1
+                    self.get_logger().warning(
+                        f"협동 수색 역방향 {cycle_count - 1}회차 미탐: "
+                        f"정방향 {cycle_count}회차를 계속합니다."
+                    )
+
+            if self.stop_search_event.is_set():
+                return
+
+            # 유한 반복 모드에서만 정상 완료 상태를 발행한다.
+            await self._hold_current_position(stop_search=False)
+            self._publish_status("COOP_SEARCH_FINISHED")
+        except OffboardError as error:
+            self.get_logger().error(f"협동 수색 Offboard 실패: {error}")
+            self._publish_status("ERROR_COOP_OFFBOARD")
+        except asyncio.CancelledError:
+            return
+        finally:
+            self.search_task = None
+            if self.active_search_mode == "COOPERATIVE":
+                self.active_search_mode = "NONE"
+
+    async def _execute_waypoint_pass(
+        self,
+        waypoints,
+        yaw_deg,
+        hold_seconds,
+        label,
+        status,
+        allow_waypoint_skip,
+        primary_indices=None,
+        primary_direction=None,
+    ):
+        total = len(waypoints)
+        for relative_index, waypoint in enumerate(waypoints, start=1):
+            if self.stop_search_event.is_set():
+                return False
+            north_m, east_m, down_m = waypoint
+            if primary_indices is not None:
+                waypoint_index = int(primary_indices[relative_index - 1])
+                self.primary_next_index = waypoint_index
+                self.primary_search_direction = str(primary_direction)
+            self.get_logger().info(
+                f"{label} {relative_index}/{total}: "
+                f"N={north_m:.1f}, E={east_m:.1f}, D={down_m:.1f}"
+            )
+            reached = await self._go_to_setpoint(
+                north_m,
+                east_m,
+                down_m,
+                yaw_deg,
+                float(self.get_parameter("waypoint_timeout_sec").value),
+                allow_avoidance=True,
+                resume_status=status,
+                allow_waypoint_skip=allow_waypoint_skip,
+            )
+            if not reached:
+                return False
+            if primary_indices is not None:
+                waypoint_index = int(primary_indices[relative_index - 1])
+                if str(primary_direction) == "FORWARD":
+                    self.primary_next_index = waypoint_index + 1
+                else:
+                    self.primary_next_index = waypoint_index - 1
+            await self._sleep_sim_time(max(0.0, hold_seconds))
+        return True
 
     def _obstacle_callback(self, message):
         self.obstacle_blocked = bool(message.data)
@@ -653,6 +988,12 @@ class DroneControllerNode(TimestampedNode):
         self.front_clearance_m = float(message.vector.x)
         self.left_clearance_m = float(message.vector.y)
         self.right_clearance_m = float(message.vector.z)
+
+    def _planning_obstacle_distance_callback(self, message):
+        value = float(message.data)
+        self.proactive_obstacle_distance_m = (
+            value if math.isfinite(value) and value >= 0.0 else float("inf")
+        )
 
     def _avoidance_vector_callback(self, message):
         self.avoidance_direction_body_rad = float(message.vector.x)
@@ -779,65 +1120,146 @@ class DroneControllerNode(TimestampedNode):
                 "PX4 수색 속도 설정: " + ", ".join(applied)
             )
 
-    async def _start_search(self):
+    async def _start_search(self, resume=False):
         if self.search_task and not self.search_task.done():
             self.get_logger().warning("이미 수색 경로를 실행 중입니다.")
             return
 
-        # ROS 노드가 Isaac Sim의 JSON 생성보다 먼저 시작될 수 있으므로
-        # 임무 시작 명령을 받을 때 최신 계획을 반드시 다시 읽는다.
-        if not self._load_search_plan(log_failure=True):
-            self.get_logger().error(
-                "동적 수색 계획이 없어 START_SEARCH를 거부합니다. "
-                "Isaac Sim과 ROS launch의 drone_count가 같은지 확인하세요."
-            )
-            self._publish_status("ERROR_SEARCH_PLAN")
+        # 첫 시작에서만 최신 JSON을 읽고 진행 방향과 인덱스를 초기화한다.
+        # 협동 수색 후 RESUME_SEARCH에서는 중단 전 방향과 목표 인덱스를 보존한다.
+        if not resume:
+            if not self._load_search_plan(log_failure=True):
+                self.get_logger().error(
+                    "동적 수색 계획이 없어 START_SEARCH를 거부합니다. "
+                    "Isaac Sim과 ROS launch의 drone_count가 같은지 확인하세요."
+                )
+                self._publish_status("ERROR_SEARCH_PLAN")
+                return
+            self.primary_next_index = 0
+            self.primary_search_direction = "FORWARD"
+            self.primary_search_completed = False
+        elif self.primary_search_completed:
+            self.get_logger().info("기본 담당 구역은 이미 완료 처리됐습니다.")
+            self._publish_status("SEARCH_FINISHED_NO_VICTIM")
             return
 
+        self._clear_cooperative_paths()
         self._publish_search_path()
         self.stop_search_event.clear()
+        self.active_search_mode = "PRIMARY"
         self.search_task = asyncio.create_task(self._search_path())
 
     async def _search_path(self):
+        """기본 담당 구역을 정방향·역방향으로 반복 수색한다."""
         try:
             await self._ensure_offboard()
-            self._publish_status("SEARCHING")
             yaw_deg = float(self.get_parameter("search_yaw_deg").value)
             hold_seconds = float(
                 self.get_parameter("waypoint_hold_seconds").value
             )
+            mode = self.search_repeat_mode
+            pass_count = 0
+            cycle_count = 1
 
-            for index, waypoint in enumerate(self.search_waypoints, start=1):
-                if self.stop_search_event.is_set():
+            while not self.stop_search_event.is_set():
+                waypoint_count = len(self.primary_waypoints)
+                if waypoint_count == 0:
+                    self._publish_status("ERROR_SEARCH_PLAN_EMPTY")
                     return
-                north_m, east_m, down_m = waypoint
-                self.get_logger().info(
-                    f"수색 {index}/{len(self.search_waypoints)}: "
-                    f"N={north_m:.1f}, E={east_m:.1f}, D={down_m:.1f}"
-                )
-                reached = await self._go_to_setpoint(
-                    north_m,
-                    east_m,
-                    down_m,
+
+                direction = self.primary_search_direction
+                next_index = int(self.primary_next_index)
+
+                if direction == "FORWARD":
+                    if next_index >= waypoint_count:
+                        if mode == "once":
+                            break
+                        self.primary_search_direction = "REVERSE"
+                        self.primary_next_index = max(0, waypoint_count - 2)
+                        direction = "REVERSE"
+                        next_index = self.primary_next_index
+                    indices = list(range(max(0, next_index), waypoint_count))
+                    status = "SEARCHING_FORWARD"
+                    label = f"기본 정방향 {cycle_count}회차"
+                else:
+                    if next_index < 0:
+                        if mode == "forward_reverse_once":
+                            break
+                        self.primary_search_direction = "FORWARD"
+                        self.primary_next_index = 1 if waypoint_count > 1 else 0
+                        direction = "FORWARD"
+                        next_index = self.primary_next_index
+                        cycle_count += 1
+                    indices = list(range(min(waypoint_count - 1, next_index), -1, -1))
+                    status = "SEARCHING_REVERSE"
+                    label = f"기본 역방향 {cycle_count}회차"
+
+                if not indices:
+                    # 한 점짜리 경로에서도 반복 루프가 과도하게 회전하지 않게 한다.
+                    await self._sleep_sim_time(max(0.1, hold_seconds))
+                    if direction == "FORWARD":
+                        self.primary_search_direction = "REVERSE"
+                        self.primary_next_index = waypoint_count - 1
+                    else:
+                        self.primary_search_direction = "FORWARD"
+                        self.primary_next_index = 0
+                        cycle_count += 1
+                    continue
+
+                waypoints = [self.primary_waypoints[index] for index in indices]
+                self._publish_status(status)
+                completed = await self._execute_waypoint_pass(
+                    waypoints,
                     yaw_deg,
-                    float(self.get_parameter("waypoint_timeout_sec").value),
-                    allow_avoidance=True,
+                    hold_seconds,
+                    label=label,
+                    status=status,
                     allow_waypoint_skip=True,
+                    primary_indices=indices,
+                    primary_direction=direction,
                 )
-                if not reached:
+                if not completed:
                     return
-                await self._sleep_sim_time(max(0.0, hold_seconds))
 
+                pass_count += 1
+                if mode == "once":
+                    break
+                if mode == "forward_reverse_once" and pass_count >= 2:
+                    break
+
+                if direction == "FORWARD":
+                    self.primary_search_direction = "REVERSE"
+                    self.primary_next_index = max(0, waypoint_count - 2)
+                    self.get_logger().warning(
+                        f"기본 수색 정방향 {cycle_count}회차 미탐: "
+                        "같은 경로를 역방향으로 수색합니다."
+                    )
+                else:
+                    self.primary_search_direction = "FORWARD"
+                    self.primary_next_index = 1 if waypoint_count > 1 else 0
+                    cycle_count += 1
+                    self.get_logger().warning(
+                        f"기본 수색 역방향 {cycle_count - 1}회차 미탐: "
+                        f"정방향 {cycle_count}회차를 계속합니다."
+                    )
+
+            if self.stop_search_event.is_set():
+                return
+
+            # 유한 반복 모드에서만 담당 구역 완료 상태를 발행한다.
+            self.primary_search_completed = True
+            self.primary_next_index = len(self.primary_waypoints)
             await self._hold_current_position(stop_search=False)
-            self.search_task = None
             self._publish_status("SEARCH_FINISHED_NO_VICTIM")
         except OffboardError as error:
             self.get_logger().error(f"Offboard 수색 실패: {error}")
             self._publish_status("ERROR_OFFBOARD")
         except asyncio.CancelledError:
-            # Hover/Return 명령이 오면 진행 중인 회피와 Waypoint 명령을
-            # 즉시 끝낸다. 취소는 오류가 아니다.
             return
+        finally:
+            self.search_task = None
+            if self.active_search_mode == "PRIMARY":
+                self.active_search_mode = "NONE"
 
     @staticmethod
     def _normalize_angle_deg(angle_deg):
@@ -1054,18 +1476,34 @@ class DroneControllerNode(TimestampedNode):
                     return False
                 if not avoided_horizontally:
                     if not await self._perform_vertical_avoidance(
-                        down_m,
-                        resume_status,
-                        avoidance_ceiling_down_m,
+                        planned_down_m=down_m,
+                        target_north_m=north_m,
+                        target_east_m=east_m,
+                        yaw_deg=command_yaw_deg,
+                        resume_status=resume_status,
+                        highest_allowed_down=avoidance_ceiling_down_m,
                     ):
                         if (
                             self.stop_search_event is not None
                             and self.stop_search_event.is_set()
                         ):
                             return False
+                        # 구조 수색 Waypoint는 한 지점에서 여러 차례
+                        # Hover 재계획하지 않는다. 수평·수직 회피가 모두
+                        # 실패하면 현재 점만 포기하고 다음 수색점으로 이어간다.
+                        # 조난자 접근·복귀처럼 건너뛰기가 금지된 이동만 짧게
+                        # 재계획한 뒤 최종 실패 상태로 전환한다.
+                        if allow_waypoint_skip:
+                            self.get_logger().warning(
+                                "수평·수직 회피가 모두 실패한 수색 Waypoint를 "
+                                "즉시 건너뛰고 다음 수색점으로 이동합니다."
+                            )
+                            self._publish_status(resume_status)
+                            return True
+
                         avoidance_replans += 1
                         max_replans = max(
-                            1,
+                            0,
                             int(
                                 self.get_parameter(
                                     "avoidance_replan_attempts"
@@ -1076,7 +1514,7 @@ class DroneControllerNode(TimestampedNode):
                         if avoidance_replans <= max_replans:
                             self._publish_status("AVOIDANCE_REPLANNING")
                             retry_hover = max(
-                                0.2,
+                                0.1,
                                 float(
                                     self.get_parameter(
                                         "avoidance_retry_hover_sec"
@@ -1084,7 +1522,7 @@ class DroneControllerNode(TimestampedNode):
                                 ),
                             )
                             self.get_logger().warning(
-                                f"회피 경로 재계획 "
+                                f"필수 이동 회피 경로 재계획 "
                                 f"{avoidance_replans}/{max_replans}: "
                                 f"{retry_hover:.1f}초 Hover 후 LiDAR 재검사"
                             )
@@ -1092,19 +1530,12 @@ class DroneControllerNode(TimestampedNode):
                             deadline += self._sim_time_sec() - avoidance_started
                             continue
 
-                        if allow_waypoint_skip:
-                            self.get_logger().warning(
-                                "반복 회피가 불가능한 수색 Waypoint를 건너뛰고 "
-                                "다음 수색점에서 경로를 다시 연결합니다."
-                            )
-                            self._publish_status(resume_status)
-                            return True
-
                         self._publish_status("ERROR_AVOIDANCE_EXHAUSTED")
                         await self._hold_current_position(stop_search=True)
                         return False
-                    # 상승 회피 후에는 원래 낮은 고도로 즉시 복귀하지 않는다.
-                    commanded_down_m = min(down_m, self.latest_down_m)
+                    # 상승 회피 함수가 높은 고도에서 장애물을 건넌 뒤
+                    # 안전한 위치에서 계획 고도까지 단계 하강을 완료한다.
+                    commanded_down_m = down_m
                 else:
                     commanded_down_m = down_m
                 avoidance_replans = 0
@@ -1458,21 +1889,43 @@ class DroneControllerNode(TimestampedNode):
     async def _perform_vertical_avoidance(
         self,
         planned_down_m,
+        target_north_m,
+        target_east_m,
+        yaw_deg,
         resume_status="SEARCHING",
         highest_allowed_down=None,
     ):
-        """나무를 만나면 현재 XY에서 단계적으로 상승한다."""
-        self._publish_status("AVOIDING_OBSTACLE")
-        step = float(self.get_parameter("avoidance_climb_step_m").value)
-        max_climb = float(
-            self.get_parameter("avoidance_max_climb_m").value
+        """수평 경로가 없을 때 상승하여 장애물을 건넌 뒤 다시 하강한다.
+
+        단순히 높은 고도에서 LiDAR가 clear가 된 순간 성공으로 끝내지 않는다.
+        원래 목표 방향으로 최소 통과거리를 이동하고, 통로가 연속으로
+        깨끗한지 확인한 다음 현재 XY에서 계획 고도까지 단계적으로 하강한다.
+        하강 중 장애물이 다시 잡히면 회피 고도로 복귀해 더 전진한 뒤
+        제한 횟수 안에서 하강을 다시 시도한다.
+        """
+        self._publish_status("AVOIDING_OBSTACLE_VERTICAL_CLIMB")
+        # 상승하면 현재 높이 slice에서 원래 장애물이 사라질 수 있으므로
+        # 상승 전의 전방/선제 장애물 거리를 통과거리 계산용으로 보존한다.
+        initial_front_clearance_m = float(self.front_clearance_m)
+        initial_proactive_distance_m = float(
+            self.proactive_obstacle_distance_m
         )
-        settle = float(self.get_parameter("avoidance_settle_sec").value)
-        climb_timeout = float(
-            self.get_parameter("avoidance_climb_timeout_sec").value
+        step = max(0.5, float(self.get_parameter("avoidance_climb_step_m").value))
+        max_climb = max(
+            step, float(self.get_parameter("avoidance_max_climb_m").value)
         )
-        altitude_tolerance = float(
-            self.get_parameter("avoidance_altitude_tolerance_m").value
+        settle = max(
+            0.2, float(self.get_parameter("avoidance_settle_sec").value)
+        )
+        climb_timeout = max(
+            2.0,
+            float(self.get_parameter("avoidance_climb_timeout_sec").value),
+        )
+        altitude_tolerance = max(
+            0.1,
+            float(
+                self.get_parameter("avoidance_altitude_tolerance_m").value
+            ),
         )
         step_retries = max(
             0,
@@ -1493,21 +1946,20 @@ class DroneControllerNode(TimestampedNode):
             f"최고D={highest_allowed_down:.1f}"
         )
 
-        while self.obstacle_blocked:
+        # 1) 현재 XY에서 단계적으로 상승한다. 각 단계에서 진행 통로가
+        # settle 시간 동안 연속 clear가 될 때까지 확인한다.
+        clear_confirmed = not self.obstacle_blocked
+        while not clear_confirmed:
             if self.stop_search_event is not None and self.stop_search_event.is_set():
                 return False
-            next_down = max(
-                highest_allowed_down,
-                self.latest_down_m - step,
-            )
+            next_down = max(highest_allowed_down, self.latest_down_m - step)
             if (
-                self.latest_down_m
-                <= highest_allowed_down + altitude_tolerance
+                self.latest_down_m <= highest_allowed_down + altitude_tolerance
                 and self.obstacle_blocked
             ):
                 self.get_logger().warning(
-                    "최대 회피 상승고도에서도 장애물 감지: "
-                    "현재 고도에서 수평 경로를 다시 계획합니다."
+                    "최대 회피 상승고도에서도 통로가 차단됨: "
+                    "현재 고도에서 수평 경로 재계획"
                 )
                 self._publish_status("AVOIDANCE_REPLANNING")
                 await self._hold_current_position(stop_search=False)
@@ -1517,91 +1969,419 @@ class DroneControllerNode(TimestampedNode):
                 f"장애물 회피 상승: D={self.latest_down_m:.1f} → "
                 f"{next_down:.1f}"
             )
-            step_reached = False
-            for retry_index in range(step_retries + 1):
-                climb_start_down = self.latest_down_m
-                await self.drone.offboard.set_position_ned(
-                    PositionNedYaw(
-                        self.latest_north_m,
-                        self.latest_east_m,
-                        next_down,
-                        self.latest_yaw_deg,
-                    )
-                )
-                # 설정 속도와 이동거리를 함께 반영해 고정 8초보다 현실적인
-                # 단계 제한시간을 만든다. PX4 위치 정착 오차도 0.5m까지 허용한다.
-                vertical_speed = max(
-                    0.2,
-                    float(
-                        self.get_parameter(
-                            "search_vertical_speed_up_m_s"
-                        ).value
-                    ),
-                )
-                expected_travel_sec = (
-                    abs(climb_start_down - next_down) / vertical_speed
-                )
-                step_deadline = self._sim_time_sec() + max(
-                    climb_timeout,
-                    expected_travel_sec * 3.0 + 3.0,
-                    settle * 4.0,
-                )
-                while self._sim_time_sec() < step_deadline:
-                    if (
-                        self.stop_search_event is not None
-                        and self.stop_search_event.is_set()
-                    ):
-                        return False
-                    if self.latest_down_m <= next_down + altitude_tolerance:
-                        step_reached = True
-                        break
-                    await asyncio.sleep(0.1)
-                if step_reached:
-                    break
-                if retry_index < step_retries:
-                    self.get_logger().warning(
-                        f"상승 단계 미도달: 명령 재전송 "
-                        f"{retry_index + 1}/{step_retries}"
-                    )
-                    await self._hold_current_position(stop_search=False)
-                    await self._sleep_sim_time(max(0.2, settle))
-            if not step_reached:
+            reached = await self._command_vertical_level(
+                self.latest_north_m,
+                self.latest_east_m,
+                next_down,
+                self.latest_yaw_deg,
+                climb_timeout,
+                altitude_tolerance,
+                ascending=True,
+                retries=step_retries,
+            )
+            if not reached:
                 self.get_logger().warning(
-                    "상승 회피 단계 고도 도달 실패: "
-                    "Hover 후 수평 경로를 다시 계획합니다."
+                    "상승 회피 단계 고도 도달 실패 → Hover 후 재계획"
                 )
                 self._publish_status("AVOIDANCE_REPLANNING")
                 await self._hold_current_position(stop_search=False)
                 return False
 
-            # 목표 고도 도달 후에도 LiDAR가 settle 시간 동안 연속해서
-            # 깨끗해야만 원래 진행 방향을 다시 명령한다.
-            clear_since = None
-            validation_deadline = self._sim_time_sec() + max(
-                2.0,
-                settle * 3.0,
+            clear_confirmed = await self._wait_for_clear_corridor(settle)
+
+        escape_down_m = float(self.latest_down_m)
+        self.get_logger().info(
+            f"수직 회피 고도 확보: D={escape_down_m:.1f}. "
+            "원래 진행 방향으로 장애물 통과를 시작합니다."
+        )
+
+        min_forward = max(
+            1.0,
+            float(
+                self.get_parameter("vertical_escape_min_forward_m").value
+            ),
+        )
+        max_forward = max(
+            min_forward,
+            float(
+                self.get_parameter("vertical_escape_max_forward_m").value
+            ),
+        )
+        pass_margin = max(
+            0.5,
+            float(
+                self.get_parameter(
+                    "vertical_escape_obstacle_pass_margin_m"
+                ).value
+            ),
+        )
+        obstacle_distance_candidates = [
+            value
+            for value in (
+                initial_front_clearance_m,
+                initial_proactive_distance_m,
             )
-            while self._sim_time_sec() < validation_deadline:
-                if (
-                    self.stop_search_event is not None
-                    and self.stop_search_event.is_set()
+            if math.isfinite(value) and value >= 0.0
+        ]
+        if obstacle_distance_candidates:
+            estimated_obstacle_distance = min(obstacle_distance_candidates)
+            initial_cross_distance = min(
+                max_forward,
+                max(min_forward, estimated_obstacle_distance + pass_margin),
+            )
+        else:
+            estimated_obstacle_distance = float("inf")
+            initial_cross_distance = min_forward
+        self.get_logger().info(
+            "수직 회피 통과거리 계산: "
+            f"장애물거리="
+            f"{estimated_obstacle_distance if math.isfinite(estimated_obstacle_distance) else 'UNKNOWN'}, "
+            f"통과거리={initial_cross_distance:.1f}m"
+        )
+        extra_forward = max(
+            0.5,
+            float(
+                self.get_parameter("vertical_escape_extra_forward_m").value
+            ),
+        )
+        descent_retries = max(
+            0,
+            int(
+                self.get_parameter("vertical_escape_descent_retries").value
+            ),
+        )
+
+        # 2) 첫 하강 시도 전에는 최소 통과거리만큼 전진한다. 하강 중
+        # 장애물이 다시 감지되면 회피 고도로 복귀하고 extra_forward만큼
+        # 더 전진한 뒤 다시 하강한다.
+        for descent_attempt in range(descent_retries + 1):
+            remaining_to_target = math.hypot(
+                target_north_m - self.latest_north_m,
+                target_east_m - self.latest_east_m,
+            )
+            if remaining_to_target > 0.4:
+                requested_forward = (
+                    initial_cross_distance
+                    if descent_attempt == 0
+                    else extra_forward
+                )
+                cross_distance = min(remaining_to_target, requested_forward)
+                if not await self._cross_obstacle_at_escape_altitude(
+                    target_north_m=target_north_m,
+                    target_east_m=target_east_m,
+                    escape_down_m=escape_down_m,
+                    yaw_deg=yaw_deg,
+                    cross_distance_m=cross_distance,
                 ):
                     return False
-                if self.obstacle_blocked:
-                    clear_since = None
-                    await asyncio.sleep(0.1)
-                    break
-                if clear_since is None:
-                    clear_since = self._sim_time_sec()
-                elif self._sim_time_sec() - clear_since >= settle:
-                    self._publish_status(resume_status)
+
+            # 높은 고도에서 통로가 연속 clear인지 다시 확인한다.
+            clear_hold = max(
+                0.2,
+                float(
+                    self.get_parameter("vertical_escape_clear_hold_sec").value
+                ),
+            )
+            if not await self._wait_for_clear_corridor(
+                clear_hold, reactive_only=True
+            ):
+                self.get_logger().warning(
+                    "통과 후 통로 clear 확인 실패 → 추가 전진 후 재검사"
+                )
+                if descent_attempt >= descent_retries:
+                    return False
+                continue
+
+            self._publish_status("AVOIDING_OBSTACLE_VERTICAL_DESCENT")
+            descent_ok = await self._descend_after_vertical_escape(
+                planned_down_m=planned_down_m,
+                escape_down_m=escape_down_m,
+                yaw_deg=yaw_deg,
+                altitude_tolerance=altitude_tolerance,
+            )
+            if descent_ok:
+                self.get_logger().info(
+                    f"수직 회피 완료: 장애물 통과 후 계획 고도 "
+                    f"D={planned_down_m:.1f} 복귀"
+                )
+                self._publish_status(resume_status)
+                return True
+
+            if descent_attempt >= descent_retries:
+                break
+            self.get_logger().warning(
+                f"하강 중 장애물 재감지: 회피 고도로 복귀 후 "
+                f"추가 전진 {descent_attempt + 1}/{descent_retries}"
+            )
+            if not await self._command_vertical_level(
+                self.latest_north_m,
+                self.latest_east_m,
+                escape_down_m,
+                self.latest_yaw_deg,
+                climb_timeout,
+                altitude_tolerance,
+                ascending=True,
+                retries=step_retries,
+            ):
+                return False
+
+        self.get_logger().warning(
+            "수직 회피 후 안전한 하강 지점을 찾지 못함 → 재계획"
+        )
+        self._publish_status("AVOIDANCE_REPLANNING")
+        await self._hold_current_position(stop_search=False)
+        return False
+
+    async def _cross_obstacle_at_escape_altitude(
+        self,
+        target_north_m,
+        target_east_m,
+        escape_down_m,
+        yaw_deg,
+        cross_distance_m,
+    ):
+        """높은 회피 고도를 유지한 채 원래 목표 방향으로 전진한다."""
+        remaining = math.hypot(
+            target_north_m - self.latest_north_m,
+            target_east_m - self.latest_east_m,
+        )
+        if remaining <= 0.4 or cross_distance_m <= 0.2:
+            return True
+        direction_north = (target_north_m - self.latest_north_m) / remaining
+        direction_east = (target_east_m - self.latest_east_m) / remaining
+        travel = min(float(cross_distance_m), remaining)
+        cross_north = self.latest_north_m + direction_north * travel
+        cross_east = self.latest_east_m + direction_east * travel
+        cross_tolerance = max(
+            0.3,
+            float(
+                self.get_parameter("vertical_escape_cross_tolerance_m").value
+            ),
+        )
+        timeout = max(
+            3.0,
+            float(
+                self.get_parameter("vertical_escape_cross_timeout_sec").value
+            ),
+        )
+        self._publish_status("AVOIDING_OBSTACLE_VERTICAL_CROSS")
+        self.get_logger().warning(
+            f"상승 고도 장애물 통과: {travel:.1f}m → "
+            f"N={cross_north:.1f}, E={cross_east:.1f}, D={escape_down_m:.1f}"
+        )
+        self._publish_movement_direction(cross_north, cross_east)
+        await self.drone.offboard.set_position_ned(
+            PositionNedYaw(
+                cross_north,
+                cross_east,
+                escape_down_m,
+                yaw_deg,
+            )
+        )
+        deadline = self._sim_time_sec() + timeout
+        blocked_since = None
+        while self._sim_time_sec() < deadline:
+            if self.stop_search_event is not None and self.stop_search_event.is_set():
+                return False
+            self._publish_movement_direction(cross_north, cross_east)
+            horizontal_error = math.hypot(
+                self.latest_north_m - cross_north,
+                self.latest_east_m - cross_east,
+            )
+            hard_stop = float(
+                self.get_parameter("local_detour_hard_stop_distance_m").value
+            )
+            if self.local_detour_nearest_360_m < hard_stop:
+                self.get_logger().warning(
+                    "상승 고도 전진 중 근접 장애물 감지 → 즉시 Hover"
+                )
+                await self._brake_before_avoidance()
+                return False
+            if self.obstacle_blocked:
+                if blocked_since is None:
+                    blocked_since = self._sim_time_sec()
+                elif self._sim_time_sec() - blocked_since >= 0.5:
+                    self.get_logger().warning(
+                        "상승 고도 전진 통로가 계속 차단됨 → 더 높은 고도 재계획"
+                    )
+                    await self._brake_before_avoidance()
+                    return False
+            else:
+                blocked_since = None
+            if horizontal_error <= cross_tolerance:
+                await self._hold_current_position(stop_search=False)
+                return True
+            await asyncio.sleep(0.1)
+        self.get_logger().warning("상승 고도 장애물 통과 시간 초과")
+        await self._hold_current_position(stop_search=False)
+        return False
+
+    async def _descend_after_vertical_escape(
+        self,
+        planned_down_m,
+        escape_down_m,
+        yaw_deg,
+        altitude_tolerance,
+    ):
+        """현재 XY에서 계획 고도로 단계 하강하고 각 단계의 안전을 확인한다."""
+        descent_step = max(
+            0.3,
+            float(
+                self.get_parameter("vertical_escape_descent_step_m").value
+            ),
+        )
+        descent_timeout = max(
+            2.0,
+            float(
+                self.get_parameter("vertical_escape_descent_timeout_sec").value
+            ),
+        )
+        clear_sec = max(
+            0.1,
+            float(
+                self.get_parameter("vertical_escape_descent_clear_sec").value
+            ),
+        )
+        while self.latest_down_m < planned_down_m - altitude_tolerance:
+            if self.stop_search_event is not None and self.stop_search_event.is_set():
+                return False
+            next_down = min(planned_down_m, self.latest_down_m + descent_step)
+            self.get_logger().info(
+                f"회피 후 단계 하강: D={self.latest_down_m:.1f} → "
+                f"{next_down:.1f}"
+            )
+            reached = await self._command_vertical_level(
+                self.latest_north_m,
+                self.latest_east_m,
+                next_down,
+                yaw_deg,
+                descent_timeout,
+                altitude_tolerance,
+                ascending=False,
+                retries=0,
+                abort_on_obstacle=True,
+            )
+            if not reached:
+                # 하강 중 obstacle_blocked 또는 hard stop이 잡힌 경우
+                # 현재 고도에서 멈춘 뒤 호출자가 escape_down으로 재상승한다.
+                await self._hold_current_position(stop_search=False)
+                return False
+            if not await self._wait_for_clear_corridor(
+                clear_sec, reactive_only=True
+            ):
+                await self._hold_current_position(stop_search=False)
+                return False
+        return True
+
+    async def _command_vertical_level(
+        self,
+        north_m,
+        east_m,
+        target_down_m,
+        yaw_deg,
+        timeout_sec,
+        altitude_tolerance,
+        ascending,
+        retries=0,
+        abort_on_obstacle=False,
+    ):
+        """한 단계 수직 이동 명령을 재전송하며 목표 고도 도달을 확인한다."""
+        vertical_speed = max(
+            0.2,
+            float(
+                self.get_parameter(
+                    "search_vertical_speed_up_m_s"
+                    if ascending
+                    else "search_vertical_speed_down_m_s"
+                ).value
+            ),
+        )
+        for retry_index in range(max(0, int(retries)) + 1):
+            start_down = self.latest_down_m
+            await self.drone.offboard.set_position_ned(
+                PositionNedYaw(north_m, east_m, target_down_m, yaw_deg)
+            )
+            expected = abs(start_down - target_down_m) / vertical_speed
+            deadline = self._sim_time_sec() + max(
+                float(timeout_sec), expected * 3.0 + 2.0
+            )
+            while self._sim_time_sec() < deadline:
+                if self.stop_search_event is not None and self.stop_search_event.is_set():
+                    return False
+                if abort_on_obstacle:
+                    hard_stop = float(
+                        self.get_parameter(
+                            "local_detour_hard_stop_distance_m"
+                        ).value
+                    )
+                    if self._reactive_obstacle_present(hard_stop):
+                        self.get_logger().warning(
+                            "단계 하강 중 근거리 장애물 감지 → 하강 중단"
+                        )
+                        return False
+                if ascending:
+                    reached = self.latest_down_m <= target_down_m + altitude_tolerance
+                else:
+                    reached = self.latest_down_m >= target_down_m - altitude_tolerance
+                if reached:
                     return True
                 await asyncio.sleep(0.1)
+            if retry_index < max(0, int(retries)):
+                self.get_logger().warning(
+                    f"수직 단계 미도달: 명령 재전송 "
+                    f"{retry_index + 1}/{int(retries)}"
+                )
+                await self._hold_current_position(stop_search=False)
+        return False
 
-        if self.stop_search_event is not None and self.stop_search_event.is_set():
-            return False
-        self._publish_status(resume_status)
-        return True
+    def _reactive_obstacle_present(self, hard_stop_distance=None):
+        """현재 고도에서 실제 근접 충돌 위험이 있는지 확인한다.
+
+        선제 A*용 10m 통로 차단은 포함하지 않는다. 수직 회피 후 하강
+        가능 여부는 먼 다음 장애물이 아니라 현재 위치 주변의 LiDAR
+        여유거리로 판단해야 불필요하게 높은 고도에 머무르지 않는다.
+        """
+        hard_stop = (
+            float(hard_stop_distance)
+            if hard_stop_distance is not None
+            else float(
+                self.get_parameter("local_detour_hard_stop_distance_m").value
+            )
+        )
+        required_front = float(
+            self.get_parameter("avoidance_front_clearance_m").value
+        )
+        front_blocked = (
+            math.isfinite(self.front_clearance_m)
+            and self.front_clearance_m < required_front
+        )
+        emergency_blocked = self.local_detour_nearest_360_m < hard_stop
+        return bool(front_blocked or emergency_blocked)
+
+    async def _wait_for_clear_corridor(
+        self, required_clear_sec, reactive_only=False
+    ):
+        """진행 통로가 연속해서 clear인 시간을 확인한다."""
+        required = max(0.0, float(required_clear_sec))
+        deadline = self._sim_time_sec() + max(2.0, required * 4.0)
+        clear_since = None
+        while self._sim_time_sec() < deadline:
+            if self.stop_search_event is not None and self.stop_search_event.is_set():
+                return False
+            blocked = (
+                self._reactive_obstacle_present()
+                if reactive_only
+                else self.obstacle_blocked
+            )
+            if blocked:
+                clear_since = None
+            else:
+                if clear_since is None:
+                    clear_since = self._sim_time_sec()
+                elif self._sim_time_sec() - clear_since >= required:
+                    return True
+            await asyncio.sleep(0.1)
+        return False
 
     async def _hover(self):
         if self.stop_search_event is not None:
@@ -2147,6 +2927,36 @@ class DroneControllerNode(TimestampedNode):
         self.path_publisher.publish(message)
         if self.path_timer is not None:
             self.path_timer.cancel()
+
+    def _make_nav_path(self, waypoints):
+        message = NavPath()
+        message.header.stamp = self.get_clock().now().to_msg()
+        message.header.frame_id = str(self.get_parameter("map_frame").value)
+        for north_m, east_m, down_m in waypoints:
+            pose = PoseStamped()
+            pose.header = message.header
+            pose.pose.position.x = self.home_world_enu[0] + east_m
+            pose.pose.position.y = self.home_world_enu[1] + north_m
+            pose.pose.position.z = self.home_world_enu[2] - down_m
+            pose.pose.orientation.w = 1.0
+            message.poses.append(pose)
+        return message
+
+    def _publish_cooperative_paths(self):
+        self.cooperative_transit_path_publisher.publish(
+            self._make_nav_path(self.cooperative_transit_waypoints)
+        )
+        self.cooperative_search_path_publisher.publish(
+            self._make_nav_path(self.cooperative_search_waypoints)
+        )
+
+    def _clear_cooperative_paths(self):
+        self.cooperative_transit_path_publisher.publish(
+            self._make_nav_path([])
+        )
+        self.cooperative_search_path_publisher.publish(
+            self._make_nav_path([])
+        )
 
     def destroy_node(self):
         if self.stop_search_event is not None:
