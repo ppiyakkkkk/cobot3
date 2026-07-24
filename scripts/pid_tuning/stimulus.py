@@ -38,6 +38,9 @@ async def send_step(drone, stage, axis, step_mag, hover_thrust):
         )
         return 0.0, step_mag
 
+    # velocity 단계는 body-frame forward를 보내지만, telemetry_logger의 추출기는
+    # NED north_m_s를 읽는다. return_to_home_hover가 매 테스트 전 yaw=0으로
+    # 복귀시키므로 body-forward == NED-north가 성립한다 (그 전제가 깨지면 불일치).
     if stage == "velocity":
         forward = step_mag if axis == "horizontal" else 0.0
         down = -step_mag if axis == "vertical" else 0.0

@@ -11,13 +11,17 @@ HOME_POSITION_TOLERANCE_M = 0.15
 FALLBACK_HOVER_THRUST = 0.5
 
 
-async def connect(system_address):
+async def connect(system_address, timeout_sec=30.0):
     drone = System()
     await drone.connect(system_address=system_address)
-    async for state in drone.core.connection_state():
-        if state.is_connected:
-            print("[OK] PX4 연결 성공")
-            break
+
+    async def _wait_connected():
+        async for state in drone.core.connection_state():
+            if state.is_connected:
+                print("[OK] PX4 연결 성공")
+                return
+
+    await asyncio.wait_for(_wait_connected(), timeout=timeout_sec)
     return drone
 
 

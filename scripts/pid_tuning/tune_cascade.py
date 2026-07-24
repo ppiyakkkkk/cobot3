@@ -23,7 +23,6 @@ AXIS_CHOICES = {
 }
 
 BASELINE_SEC = 0.5
-SAFETY_MARGIN_SEC = 5.0
 ALTITUDE_DIVERGENCE_LIMIT_M_S = 3.0
 
 
@@ -51,7 +50,10 @@ def parse_args():
         parser.error(
             f"--stage {args.stage}에는 --axis {AXIS_CHOICES[args.stage]} 중 하나만 허용됨"
         )
-    args.set_params = parse_set_params(args.set_pairs)
+    try:
+        args.set_params = parse_set_params(args.set_pairs)
+    except ValueError as error:
+        parser.error(str(error))
     if args.step_mag is None:
         args.step_mag = stimulus.DEFAULT_STEP_MAG[args.stage]
     return args
@@ -72,9 +74,7 @@ async def collect_during_stimulus(drone, stage, axis, step_mag, hover_thrust, du
     setpoint_initial, setpoint_final = await stimulus.send_step(
         drone, stage, axis, step_mag, hover_thrust
     )
-    await asyncio.wait_for(
-        asyncio.sleep(duration_sec), timeout=duration_sec + SAFETY_MARGIN_SEC
-    )
+    await asyncio.sleep(duration_sec)
     task.cancel()
     try:
         await task
@@ -149,6 +149,10 @@ async def run(args):
                 "[WARN] 요청한 텔레메트리 rate가 반영되지 않은 것으로 보임 "
                 f"(기대 dt={expected_dt:.3f}s, 실제 dt={actual_dt:.3f}s)"
             )
+
+    if not values:
+        print("[ERROR] 텔레메트리 샘플을 하나도 수집하지 못함 — 지표/플롯/이력 생략")
+        return
 
     overshoot = metrics.overshoot_pct(setpoint_initial, setpoint_final, values)
     rise = metrics.rise_time(times, values, setpoint_initial, setpoint_final)
