@@ -191,9 +191,10 @@ obstacle_monitor_01:
     movement_direction_topic: /drone_01/navigation/direction_body_rad
     mission_state_topic: /mission/state
     safety_distance_m: 4.0
-    # 360° 비상 정지는 실제 충돌 임박 거리에서만 사용한다. 옆 나무가
-    # 1~2m 떨어진 정상 통로까지 전방 차단으로 오인하지 않게 한다.
-    emergency_distance_m: 1.2
+    # 전방은 1.2m에서 즉시 정지하고, 측면·후방은 실제 충돌에 가까운
+    # 0.75m에서만 정지한다. 옆 나무가 약 1.1m에 있어도 전방이 비면 통과한다.
+    emergency_front_distance_m: 1.2
+    emergency_side_distance_m: 0.75
     front_sector_half_angle_deg: 35.0
     side_sector_offset_deg: 70.0
     side_sector_half_angle_deg: 30.0
@@ -446,7 +447,8 @@ obstacle_monitor_02:
     movement_direction_topic: /drone_02/navigation/direction_body_rad
     mission_state_topic: /mission/state
     safety_distance_m: 4.0
-    emergency_distance_m: 1.2
+    emergency_front_distance_m: 1.2
+    emergency_side_distance_m: 0.75
     front_sector_half_angle_deg: 35.0
     side_sector_offset_deg: 70.0
     side_sector_half_angle_deg: 30.0
@@ -699,7 +701,8 @@ obstacle_monitor_03:
     movement_direction_topic: /drone_03/navigation/direction_body_rad
     mission_state_topic: /mission/state
     safety_distance_m: 4.0
-    emergency_distance_m: 1.2
+    emergency_front_distance_m: 1.2
+    emergency_side_distance_m: 0.75
     front_sector_half_angle_deg: 35.0
     side_sector_offset_deg: 70.0
     side_sector_half_angle_deg: 30.0
@@ -952,7 +955,8 @@ obstacle_monitor_04:
     movement_direction_topic: /drone_04/navigation/direction_body_rad
     mission_state_topic: /mission/state
     safety_distance_m: 4.0
-    emergency_distance_m: 1.2
+    emergency_front_distance_m: 1.2
+    emergency_side_distance_m: 0.75
     front_sector_half_angle_deg: 35.0
     side_sector_offset_deg: 70.0
     side_sector_half_angle_deg: 30.0

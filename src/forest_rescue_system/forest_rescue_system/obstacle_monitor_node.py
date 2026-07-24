@@ -48,7 +48,11 @@ class ObstacleMonitorNode(TimestampedNode):
         )
         self.declare_parameter("mission_state_topic", "/mission/state")
         self.declare_parameter("safety_distance_m", 4.0)
-        self.declare_parameter("emergency_distance_m", 1.2)
+        # 진행 방향 앞쪽은 기존 1.2m 비상거리를 유지한다.
+        # 측면·후방은 기체와 실제 충돌할 정도인 0.75m에서만 정지해,
+        # 옆 나무와 1m 이상 간격을 두고 통과할 때 불필요하게 멈추지 않는다.
+        self.declare_parameter("emergency_front_distance_m", 1.2)
+        self.declare_parameter("emergency_side_distance_m", 0.75)
         self.declare_parameter("front_sector_half_angle_deg", 45.0)
         self.declare_parameter("side_sector_offset_deg", 70.0)
         self.declare_parameter("side_sector_half_angle_deg", 30.0)
@@ -397,14 +401,50 @@ class ObstacleMonitorNode(TimestampedNode):
         close_front_points = int(
             np.count_nonzero(front_mask & (distances < safety_distance))
         )
-        emergency_distance = float(
-            self.get_parameter("emergency_distance_m").value
+        emergency_front_distance = max(
+            0.1,
+            float(
+                self.get_parameter(
+                    "emergency_front_distance_m"
+                ).value
+            ),
         )
-        close_360_points = int(
-            np.count_nonzero(distances < emergency_distance)
+        emergency_side_distance = max(
+            0.1,
+            float(
+                self.get_parameter(
+                    "emergency_side_distance_m"
+                ).value
+            ),
         )
+
+        # 진행 방향 앞쪽과 측면·후방의 비상 정지 반경을 분리한다.
+        # 예: 오른쪽 나무가 1.1m에 있어도 전방이 비어 있으면 계속 전진하고,
+        # 측면 장애물이 0.75m 안으로 들어왔을 때만 즉시 정지한다.
+        non_front_mask = np.logical_not(front_mask)
+        close_emergency_front_points = int(
+            np.count_nonzero(
+                front_mask
+                & (distances < emergency_front_distance)
+            )
+        )
+        close_emergency_side_points = int(
+            np.count_nonzero(
+                non_front_mask
+                & (distances < emergency_side_distance)
+            )
+        )
+
         front_blocked = close_front_points >= minimum_points
-        emergency_blocked = close_360_points >= minimum_points
+        emergency_front_blocked = (
+            close_emergency_front_points >= minimum_points
+        )
+        emergency_side_blocked = (
+            close_emergency_side_points >= minimum_points
+        )
+        emergency_blocked = (
+            emergency_front_blocked or emergency_side_blocked
+        )
         reactive_blocked = front_blocked or emergency_blocked
         (
             proactive_blocked,
@@ -475,6 +515,8 @@ class ObstacleMonitorNode(TimestampedNode):
             recommended_valid=recommended_valid,
             reactive_blocked=reactive_blocked,
             emergency_blocked=emergency_blocked,
+            emergency_front_blocked=emergency_front_blocked,
+            emergency_side_blocked=emergency_side_blocked,
             proactive_blocked=proactive_blocked,
             proactive_nearest_m=proactive_nearest_m,
             proactive_voxel_count=proactive_voxel_count,
@@ -582,6 +624,8 @@ class ObstacleMonitorNode(TimestampedNode):
         recommended_valid=False,
         reactive_blocked=False,
         emergency_blocked=False,
+        emergency_front_blocked=False,
+        emergency_side_blocked=False,
         proactive_blocked=False,
         proactive_nearest_m=float("inf"),
         proactive_voxel_count=0,
@@ -663,9 +707,11 @@ class ObstacleMonitorNode(TimestampedNode):
             )
             if blocked:
                 trigger_parts = []
-                if emergency_blocked:
-                    trigger_parts.append("비상근접")
-                elif reactive_blocked:
+                if emergency_front_blocked:
+                    trigger_parts.append("비상전방")
+                if emergency_side_blocked:
+                    trigger_parts.append("비상측후방")
+                if not emergency_blocked and reactive_blocked:
                     trigger_parts.append("현재전방")
                 if proactive_blocked:
                     trigger_parts.append(
@@ -888,7 +934,7 @@ class ObstacleMonitorNode(TimestampedNode):
         start = (center_cell, center_cell)
         # 이미 장애물 팽창영역 가장자리에 들어온 경우 시작 셀까지 막히면
         # A*가 탈출 경로를 전혀 만들 수 없다. 실제 충돌 임박 여부는 별도의
-        # emergency_distance_m으로 판정하므로, 드론 중심 주변의 작은 원만
+        # 방향별 비상거리로 판정하므로, 드론 중심 주변의 작은 원만
         # 출발 가능 영역으로 복구해 장애물 반대편으로 빠져나오게 한다.
         release_radius_cells = max(
             0,
