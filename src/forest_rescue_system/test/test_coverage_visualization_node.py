@@ -191,16 +191,33 @@ def test_build_coverage_marker_array_uses_owner_namespaces_and_colors(
         node.destroy_node()
 
 
-def test_compute_total_area_sums_only_owned_triangles(rclpy_context, tmp_path):
+def test_compute_floor_coverage_percent_uses_only_terrain_group(
+    rclpy_context, tmp_path
+):
     node = _make_node(rclpy_context, tmp_path)
     try:
-        node.scene, node.ownership = _synthetic_scene_and_ownership()
+        vertices = np.array(
+            [
+                [-0.5, -0.5, 5.0],
+                [0.5, -0.5, 5.0],
+                [0.0, 0.5, 5.0],
+                [-0.5, -0.5, 20.0],
+                [0.5, -0.5, 20.0],
+                [0.0, 0.5, 20.0],
+            ]
+        )
+        triangles = np.array([[0, 1, 2], [3, 4, 5]])
+        node.scene = coverage_geometry.assemble_scene(
+            {"terrain": (vertices, triangles)}
+        )
+        node.ownership = TriangleOwnership(len(node.scene.centroids))
+        node.total_floor_area_m2 = float(np.sum(node.scene.areas))
 
-        assert node._compute_total_area() == pytest.approx(0.0)
+        assert node._compute_floor_coverage_percent() == pytest.approx(0.0)
 
         node.ownership.claim([0], drone_index=0)
-        expected = float(node.scene.areas[0])
-        assert node._compute_total_area() == pytest.approx(expected)
+        expected = float(node.scene.areas[0]) / node.total_floor_area_m2 * 100.0
+        assert node._compute_floor_coverage_percent() == pytest.approx(expected)
     finally:
         node.destroy_node()
 

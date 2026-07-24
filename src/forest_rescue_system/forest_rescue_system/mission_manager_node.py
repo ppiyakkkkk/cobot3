@@ -655,6 +655,19 @@ class MissionManagerNode(TimestampedNode):
         message.data = state
         self.state_publisher.publish(message)
         self.get_logger().info(f"임무 상태: {state}")
+        self._print_search_elapsed_if_decided(state)
+
+    def _print_search_elapsed_if_decided(self, state):
+        if self.search_started_at is None:
+            return
+        elapsed = self._sim_time_sec() - self.search_started_at
+        if state == "VICTIM_DETECTED":
+            print(f"[임무 시간] 조난자 발견까지 {elapsed:.1f}초 소요")
+        elif state == "RETURNING_NO_VICTIM":
+            print(
+                "[임무 시간] 전체 웨이포인트 탐색 완료까지 "
+                f"{elapsed:.1f}초 소요 (조난자 미발견)"
+            )
 
 
 def main(args=None):

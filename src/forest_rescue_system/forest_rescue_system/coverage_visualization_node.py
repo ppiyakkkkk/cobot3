@@ -68,7 +68,8 @@ class CoverageVisualizationNode(TimestampedNode):
             "coverage_marker_topic", "/forest_rescue/coverage_markers"
         )
         self.declare_parameter(
-            "coverage_area_topic", "/forest_rescue/coverage_area_m2"
+            "coverage_progress_topic",
+            "/forest_rescue/coverage_progress_percent",
         )
         self.declare_parameter("map_frame", "map")
         self.declare_parameter("refresh_period_sec", 1.0)
@@ -101,6 +102,7 @@ class CoverageVisualizationNode(TimestampedNode):
         self.flashlight_state = {}
         self._flashlight_published_drones = set()
         self.ownership = None
+        self.total_floor_area_m2 = 0.0
         self.last_mesh_wait_log_at = float("-inf")
 
         self.camera_info_by_drone = {}
@@ -132,9 +134,9 @@ class CoverageVisualizationNode(TimestampedNode):
             str(self.get_parameter("coverage_marker_topic").value),
             marker_qos,
         )
-        self.area_publisher = self.create_publisher(
+        self.progress_publisher = self.create_publisher(
             Float32,
-            str(self.get_parameter("coverage_area_topic").value),
+            str(self.get_parameter("coverage_progress_topic").value),
             10,
         )
 
@@ -158,7 +160,9 @@ class CoverageVisualizationNode(TimestampedNode):
         area_period = max(
             0.1, float(self.get_parameter("area_publish_period_sec").value)
         )
-        self.area_timer = self.create_timer(area_period, self._publish_area)
+        self.progress_timer = self.create_timer(
+            area_period, self._publish_progress
+        )
 
         self.get_logger().info("커버리지 시각화 노드 시작")
 
@@ -214,6 +218,11 @@ class CoverageVisualizationNode(TimestampedNode):
             self.scene.triangle_positions
         )
         self.ownership = TriangleOwnership(len(self.scene.centroids))
+        terrain_slice = self.scene.group_slices.get("terrain")
+        if terrain_slice is not None:
+            self.total_floor_area_m2 = float(
+                np.sum(self.scene.areas[terrain_slice])
+            )
         self.get_logger().info(
             "Mesh 로드 완료: "
             f"groups={self.scene.group_names}, "
@@ -459,16 +468,26 @@ class CoverageVisualizationNode(TimestampedNode):
             self._build_flashlight_marker_array()
         )
 
-    def _compute_total_area(self):
+    def _compute_floor_coverage_percent(self):
         if self.scene is None or self.ownership is None:
             return 0.0
-        owned_mask = self.ownership.owner_ids >= 0
-        return float(np.sum(self.scene.areas[owned_mask]))
+        if self.total_floor_area_m2 <= 0.0:
+            return 0.0
+        terrain_slice = self.scene.group_slices.get("terrain")
+        if terrain_slice is None:
+            return 0.0
+        owned_mask = self.ownership.owner_ids[terrain_slice] >= 0
+        covered_floor_area_m2 = float(
+            np.sum(self.scene.areas[terrain_slice][owned_mask])
+        )
+        return covered_floor_area_m2 / self.total_floor_area_m2 * 100.0
 
-    def _publish_area(self):
+    def _publish_progress(self):
+        percent = self._compute_floor_coverage_percent()
         message = Float32()
-        message.data = self._compute_total_area()
-        self.area_publisher.publish(message)
+        message.data = percent
+        self.progress_publisher.publish(message)
+        print(f"[커버리지 진행도] {percent:.1f}%")
 
 
 def main(args=None):

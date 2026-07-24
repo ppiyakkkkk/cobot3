@@ -29,7 +29,7 @@ coverage_visualization_node:
     terrain_mesh_path: ~/b3_cobot3_ws/isaac_sim/generated_terrain_mesh.npz
     environment_mesh_path: ~/b3_cobot3_ws/isaac_sim/generated_environment_meshes.npz
     coverage_marker_topic: /forest_rescue/coverage_markers
-    coverage_area_topic: /forest_rescue/coverage_area_m2
+    coverage_progress_topic: /forest_rescue/coverage_progress_percent
     map_frame: map
     refresh_period_sec: 1.0
     area_publish_period_sec: 1.0
