@@ -69,10 +69,6 @@ def test_transform_matrix_from_tf_rotates_90_degrees_about_z():
     np.testing.assert_allclose(points, [[0.0, 1.0, 0.0]], atol=1e-9)
 
 
-
-
-
-
 def test_triangle_normals_returns_unit_length_perpendicular_vector():
     positions = np.array([[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]])
     normals = coverage_geometry.triangle_normals(positions)
@@ -89,8 +85,6 @@ def test_transform_direction_rotates_without_applying_translation():
         np.array([[1.0, 0.0, 0.0]]), matrix
     )
     np.testing.assert_allclose(rotated, [[0.0, 1.0, 0.0]], atol=1e-9)
-
-
 
 
 def test_pixel_to_camera_ray_at_principal_point_points_straight_ahead():

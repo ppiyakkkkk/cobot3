@@ -527,7 +527,9 @@ def test_depth_callback_records_shape_and_stamp_without_cv_bridge(
         node._depth_callback("quadrotor_01", message)
 
         assert node.depth_shape_by_drone["quadrotor_01"] == (48, 64)
-        assert node.depth_stamp_by_drone["quadrotor_01"] == message.header.stamp
+        assert (
+            node.depth_stamp_by_drone["quadrotor_01"] == message.header.stamp
+        )
     finally:
         node.destroy_node()
 

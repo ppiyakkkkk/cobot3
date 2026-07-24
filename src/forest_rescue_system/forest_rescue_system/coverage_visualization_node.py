@@ -299,7 +299,9 @@ class CoverageVisualizationNode(TimestampedNode):
         )
 
         corner_u = np.array([0.0, float(depth_width), 0.0, float(depth_width)])
-        corner_v = np.array([0.0, 0.0, float(depth_height), float(depth_height)])
+        corner_v = np.array(
+            [0.0, 0.0, float(depth_height), float(depth_height)]
+        )
         corner_directions_camera = coverage_geometry.pixel_to_camera_ray(
             corner_u, corner_v, fx, fy, cx, cy
         )
