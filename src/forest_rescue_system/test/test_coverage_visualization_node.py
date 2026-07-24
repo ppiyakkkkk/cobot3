@@ -7,6 +7,7 @@ from rclpy.parameter import Parameter
 from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo
 from tf2_ros import TransformException
+from visualization_msgs.msg import Marker
 
 from forest_rescue_system.coverage_ownership import TriangleOwnership
 from forest_rescue_system.coverage_visualization_node import (
@@ -527,5 +528,100 @@ def test_depth_callback_records_shape_and_stamp_without_cv_bridge(
 
         assert node.depth_shape_by_drone["quadrotor_01"] == (48, 64)
         assert node.depth_stamp_by_drone["quadrotor_01"] == message.header.stamp
+    finally:
+        node.destroy_node()
+
+
+def test_build_flashlight_marker_array_uses_drone_namespace_and_two_markers(
+    rclpy_context, tmp_path
+):
+    node = _make_node(rclpy_context, tmp_path)
+    try:
+        node.scene, node.ownership = _synthetic_scene_and_ownership()
+        node.raycasting_scene = coverage_geometry.build_raycasting_scene(
+            node.scene.triangle_positions
+        )
+        node.tf_buffer = _StubTfBuffer()
+        node.camera_info_by_drone["quadrotor_01"] = _camera_info()
+        node.depth_shape_by_drone["quadrotor_01"] = (100, 100)
+        node.depth_stamp_by_drone["quadrotor_01"] = TimeMsg()
+        node._process_drone(0, "quadrotor_01")
+
+        marker_array = node._build_flashlight_marker_array()
+
+        drone_01_markers = [
+            marker
+            for marker in marker_array.markers
+            if marker.ns == "flashlight_drone_01"
+        ]
+        assert len(drone_01_markers) == 2
+        assert {marker.id for marker in drone_01_markers} == {0, 1}
+        cone = next(m for m in drone_01_markers if m.id == 0)
+        assert cone.type == Marker.LINE_LIST
+        assert len(cone.points) == 16  # 모서리 4선 + 먼 사각형 4선, 선당 2점
+        hits = next(m for m in drone_01_markers if m.id == 1)
+        assert hits.type == Marker.POINTS
+        assert len(hits.points) > 0
+    finally:
+        node.destroy_node()
+
+
+def test_build_flashlight_marker_array_deletes_marker_when_drone_disappears(
+    rclpy_context, tmp_path
+):
+    node = _make_node(rclpy_context, tmp_path)
+    try:
+        node.scene, node.ownership = _synthetic_scene_and_ownership()
+        node.raycasting_scene = coverage_geometry.build_raycasting_scene(
+            node.scene.triangle_positions
+        )
+        node.tf_buffer = _StubTfBuffer()
+        node.camera_info_by_drone["quadrotor_01"] = _camera_info()
+        node.depth_shape_by_drone["quadrotor_01"] = (100, 100)
+        node.depth_stamp_by_drone["quadrotor_01"] = TimeMsg()
+        node._process_drone(0, "quadrotor_01")
+        node._build_flashlight_marker_array()  # 첫 발행으로 published_drones 기록
+
+        node.flashlight_state.pop("quadrotor_01")
+        marker_array = node._build_flashlight_marker_array()
+
+        drone_01_markers = [
+            marker
+            for marker in marker_array.markers
+            if marker.ns == "flashlight_drone_01"
+        ]
+        assert len(drone_01_markers) == 2
+        assert all(m.action == Marker.DELETE for m in drone_01_markers)
+    finally:
+        node.destroy_node()
+
+
+def test_refresh_coverage_publishes_flashlight_markers_every_cycle(
+    rclpy_context, tmp_path
+):
+    node = _make_node(rclpy_context, tmp_path)
+    try:
+        node.scene, node.ownership = _synthetic_scene_and_ownership()
+        all_indices = np.arange(len(node.scene.centroids))
+        node.ownership.claim(all_indices, drone_index=0)  # 커버리지는 새로 안 늘어남
+        node.raycasting_scene = coverage_geometry.build_raycasting_scene(
+            node.scene.triangle_positions
+        )
+        node.tf_buffer = _StubTfBuffer()
+        node.camera_info_by_drone["quadrotor_01"] = _camera_info()
+        node.depth_shape_by_drone["quadrotor_01"] = (100, 100)
+        node.depth_stamp_by_drone["quadrotor_01"] = TimeMsg()
+
+        coverage_calls = []
+        flashlight_calls = []
+        node.marker_publisher.publish = lambda msg: coverage_calls.append(msg)
+        node.flashlight_marker_publisher.publish = (
+            lambda msg: flashlight_calls.append(msg)
+        )
+
+        node._refresh_coverage()
+
+        assert len(coverage_calls) == 0  # 새로 클레임된 게 없으므로 스킵
+        assert len(flashlight_calls) == 1  # 손전등은 항상 발행
     finally:
         node.destroy_node()

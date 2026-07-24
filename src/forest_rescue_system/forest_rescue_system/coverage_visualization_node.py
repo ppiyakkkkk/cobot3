@@ -32,6 +32,19 @@ _COLOR_PARAMETERS = (
     "drone_03_color_rgb",
 )
 
+_FLASHLIGHT_CONE_ALPHA = 0.15
+_FLASHLIGHT_POINT_ALPHA = 0.6
+_FLASHLIGHT_LINE_WIDTH_M = 0.02
+_FLASHLIGHT_POINT_SIZE_M = 0.1
+
+
+def _to_point(vector):
+    point = Point()
+    point.x = float(vector[0])
+    point.y = float(vector[1])
+    point.z = float(vector[2])
+    return point
+
 
 class CoverageVisualizationNode(TimestampedNode):
     """카메라 depth 기반 실제 가시성으로 커버리지를 누적 표시한다."""
@@ -218,6 +231,7 @@ class CoverageVisualizationNode(TimestampedNode):
 
         if any_newly_claimed:
             self._publish_markers()
+        self._publish_flashlight_markers()
 
     def _process_drone(self, drone_index, drone_id):
         camera_info = self.camera_info_by_drone.get(drone_id)
@@ -353,6 +367,95 @@ class CoverageVisualizationNode(TimestampedNode):
 
     def _publish_markers(self):
         self.marker_publisher.publish(self._build_coverage_marker_array())
+
+    def _delete_marker(self, ns, marker_id, stamp):
+        marker = Marker()
+        marker.header.frame_id = self.map_frame
+        marker.header.stamp = stamp
+        marker.ns = ns
+        marker.id = marker_id
+        marker.action = Marker.DELETE
+        return marker
+
+    def _build_flashlight_marker_array(self):
+        marker_array = MarkerArray()
+        stamp = self.get_clock().now().to_msg()
+        color = [
+            float(value)
+            for value in self.get_parameter("flashlight_color_rgb").value
+        ]
+        max_depth = float(self.get_parameter("maximum_depth_m").value)
+
+        published_drones = set()
+        for drone_index, drone_id in enumerate(self.drone_ids):
+            ns = f"flashlight_drone_{drone_index + 1:02d}"
+            state = self.flashlight_state.get(drone_id)
+            if state is None:
+                if drone_id in self._flashlight_published_drones:
+                    marker_array.markers.append(
+                        self._delete_marker(ns, 0, stamp)
+                    )
+                    marker_array.markers.append(
+                        self._delete_marker(ns, 1, stamp)
+                    )
+                continue
+
+            published_drones.add(drone_id)
+            origin = state["origin"]
+            far_points = origin + state["corner_directions"] * max_depth
+
+            cone_marker = Marker()
+            cone_marker.header.frame_id = self.map_frame
+            cone_marker.header.stamp = stamp
+            cone_marker.ns = ns
+            cone_marker.id = 0
+            cone_marker.type = Marker.LINE_LIST
+            cone_marker.action = Marker.ADD
+            cone_marker.pose.orientation.w = 1.0
+            cone_marker.scale.x = _FLASHLIGHT_LINE_WIDTH_M
+            cone_marker.color.r = color[0]
+            cone_marker.color.g = color[1]
+            cone_marker.color.b = color[2]
+            cone_marker.color.a = _FLASHLIGHT_CONE_ALPHA
+            cone_marker.frame_locked = True
+            cone_marker.points = []
+            for far_point in far_points:
+                cone_marker.points.append(_to_point(origin))
+                cone_marker.points.append(_to_point(far_point))
+            for i in range(4):
+                cone_marker.points.append(_to_point(far_points[i]))
+                cone_marker.points.append(
+                    _to_point(far_points[(i + 1) % 4])
+                )
+            marker_array.markers.append(cone_marker)
+
+            hit_marker = Marker()
+            hit_marker.header.frame_id = self.map_frame
+            hit_marker.header.stamp = stamp
+            hit_marker.ns = ns
+            hit_marker.id = 1
+            hit_marker.type = Marker.POINTS
+            hit_marker.action = Marker.ADD
+            hit_marker.pose.orientation.w = 1.0
+            hit_marker.scale.x = _FLASHLIGHT_POINT_SIZE_M
+            hit_marker.scale.y = _FLASHLIGHT_POINT_SIZE_M
+            hit_marker.color.r = color[0]
+            hit_marker.color.g = color[1]
+            hit_marker.color.b = color[2]
+            hit_marker.color.a = _FLASHLIGHT_POINT_ALPHA
+            hit_marker.frame_locked = True
+            hit_marker.points = [
+                _to_point(point) for point in state["hit_points"]
+            ]
+            marker_array.markers.append(hit_marker)
+
+        self._flashlight_published_drones = published_drones
+        return marker_array
+
+    def _publish_flashlight_markers(self):
+        self.flashlight_marker_publisher.publish(
+            self._build_flashlight_marker_array()
+        )
 
     def _compute_total_area(self):
         if self.scene is None or self.ownership is None:
