@@ -167,6 +167,28 @@ Visualization Manager:
       Reliability Policy: Reliable
       Value: /forest_rescue/drone_markers
     Value: true
+  - Class: rviz_default_plugins/MarkerArray
+    Enabled: true
+    Name: Camera Coverage
+    Namespaces: {}
+    Topic:
+      Depth: 1
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /forest_rescue/coverage_markers
+    Value: true
+  - Class: rviz_default_plugins/MarkerArray
+    Enabled: true
+    Name: Camera Flashlight
+    Namespaces: {}
+    Topic:
+      Depth: 1
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /forest_rescue/flashlight_markers
+    Value: true
   - Alpha: 1
     Autocompute Intensity Bounds: true
     Autocompute Value Bounds:

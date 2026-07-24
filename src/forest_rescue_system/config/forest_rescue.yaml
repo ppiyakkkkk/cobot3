@@ -52,6 +52,57 @@ rviz_visualization_node:
     - 0.95
     river_alpha: 0.95
     river_z_offset_m: 0.08
+coverage_visualization_node:
+  ros__parameters:
+    operation_mode: eval_coverage
+    drone_ids:
+    - quadrotor_01
+    - quadrotor_02
+    - quadrotor_03
+    terrain_mesh_path: ~/b3_cobot3_ws/isaac_sim/generated_terrain_mesh.npz
+    environment_mesh_path: ~/b3_cobot3_ws/isaac_sim/generated_environment_meshes.npz
+    mission_state_topic: /mission/state
+    active_coverage_states:
+    - EVAL_FORWARD
+    - EVAL_FORWARD_SNAPSHOT
+    - EVAL_REVERSE
+    - EVAL_FINAL_SNAPSHOT
+    coverage_marker_topic: /forest_rescue/coverage_markers
+    flashlight_marker_topic: /forest_rescue/flashlight_markers
+    coverage_progress_topic: /forest_rescue/coverage_progress_percent
+    coverage_area_topic: /forest_rescue/coverage_area_m2
+    coverage_total_area_topic: /forest_rescue/coverage_total_area_m2
+    coverage_statistics_topic: /forest_rescue/coverage/statistics
+    map_frame: map
+    refresh_period_sec: 0.5
+    statistics_publish_period_sec: 0.5
+    ray_grid_step_px: 4
+    minimum_depth_m: 0.2
+    maximum_depth_m: 30.0
+    coverage_z_offset_m: 0.05
+    flashlight_color_rgb: [1.0, 0.95, 0.70]
+    drone_01_color_rgb: [0.55, 0.00, 0.85]
+    drone_02_color_rgb: [0.73, 0.33, 0.83]
+    drone_03_color_rgb: [0.60, 0.00, 0.50]
+    drone_04_color_rgb: [0.90, 0.25, 0.65]
+    warning_period_sec: 5.0
+coverage_evaluation_manager_node:
+  ros__parameters:
+    operation_mode: eval_coverage
+    drone_ids:
+    - quadrotor_01
+    - quadrotor_02
+    - quadrotor_03
+    auto_takeoff_on_connect: true
+    ground_truth_path: ~/b3_cobot3_ws/isaac_sim/generated_ground_truth.json
+    search_plan_path: ~/b3_cobot3_ws/isaac_sim/generated_search_plan.json
+    require_simulation_mode_match: true
+    coverage_statistics_topic: /forest_rescue/coverage/statistics
+    coverage_settle_sec: 1.5
+    coverage_snapshot_timeout_sec: 6.0
+    auto_return_after_evaluation: true
+    result_directory: ~/b3_cobot3_ws/coverage_results
+    evaluation_result_topic: /forest_rescue/coverage/evaluation_result
 mission_manager_node:
   ros__parameters:
     operation_mode: rescue_search

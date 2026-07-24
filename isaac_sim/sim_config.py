@@ -55,6 +55,7 @@ DEFAULT_DRONE_COUNT = 3
 SUPPORTED_OPERATION_MODES = (
     "rescue_search",
     "mapping_3d",
+    "eval_coverage",
 )
 DEFAULT_OPERATION_MODE = "rescue_search"
 OPERATION_MODE = DEFAULT_OPERATION_MODE

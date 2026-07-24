@@ -1,6 +1,6 @@
 {
   "format_version": 5,
-  "operation_mode": "rescue_search",
+  "operation_mode": "eval_coverage",
   "drone_count": 4,
   "drone_ids": [
     "quadrotor_01",
@@ -30,22 +30,7 @@
   "return_path_sample_spacing_m": 1.0,
   "return_path_corridor_radius_m": 2.0,
   "return_obstacle_clearance_m": 3.0,
-  "test_victim_spawn": {
-    "enabled": true,
-    "selection": "hardcoded_xyz",
-    "z_mode": "terrain_snap",
-    "configured_world_enu": [
-      2.0,
-      38.0,
-      20.0
-    ],
-    "terrain_z": 13.632932251480993,
-    "world_enu": [
-      2.0,
-      38.0,
-      13.712932251480993
-    ]
-  },
+  "test_victim_spawn": null,
   "drones": {
     "quadrotor_01": {
       "vehicle_id": 0,

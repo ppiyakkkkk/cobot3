@@ -247,6 +247,9 @@ class DroneControllerNode(TimestampedNode):
         # - forward_reverse_once: 정방향 한 번 + 역방향 한 번
         # - infinite: 정방향과 역방향을 조난자 탐지 또는 외부 명령 전까지 반복
         self.declare_parameter("search_repeat_mode", "infinite")
+        # eval_coverage에서는 모든 드론의 정방향 결과를 같은 시점에
+        # 스냅샷하기 위해 정방향 끝에서 CONTINUE_REVERSE를 기다린다.
+        self.declare_parameter("evaluation_pause_between_passes", False)
 
         self.drone_id = str(self.get_parameter("drone_id").value)
         self.home_world_enu = [
@@ -403,6 +406,7 @@ class DroneControllerNode(TimestampedNode):
         self.return_task = None
         self.landing_in_progress = False
         self.stop_search_event = None
+        self.evaluation_continue_reverse_event = None
         self.latest_north_m = 0.0
         self.latest_east_m = 0.0
         self.latest_down_m = 0.0
@@ -724,6 +728,7 @@ class DroneControllerNode(TimestampedNode):
 
     async def _initialize_mavsdk(self):
         self.stop_search_event = asyncio.Event()
+        self.evaluation_continue_reverse_event = asyncio.Event()
         system_address = str(self.get_parameter("system_address").value)
         self._publish_status("CONNECTING")
         await self.drone.connect(system_address=system_address)
@@ -797,6 +802,8 @@ class DroneControllerNode(TimestampedNode):
             self._submit(self._start_search(resume=False))
         elif command == "RESUME_SEARCH":
             self._submit(self._start_search(resume=True))
+        elif command == "CONTINUE_REVERSE":
+            self._submit(self._continue_evaluation_reverse())
         elif command.startswith("START_COOPERATIVE_SEARCH:"):
             plan_id = raw_command.split(":", 1)[1].strip()
             self._submit(self._start_cooperative_search(plan_id))
@@ -826,6 +833,19 @@ class DroneControllerNode(TimestampedNode):
             self._submit(self._land())
         else:
             self.get_logger().warning(f"알 수 없는 명령: {command}")
+
+    async def _continue_evaluation_reverse(self):
+        """평가 관리자의 정방향 스냅샷 완료 신호를 해제한다."""
+        if self.evaluation_continue_reverse_event is None:
+            self.get_logger().warning(
+                "CONTINUE_REVERSE를 받았지만 평가 동기화 Event가 아직 "
+                "준비되지 않았습니다."
+            )
+            return
+        self.evaluation_continue_reverse_event.set()
+        self.get_logger().info(
+            f"{self.drone_id} 역방향 평가 계속 신호를 확인했습니다."
+        )
 
     def _cooperative_plan_callback(self, message):
         """Mission Manager가 만든 드론별 협동 계획을 검증해 보관한다."""
@@ -1193,6 +1213,8 @@ class DroneControllerNode(TimestampedNode):
             self.primary_next_index = 0
             self.primary_search_direction = "FORWARD"
             self.primary_search_completed = False
+            if self.evaluation_continue_reverse_event is not None:
+                self.evaluation_continue_reverse_event.clear()
         elif self.primary_search_completed:
             self.get_logger().info("기본 담당 구역은 이미 완료 처리됐습니다.")
             self._publish_status("SEARCH_FINISHED_NO_VICTIM")
@@ -1281,6 +1303,32 @@ class DroneControllerNode(TimestampedNode):
                     break
                 if mode == "forward_reverse_once" and pass_count >= 2:
                     break
+
+                if (
+                    direction == "FORWARD"
+                    and mode == "forward_reverse_once"
+                    and bool(
+                        self.get_parameter(
+                            "evaluation_pause_between_passes"
+                        ).value
+                    )
+                ):
+                    if self.evaluation_continue_reverse_event is None:
+                        self._publish_status(
+                            "ERROR_EVALUATION_SYNC_NOT_READY"
+                        )
+                        return
+                    self.evaluation_continue_reverse_event.clear()
+                    await self._hold_current_position(stop_search=False)
+                    self._publish_status("SEARCH_FORWARD_FINISHED")
+                    self.get_logger().warning(
+                        "정방향 수색 완료: 커버리지 스냅샷 후 "
+                        "CONTINUE_REVERSE 명령을 기다립니다."
+                    )
+                    while not self.evaluation_continue_reverse_event.is_set():
+                        if self.stop_search_event.is_set():
+                            return
+                        await asyncio.sleep(0.05)
 
                 if direction == "FORWARD":
                     self.primary_search_direction = "REVERSE"

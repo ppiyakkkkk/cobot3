@@ -16,6 +16,11 @@
     isaac_python final_24.py --drone_count 1 \
         --operation_mode mapping_3d
 
+커버리지 평가 모드에서는 사람 없이 기존 분할 수색 경로를 생성한다.
+
+    isaac_python final_24.py --drone_count 3 \
+        --operation_mode eval_coverage
+
 긴 구현은 역할별 모듈로 분리했다.
 - sim_config.py: 모든 설정값과 경로
 - sim_terrain.py: Terrain 높이 보간과 RViz Terrain/환경 Mesh 추출
@@ -66,8 +71,8 @@ def parse_runtime_args():
         choices=sim_config.SUPPORTED_OPERATION_MODES,
         default=sim_config.DEFAULT_OPERATION_MODE,
         help=(
-            "운용 모드: rescue_search 또는 mapping_3d "
-            "(기본값: rescue_search)"
+            "운용 모드: rescue_search, mapping_3d 또는 "
+            "eval_coverage (기본값: rescue_search)"
         ),
     )
 
@@ -306,6 +311,19 @@ class ForestRescueSimulation:
             print(
                 "[MODE] rescue_search: 수색 경로와 조난자·구조자를 "
                 "생성했습니다."
+            )
+        elif OPERATION_MODE == "eval_coverage":
+            # 커버리지 평가는 기존 Terrain 기반 분할 수색 경로를 그대로
+            # 사용하되, 카메라 시야 평가를 방해하는 사람은 생성하지 않는다.
+            search_plan_generator = SearchPlanGenerator(self.terrain)
+            search_plan_generator.write_generated_search_plan()
+            write_ground_truth(
+                victim_position=None,
+                victim_index=-1,
+            )
+            print(
+                "[MODE] eval_coverage: 사람 없이 분할 수색 경로와 "
+                "커버리지 평가용 환경 데이터를 생성했습니다."
             )
         else:
             # 매핑 모드에서는 구조 수색용 사람과 수색 계획을 만들지 않는다.

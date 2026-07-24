@@ -1,7 +1,7 @@
 {
   "format_version": 2,
-  "operation_mode": "rescue_search",
-  "people_spawned": true,
+  "operation_mode": "eval_coverage",
+  "people_spawned": false,
   "drone_count": 4,
   "drone_ids": [
     "quadrotor_01",
@@ -49,13 +49,5 @@
       ]
     }
   ],
-  "victim": {
-    "victim_id": "victim_01",
-    "spawn_candidate_index": -1,
-    "world_enu": [
-      2.0,
-      38.0,
-      13.712932251480993
-    ]
-  }
+  "victim": null
 }

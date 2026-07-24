@@ -94,9 +94,9 @@ class SearchPlanGenerator:
 
     def write_generated_search_plan(self):
         """Terrain 높이를 반영한 N대 드론의 구조 수색 경로를 저장한다."""
-        if OPERATION_MODE != "rescue_search":
+        if OPERATION_MODE not in {"rescue_search", "eval_coverage"}:
             raise RuntimeError(
-                "구조 수색 계획은 operation_mode=rescue_search에서만 "
+                "분할 수색 계획은 rescue_search 또는 eval_coverage에서만 "
                 f"생성할 수 있습니다: {OPERATION_MODE}"
             )
 
@@ -147,7 +147,10 @@ class SearchPlanGenerator:
         }
 
         # 시험에서는 지정한 World ENU XYZ를 사용한다.
-        if FOR_TEST_VICTIM_SPAWN_ENABLED:
+        if (
+            OPERATION_MODE == "rescue_search"
+            and FOR_TEST_VICTIM_SPAWN_ENABLED
+        ):
             if len(FOR_TEST_VICTIM_WORLD_XYZ) != 3:
                 raise RuntimeError(
                     "FOR_TEST_VICTIM_WORLD_XYZ는 (X, Y, Z) 3개 값이어야 합니다."

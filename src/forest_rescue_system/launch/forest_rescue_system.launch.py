@@ -23,6 +23,7 @@ DEFAULT_OPERATION_MODE = "rescue_search"
 SUPPORTED_OPERATION_MODES = (
     "rescue_search",
     "mapping_3d",
+    "eval_coverage",
 )
 
 RESCUE_OBSTACLE_STATES = [
@@ -53,6 +54,20 @@ MAPPING_OBSTACLE_STATES = [
     "MAPPING_COMPLETE",
     "MAPPING_COMPLETE_WITH_ERROR",
     "MAPPING_FAILED",
+]
+
+EVALUATION_OBSTACLE_STATES = [
+    "INITIAL_TAKEOFF",
+    "INITIAL_HOVER",
+    "EVAL_READY",
+    "EVAL_FORWARD",
+    "EVAL_FORWARD_SNAPSHOT",
+    "EVAL_REVERSE",
+    "EVAL_FINAL_SNAPSHOT",
+    "EVAL_RETURNING",
+    "EVAL_COMPLETE",
+    "EVAL_COMPLETE_WITH_ERROR",
+    "EVAL_FAILED",
 ]
 
 
@@ -112,6 +127,7 @@ def _launch_nodes(context):
     config = LaunchConfiguration("config")
     mavsdk_python = LaunchConfiguration("mavsdk_python")
     detector_python = LaunchConfiguration("detector_python")
+    coverage_python = LaunchConfiguration("coverage_python")
     use_rviz = LaunchConfiguration("use_rviz")
     use_sim_time = LaunchConfiguration("use_sim_time")
 
@@ -167,7 +183,7 @@ def _launch_nodes(context):
             ),
         )
         obstacle_states = RESCUE_OBSTACLE_STATES
-    else:
+    elif operation_mode == "mapping_3d":
         nodes.insert(
             0,
             _manager_node(
@@ -180,6 +196,36 @@ def _launch_nodes(context):
             ),
         )
         obstacle_states = MAPPING_OBSTACLE_STATES
+    else:
+        nodes.insert(
+            0,
+            _manager_node(
+                executable="coverage_evaluation_manager",
+                name="coverage_evaluation_manager_node",
+                config=config,
+                use_sim_time=use_sim_time,
+                operation_mode=operation_mode,
+                drone_ids=drone_ids,
+            ),
+        )
+        nodes.append(
+            Node(
+                package="forest_rescue_system",
+                executable="coverage_visualization",
+                name="coverage_visualization_node",
+                output="screen",
+                prefix=[coverage_python],
+                parameters=[
+                    config,
+                    {
+                        "use_sim_time": use_sim_time,
+                        "operation_mode": operation_mode,
+                        "drone_ids": drone_ids,
+                    },
+                ],
+            )
+        )
+        obstacle_states = EVALUATION_OBSTACLE_STATES
 
     for index, drone_id in enumerate(drone_ids, start=1):
         suffix = f"{index:02d}"
@@ -224,10 +270,25 @@ def _launch_nodes(context):
                     ],
                 ),
                 Node(
-                    **common,
+                    package="forest_rescue_system",
                     executable="drone_controller",
                     name=f"drone_controller_{suffix}",
+                    output="screen",
                     prefix=[mavsdk_python],
+                    parameters=[
+                        config,
+                        {
+                            "use_sim_time": use_sim_time,
+                            "search_repeat_mode": (
+                                "forward_reverse_once"
+                                if operation_mode == "eval_coverage"
+                                else "infinite"
+                            ),
+                            "evaluation_pause_between_passes": (
+                                operation_mode == "eval_coverage"
+                            ),
+                        },
+                    ],
                 ),
             ]
         )
@@ -296,8 +357,8 @@ def generate_launch_description():
                 "operation_mode",
                 default_value=DEFAULT_OPERATION_MODE,
                 description=(
-                    "운용 모드: rescue_search 또는 mapping_3d "
-                    "(기본값 rescue_search)"
+                    "운용 모드: rescue_search, mapping_3d 또는 "
+                    "eval_coverage (기본값 rescue_search)"
                 ),
             ),
             DeclareLaunchArgument(
@@ -313,6 +374,13 @@ def generate_launch_description():
                     "~/venvs/pegasus_control/bin/python"
                 ),
                 description="Ultralytics가 설치된 Python 실행 파일",
+            ),
+            DeclareLaunchArgument(
+                "coverage_python",
+                default_value=os.path.expanduser(
+                    "~/venvs/pegasus_control/bin/python"
+                ),
+                description="Open3D가 설치된 Python 실행 파일",
             ),
             DeclareLaunchArgument(
                 "use_rviz",
