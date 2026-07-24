@@ -117,8 +117,8 @@ def transform_direction(vectors, matrix):
 
 # 그레이징(스침) 각도에서 depth tolerance를 얼마나/어디까지 넓힐지에 대한 기본값.
 DEFAULT_NEIGHBORHOOD_PX = 1
-DEFAULT_MIN_GRAZING_COSINE = 0.05
-DEFAULT_MAX_TOLERANCE_SCALE = 20.0
+DEFAULT_MIN_GRAZING_COSINE = 0.2
+DEFAULT_MAX_TOLERANCE_SCALE = 5.0
 
 
 def grazing_angle_tolerance(
