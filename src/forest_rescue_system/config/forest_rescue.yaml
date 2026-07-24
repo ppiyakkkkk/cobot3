@@ -226,7 +226,7 @@ obstacle_monitor_01:
     proactive_ignore_near_m: 0.80
     proactive_min_obstacle_voxels: 2
     planner_start_release_radius_m: 0.50
-    local_planner_min_forward_progress_m: -0.10
+    local_planner_min_forward_progress_m: 0.75
     warning_period_sec: 5.0
 
 drone_controller_01:
@@ -284,8 +284,8 @@ drone_controller_01:
     search_horizontal_position_gain: 0.8
     search_vertical_speed_up_m_s: 1.5
     search_vertical_speed_down_m_s: 1.5
-    avoidance_climb_step_m: 1.5
-    avoidance_max_climb_m: 8.0
+    avoidance_climb_step_m: 2.0
+    avoidance_max_climb_m: 12.0
     avoidance_settle_sec: 1.0
     avoidance_climb_timeout_sec: 15.0
     avoidance_altitude_tolerance_m: 0.5
@@ -302,16 +302,21 @@ drone_controller_01:
     avoidance_front_clearance_m: 3.5
     avoidance_probe_distance_m: 4.0
     avoidance_direction_attempts: 3
+    avoidance_min_forward_progress_m: 0.75
     avoidance_vector_max_age_sec: 1.2
     local_detour_max_age_sec: 1.2
-    local_detour_hard_stop_distance_m: 1.2
+    local_detour_hard_stop_distance_m: 0.75
     avoidance_keep_yaw_during_detour: true
     avoidance_commit_sec: 0.35
     avoidance_block_confirm_sec: 0.20
-    vertical_escape_min_forward_m: 4.0
-    vertical_escape_max_forward_m: 12.0
+    vertical_escape_min_climb_m: 5.0
+    vertical_escape_retry_climb_step_m: 2.0
+    vertical_escape_cross_retries: 3
+    vertical_escape_keep_high_on_descent_failure: true
+    vertical_escape_min_forward_m: 6.0
+    vertical_escape_max_forward_m: 16.0
     vertical_escape_obstacle_pass_margin_m: 2.5
-    vertical_escape_extra_forward_m: 2.0
+    vertical_escape_extra_forward_m: 3.0
     vertical_escape_clear_hold_sec: 1.2
     vertical_escape_cross_timeout_sec: 20.0
     vertical_escape_cross_tolerance_m: 0.8
@@ -480,7 +485,7 @@ obstacle_monitor_02:
     proactive_ignore_near_m: 0.80
     proactive_min_obstacle_voxels: 2
     planner_start_release_radius_m: 0.50
-    local_planner_min_forward_progress_m: -0.10
+    local_planner_min_forward_progress_m: 0.75
     warning_period_sec: 5.0
 
 drone_controller_02:
@@ -538,8 +543,8 @@ drone_controller_02:
     search_horizontal_position_gain: 0.8
     search_vertical_speed_up_m_s: 1.5
     search_vertical_speed_down_m_s: 1.5
-    avoidance_climb_step_m: 1.5
-    avoidance_max_climb_m: 8.0
+    avoidance_climb_step_m: 2.0
+    avoidance_max_climb_m: 12.0
     avoidance_settle_sec: 1.0
     avoidance_climb_timeout_sec: 15.0
     avoidance_altitude_tolerance_m: 0.5
@@ -556,16 +561,21 @@ drone_controller_02:
     avoidance_front_clearance_m: 3.5
     avoidance_probe_distance_m: 4.0
     avoidance_direction_attempts: 3
+    avoidance_min_forward_progress_m: 0.75
     avoidance_vector_max_age_sec: 1.2
     local_detour_max_age_sec: 1.2
-    local_detour_hard_stop_distance_m: 1.2
+    local_detour_hard_stop_distance_m: 0.75
     avoidance_keep_yaw_during_detour: true
     avoidance_commit_sec: 0.35
     avoidance_block_confirm_sec: 0.20
-    vertical_escape_min_forward_m: 4.0
-    vertical_escape_max_forward_m: 12.0
+    vertical_escape_min_climb_m: 5.0
+    vertical_escape_retry_climb_step_m: 2.0
+    vertical_escape_cross_retries: 3
+    vertical_escape_keep_high_on_descent_failure: true
+    vertical_escape_min_forward_m: 6.0
+    vertical_escape_max_forward_m: 16.0
     vertical_escape_obstacle_pass_margin_m: 2.5
-    vertical_escape_extra_forward_m: 2.0
+    vertical_escape_extra_forward_m: 3.0
     vertical_escape_clear_hold_sec: 1.2
     vertical_escape_cross_timeout_sec: 20.0
     vertical_escape_cross_tolerance_m: 0.8
@@ -734,7 +744,7 @@ obstacle_monitor_03:
     proactive_ignore_near_m: 0.80
     proactive_min_obstacle_voxels: 2
     planner_start_release_radius_m: 0.50
-    local_planner_min_forward_progress_m: -0.10
+    local_planner_min_forward_progress_m: 0.75
     warning_period_sec: 5.0
 
 drone_controller_03:
@@ -792,8 +802,8 @@ drone_controller_03:
     search_horizontal_position_gain: 0.8
     search_vertical_speed_up_m_s: 1.5
     search_vertical_speed_down_m_s: 1.5
-    avoidance_climb_step_m: 1.5
-    avoidance_max_climb_m: 8.0
+    avoidance_climb_step_m: 2.0
+    avoidance_max_climb_m: 12.0
     avoidance_settle_sec: 1.0
     avoidance_climb_timeout_sec: 15.0
     avoidance_altitude_tolerance_m: 0.5
@@ -810,16 +820,21 @@ drone_controller_03:
     avoidance_front_clearance_m: 3.5
     avoidance_probe_distance_m: 4.0
     avoidance_direction_attempts: 3
+    avoidance_min_forward_progress_m: 0.75
     avoidance_vector_max_age_sec: 1.2
     local_detour_max_age_sec: 1.2
-    local_detour_hard_stop_distance_m: 1.2
+    local_detour_hard_stop_distance_m: 0.75
     avoidance_keep_yaw_during_detour: true
     avoidance_commit_sec: 0.35
     avoidance_block_confirm_sec: 0.20
-    vertical_escape_min_forward_m: 4.0
-    vertical_escape_max_forward_m: 12.0
+    vertical_escape_min_climb_m: 5.0
+    vertical_escape_retry_climb_step_m: 2.0
+    vertical_escape_cross_retries: 3
+    vertical_escape_keep_high_on_descent_failure: true
+    vertical_escape_min_forward_m: 6.0
+    vertical_escape_max_forward_m: 16.0
     vertical_escape_obstacle_pass_margin_m: 2.5
-    vertical_escape_extra_forward_m: 2.0
+    vertical_escape_extra_forward_m: 3.0
     vertical_escape_clear_hold_sec: 1.2
     vertical_escape_cross_timeout_sec: 20.0
     vertical_escape_cross_tolerance_m: 0.8
@@ -988,7 +1003,7 @@ obstacle_monitor_04:
     proactive_ignore_near_m: 0.80
     proactive_min_obstacle_voxels: 2
     planner_start_release_radius_m: 0.50
-    local_planner_min_forward_progress_m: -0.10
+    local_planner_min_forward_progress_m: 0.75
     warning_period_sec: 5.0
 
 drone_controller_04:
@@ -1046,8 +1061,8 @@ drone_controller_04:
     search_horizontal_position_gain: 0.8
     search_vertical_speed_up_m_s: 1.5
     search_vertical_speed_down_m_s: 1.5
-    avoidance_climb_step_m: 1.5
-    avoidance_max_climb_m: 8.0
+    avoidance_climb_step_m: 2.0
+    avoidance_max_climb_m: 12.0
     avoidance_settle_sec: 1.0
     avoidance_climb_timeout_sec: 15.0
     avoidance_altitude_tolerance_m: 0.5
@@ -1064,16 +1079,21 @@ drone_controller_04:
     avoidance_front_clearance_m: 3.5
     avoidance_probe_distance_m: 4.0
     avoidance_direction_attempts: 3
+    avoidance_min_forward_progress_m: 0.75
     avoidance_vector_max_age_sec: 1.2
     local_detour_max_age_sec: 1.2
-    local_detour_hard_stop_distance_m: 1.2
+    local_detour_hard_stop_distance_m: 0.75
     avoidance_keep_yaw_during_detour: true
     avoidance_commit_sec: 0.35
     avoidance_block_confirm_sec: 0.20
-    vertical_escape_min_forward_m: 4.0
-    vertical_escape_max_forward_m: 12.0
+    vertical_escape_min_climb_m: 5.0
+    vertical_escape_retry_climb_step_m: 2.0
+    vertical_escape_cross_retries: 3
+    vertical_escape_keep_high_on_descent_failure: true
+    vertical_escape_min_forward_m: 6.0
+    vertical_escape_max_forward_m: 16.0
     vertical_escape_obstacle_pass_margin_m: 2.5
-    vertical_escape_extra_forward_m: 2.0
+    vertical_escape_extra_forward_m: 3.0
     vertical_escape_clear_hold_sec: 1.2
     vertical_escape_cross_timeout_sec: 20.0
     vertical_escape_cross_tolerance_m: 0.8

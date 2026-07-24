@@ -106,9 +106,9 @@ class ObstacleMonitorNode(TimestampedNode):
         self.declare_parameter("proactive_ignore_near_m", 0.80)
         self.declare_parameter("proactive_min_obstacle_voxels", 2)
         self.declare_parameter("planner_start_release_radius_m", 0.50)
-        # A* 경로의 첫 구간이 목표 반대편으로 과도하게 후퇴하면
-        # 로컬 우회점으로 사용하지 않는다. 0은 측면 이동까지 허용한다.
-        self.declare_parameter("local_planner_min_forward_progress_m", -0.10)
+        # A* 경로의 첫 구간이 목표 방향으로 충분히 전진할 때만
+        # 로컬 우회점으로 사용한다. 순수 측면·후진 경로는 거부한다.
+        self.declare_parameter("local_planner_min_forward_progress_m", 0.75)
         self.declare_parameter(
             "active_mission_states",
             [
