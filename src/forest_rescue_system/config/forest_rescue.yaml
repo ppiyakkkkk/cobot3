@@ -301,8 +301,19 @@ drone_controller_01:
     avoidance_direction_check_sec: 0.25
     avoidance_front_clearance_m: 3.5
     avoidance_probe_distance_m: 4.0
-    avoidance_direction_attempts: 3
+    avoidance_direction_attempts: 2
     avoidance_min_forward_progress_m: 0.75
+    # 한 Waypoint에서 좌우 회피는 한 번만 성공 허용하고, 다시 막히면 상승한다.
+    search_horizontal_avoidance_budget_per_waypoint: 1
+    # 계획 고도보다 1m 이상 높은 상태에서는 좌우로 더 빠지지 않고 추가 상승한다.
+    search_high_altitude_skip_horizontal_avoidance: true
+    search_high_altitude_threshold_m: 1.0
+    # 수색은 계획 D보다 현재 고도가 높으면 내려오지 않고 XY 방문을 우선한다.
+    search_xy_priority_enabled: true
+    search_keep_high_altitude_after_escape: true
+    # 전진량에 비해 측면 편차가 큰 A*/VFH 후보는 거부한다.
+    avoidance_max_lateral_offset_m: 2.0
+    avoidance_max_lateral_to_forward_ratio: 0.80
     avoidance_vector_max_age_sec: 1.2
     local_detour_max_age_sec: 1.2
     local_detour_hard_stop_distance_m: 0.75
@@ -560,8 +571,19 @@ drone_controller_02:
     avoidance_direction_check_sec: 0.25
     avoidance_front_clearance_m: 3.5
     avoidance_probe_distance_m: 4.0
-    avoidance_direction_attempts: 3
+    avoidance_direction_attempts: 2
     avoidance_min_forward_progress_m: 0.75
+    # 한 Waypoint에서 좌우 회피는 한 번만 성공 허용하고, 다시 막히면 상승한다.
+    search_horizontal_avoidance_budget_per_waypoint: 1
+    # 계획 고도보다 1m 이상 높은 상태에서는 좌우로 더 빠지지 않고 추가 상승한다.
+    search_high_altitude_skip_horizontal_avoidance: true
+    search_high_altitude_threshold_m: 1.0
+    # 수색은 계획 D보다 현재 고도가 높으면 내려오지 않고 XY 방문을 우선한다.
+    search_xy_priority_enabled: true
+    search_keep_high_altitude_after_escape: true
+    # 전진량에 비해 측면 편차가 큰 A*/VFH 후보는 거부한다.
+    avoidance_max_lateral_offset_m: 2.0
+    avoidance_max_lateral_to_forward_ratio: 0.80
     avoidance_vector_max_age_sec: 1.2
     local_detour_max_age_sec: 1.2
     local_detour_hard_stop_distance_m: 0.75
@@ -819,8 +841,19 @@ drone_controller_03:
     avoidance_direction_check_sec: 0.25
     avoidance_front_clearance_m: 3.5
     avoidance_probe_distance_m: 4.0
-    avoidance_direction_attempts: 3
+    avoidance_direction_attempts: 2
     avoidance_min_forward_progress_m: 0.75
+    # 한 Waypoint에서 좌우 회피는 한 번만 성공 허용하고, 다시 막히면 상승한다.
+    search_horizontal_avoidance_budget_per_waypoint: 1
+    # 계획 고도보다 1m 이상 높은 상태에서는 좌우로 더 빠지지 않고 추가 상승한다.
+    search_high_altitude_skip_horizontal_avoidance: true
+    search_high_altitude_threshold_m: 1.0
+    # 수색은 계획 D보다 현재 고도가 높으면 내려오지 않고 XY 방문을 우선한다.
+    search_xy_priority_enabled: true
+    search_keep_high_altitude_after_escape: true
+    # 전진량에 비해 측면 편차가 큰 A*/VFH 후보는 거부한다.
+    avoidance_max_lateral_offset_m: 2.0
+    avoidance_max_lateral_to_forward_ratio: 0.80
     avoidance_vector_max_age_sec: 1.2
     local_detour_max_age_sec: 1.2
     local_detour_hard_stop_distance_m: 0.75
@@ -1078,8 +1111,19 @@ drone_controller_04:
     avoidance_direction_check_sec: 0.25
     avoidance_front_clearance_m: 3.5
     avoidance_probe_distance_m: 4.0
-    avoidance_direction_attempts: 3
+    avoidance_direction_attempts: 2
     avoidance_min_forward_progress_m: 0.75
+    # 한 Waypoint에서 좌우 회피는 한 번만 성공 허용하고, 다시 막히면 상승한다.
+    search_horizontal_avoidance_budget_per_waypoint: 1
+    # 계획 고도보다 1m 이상 높은 상태에서는 좌우로 더 빠지지 않고 추가 상승한다.
+    search_high_altitude_skip_horizontal_avoidance: true
+    search_high_altitude_threshold_m: 1.0
+    # 수색은 계획 D보다 현재 고도가 높으면 내려오지 않고 XY 방문을 우선한다.
+    search_xy_priority_enabled: true
+    search_keep_high_altitude_after_escape: true
+    # 전진량에 비해 측면 편차가 큰 A*/VFH 후보는 거부한다.
+    avoidance_max_lateral_offset_m: 2.0
+    avoidance_max_lateral_to_forward_ratio: 0.80
     avoidance_vector_max_age_sec: 1.2
     local_detour_max_age_sec: 1.2
     local_detour_hard_stop_distance_m: 0.75
