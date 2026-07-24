@@ -149,10 +149,12 @@ def test_visibility_mask_multi_sample_true_if_any_sample_visible():
     sample_points_camera = np.array(
         [[[0.0, 0.0, 5.0], [10.0, 0.0, 5.0], [0.0, 10.0, 5.0], [3.0, 3.0, 5.0]]]
     )
+    normals_camera = np.array([[0.0, 0.0, -1.0]])  # 카메라를 정면으로 바라봄
     depth_image = np.zeros((20, 20), dtype=np.float32)
     depth_image[5, 5] = 5.0  # 정점 (0,0,5) -> u=v=5
     mask = coverage_geometry.visibility_mask_multi_sample(
         sample_points_camera,
+        normals_camera,
         fx=10.0, fy=10.0, cx=5.0, cy=5.0,
         depth_image=depth_image,
         tolerance_m=0.5, min_depth_m=0.2, max_depth_m=30.0,
@@ -164,11 +166,66 @@ def test_visibility_mask_multi_sample_false_if_all_samples_occluded():
     sample_points_camera = np.array(
         [[[0.0, 0.0, 20.0], [10.0, 0.0, 20.0], [0.0, 10.0, 20.0], [3.0, 3.0, 20.0]]]
     )
+    normals_camera = np.array([[0.0, 0.0, -1.0]])
     depth_image = np.full((20, 20), 5.0, dtype=np.float32)
     mask = coverage_geometry.visibility_mask_multi_sample(
         sample_points_camera,
+        normals_camera,
         fx=10.0, fy=10.0, cx=5.0, cy=5.0,
         depth_image=depth_image,
         tolerance_m=0.5, min_depth_m=0.2, max_depth_m=30.0,
     )
     np.testing.assert_array_equal(mask, [False])
+
+
+def test_triangle_normals_returns_unit_length_perpendicular_vector():
+    positions = np.array([[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]])
+    normals = coverage_geometry.triangle_normals(positions)
+    np.testing.assert_allclose(normals, [[0.0, 0.0, 1.0]])
+
+
+def test_transform_direction_rotates_without_applying_translation():
+    half_angle = np.pi / 4.0
+    quaternion = (0.0, 0.0, np.sin(half_angle), np.cos(half_angle))
+    matrix = coverage_geometry.transform_matrix_from_tf(
+        translation=(5.0, 5.0, 5.0), quaternion=quaternion
+    )
+    rotated = coverage_geometry.transform_direction(
+        np.array([[1.0, 0.0, 0.0]]), matrix
+    )
+    np.testing.assert_allclose(rotated, [[0.0, 1.0, 0.0]], atol=1e-9)
+
+
+def test_grazing_angle_tolerance_keeps_base_value_when_facing_camera():
+    points_camera = np.array([[0.0, 0.0, 10.0]])
+    normals_camera = np.array([[0.0, 0.0, -1.0]])  # 카메라를 정면으로 바라봄
+    tolerance = coverage_geometry.grazing_angle_tolerance(
+        0.1, normals_camera, points_camera
+    )
+    np.testing.assert_allclose(tolerance, [0.1])
+
+
+def test_grazing_angle_tolerance_scales_up_near_grazing_incidence():
+    points_camera = np.array([[0.0, 0.0, 10.0]])
+    # 시선은 +z 방향, 법선은 이와 거의 수직(+x) -> 그레이징에 가깝다.
+    normals_camera = np.array([[1.0, 0.0, 0.0]])
+    tolerance = coverage_geometry.grazing_angle_tolerance(
+        0.1, normals_camera, points_camera
+    )
+    # min_cosine=0.2 -> 1/0.2 = 5.0배로 확대(상한).
+    np.testing.assert_allclose(tolerance, [0.5])
+
+
+def test_visibility_mask_matches_neighboring_pixel_within_window():
+    # 그레이징 각도에서 픽셀 반올림으로 (u,v)가 한 칸 어긋나도, 3x3
+    # 윈도우 안에 실제로 일치하는 depth가 있으면 보이는 것으로 처리한다.
+    points_camera = np.array([[0.0, 0.0, 5.0]])
+    depth_image = np.full((10, 10), 100.0, dtype=np.float32)
+    depth_image[6, 5] = 5.0  # 투영 픽셀(5,5) 바로 옆 칸에 실제 depth가 있음
+    mask = coverage_geometry.visibility_mask(
+        points_camera,
+        fx=10.0, fy=10.0, cx=5.0, cy=5.0,
+        depth_image=depth_image,
+        tolerance_m=0.1, min_depth_m=0.2, max_depth_m=30.0,
+    )
+    np.testing.assert_array_equal(mask, [True])

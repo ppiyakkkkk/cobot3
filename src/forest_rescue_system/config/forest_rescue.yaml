@@ -35,7 +35,7 @@ coverage_visualization_node:
     area_publish_period_sec: 1.0
     visibility_tolerance_m: 0.5
     minimum_depth_m: 0.20
-    maximum_depth_m: 20.0
+    maximum_depth_m: 30.0
     coverage_z_offset_m: 0.05
     drone_01_color_rgb: [0.55, 0.0, 0.85]
     drone_02_color_rgb: [0.73, 0.33, 0.83]

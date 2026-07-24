@@ -247,6 +247,9 @@ class CoverageVisualizationNode(TimestampedNode):
         sample_points_camera = coverage_geometry.apply_transform(
             sample_points.reshape(-1, 3), matrix
         ).reshape(sample_points.shape)
+        normals_camera = coverage_geometry.transform_direction(
+            self.scene.normals[candidate_indices], matrix
+        )
 
         depth_height, depth_width = depth_image.shape[:2]
         info_width = int(camera_info.width) or depth_width
@@ -257,6 +260,7 @@ class CoverageVisualizationNode(TimestampedNode):
 
         visible = coverage_geometry.visibility_mask_multi_sample(
             sample_points_camera,
+            normals_camera,
             fx,
             fy,
             cx,
