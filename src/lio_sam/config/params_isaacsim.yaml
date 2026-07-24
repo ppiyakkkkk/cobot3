@@ -42,7 +42,7 @@
     Horizon_SCAN: 2400
     downsampleRate: 1
     lidarMinRange: 1.0
-    lidarMaxRange: 200.0                          # Example_Rotary.json farRangeM과 일치
+    lidarMaxRange: 80.0                           # 실측 반환거리 25~46m + 여유. 탐색 레인 간격(7m)상 근거리 중복 커버리지로 충분
 
     # IMU Settings (IMU 퍼블리셔 추가 후 실측치로 교체 필요, 우선 기본값 유지)
     imuAccNoise: 3.9939570888238808e-03

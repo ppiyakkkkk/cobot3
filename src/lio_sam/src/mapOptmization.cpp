@@ -15,6 +15,7 @@
 #include <gtsam/inference/Symbol.h>
 
 #include <gtsam/nonlinear/ISAM2.h>
+#include <gtsam/linear/linearExceptions.h>
 
 using namespace gtsam;
 
@@ -57,6 +58,10 @@ public:
     Values optimizedEstimate;
     ISAM2 *isam;
     Values isamCurrentEstimate;
+    // isam->update()가 IndeterminantLinearSystemException을 던지고 isam을 새로
+    // 만들면, 다음 addOdomFactor()는 이미 사라진 이전 키를 참조하는 BetweenFactor
+    // 대신 새 prior factor를 추가해야 한다(그래프가 비어 있는 것처럼).
+    bool isamNeedsFreshPrior = false;
     Eigen::MatrixXd poseCovariance;
 
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudSurround;
@@ -1363,7 +1368,8 @@ public:
     bool saveFrame()
     {
         if (cloudKeyPoses3D->points.empty())
-            return true;
+            return laserCloudCornerLastDSNum > edgeFeatureMinValidNum &&
+                   laserCloudSurfLastDSNum   > surfFeatureMinValidNum;
 
         if (sensor == SensorType::LIVOX)
         {
@@ -1389,11 +1395,12 @@ public:
 
     void addOdomFactor()
     {
-        if (cloudKeyPoses3D->points.empty())
+        if (cloudKeyPoses3D->points.empty() || isamNeedsFreshPrior)
         {
             noiseModel::Diagonal::shared_ptr priorNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-2, 1e-2, M_PI*M_PI, 1e8, 1e8, 1e8).finished()); // rad*rad, meter*meter
-            gtSAMgraph.add(PriorFactor<Pose3>(0, trans2gtsamPose(transformTobeMapped), priorNoise));
-            initialEstimate.insert(0, trans2gtsamPose(transformTobeMapped));
+            gtSAMgraph.add(PriorFactor<Pose3>(cloudKeyPoses3D->size(), trans2gtsamPose(transformTobeMapped), priorNoise));
+            initialEstimate.insert(cloudKeyPoses3D->size(), trans2gtsamPose(transformTobeMapped));
+            isamNeedsFreshPrior = false;
         }else{
             noiseModel::Diagonal::shared_ptr odometryNoise = noiseModel::Diagonal::Variances((Vector(6) << 1e-6, 1e-6, 1e-6, 1e-4, 1e-4, 1e-4).finished());
             gtsam::Pose3 poseFrom = pclPointTogtsamPose3(cloudKeyPoses6D->points.back());
@@ -1520,16 +1527,38 @@ public:
         // gtSAMgraph.print("GTSAM Graph:\n");
 
         // update iSAM
-        isam->update(gtSAMgraph, initialEstimate);
-        isam->update();
-
-        if (aLoopIsClosed == true)
+        try
         {
+            isam->update(gtSAMgraph, initialEstimate);
             isam->update();
-            isam->update();
-            isam->update();
-            isam->update();
-            isam->update();
+
+            if (aLoopIsClosed == true)
+            {
+                isam->update();
+                isam->update();
+                isam->update();
+                isam->update();
+                isam->update();
+            }
+        }
+        catch (const gtsam::IndeterminantLinearSystemException & e)
+        {
+            // feature가 거의 없는 구간(급기동 등)을 지나며 포즈그래프가
+            // underdetermined해지면 iSAM2가 이 예외를 던지고 죽는다. isam을
+            // 새로 만들고 이번 키프레임은 버린 뒤, 다음 키프레임부터 새
+            // prior factor로 다시 시작한다 (지금까지 쌓인 cloudKeyPoses/
+            // corner/surf 키프레임은 그대로 유지되어 save_map에는 남는다).
+            RCLCPP_WARN(get_logger(),
+                "iSAM2 indeterminant linear system, resetting optimizer: %s", e.what());
+            delete isam;
+            ISAM2Params parameters;
+            parameters.relinearizeThreshold = 0.1;
+            parameters.relinearizeSkip = 1;
+            isam = new ISAM2(parameters);
+            gtSAMgraph.resize(0);
+            initialEstimate.clear();
+            isamNeedsFreshPrior = true;
+            return;
         }
 
         gtSAMgraph.resize(0);
