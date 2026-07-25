@@ -115,7 +115,10 @@ rescuer_route_planner_node:
     route_status_topic: /rescue/rescuer/route_status
     selected_bridge_topic: /rescue/rescuer/selected_bridge
     route_marker_topic: /rescue/rescuer_route_markers
-    max_slope_deg: 35.0
+    # 구조자 경로계획 기준. Python 기본값과 YAML 실행값을 동일하게 유지한다.
+    max_slope_deg: 42.0
+    # 인접 격자 사이 높이차가 이 값을 넘으면 절벽성 구간으로 차단한다.
+    max_step_height_m: 1.0
     river_clearance_m: 0.75
     bridge_expansion_m: 1.5
     obstacle_clearance_m: 0.8

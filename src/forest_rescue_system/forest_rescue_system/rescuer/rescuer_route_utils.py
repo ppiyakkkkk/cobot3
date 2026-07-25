@@ -34,6 +34,7 @@ class RescuerGridMap:
     obstacle_mask: np.ndarray
     spacing_x: float
     spacing_y: float
+    max_step_height_m: float
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -170,7 +171,8 @@ def build_rescuer_grid_map(
     navigation_surface_path: str | Path,
     environment_mesh_path: str | Path,
     *,
-    max_slope_deg: float = 35.0,
+    max_slope_deg: float = 42.0,
+    max_step_height_m: float = 1.0,
     river_clearance_m: float = 0.75,
     bridge_expansion_m: float = 1.5,
     obstacle_clearance_m: float = 0.8,
@@ -244,7 +246,28 @@ def build_rescuer_grid_map(
         obstacle_mask=obstacle_mask,
         spacing_x=spacing_x,
         spacing_y=spacing_y,
+        max_step_height_m=float(max_step_height_m),
     )
+
+
+def transition_is_walkable(
+    grid_map: RescuerGridMap,
+    start: GridIndex,
+    end: GridIndex,
+) -> bool:
+    """두 셀 사이가 보행 가능하고 절벽성 높이 단차가 없는지 검사한다."""
+    if (
+        not grid_map.in_bounds(start)
+        or not grid_map.in_bounds(end)
+        or not grid_map.walkable[start]
+        or not grid_map.walkable[end]
+    ):
+        return False
+
+    height_change = abs(
+        float(grid_map.z_grid[end]) - float(grid_map.z_grid[start])
+    )
+    return height_change <= float(grid_map.max_step_height_m)
 
 
 def nearest_walkable_cell(
@@ -360,13 +383,19 @@ def astar_to_goal_set(
         row, column = current
         for d_row, d_column, _distance_factor in _NEIGHBORS:
             neighbor = (row + d_row, column + d_column)
-            if not grid_map.in_bounds(neighbor) or not grid_map.walkable[neighbor]:
+            if not transition_is_walkable(grid_map, current, neighbor):
                 continue
             # 대각선으로 막힌 셀 모서리를 뚫고 지나가지 않는다.
             if d_row and d_column:
-                if not grid_map.walkable[row + d_row, column]:
+                orthogonal_row = (row + d_row, column)
+                orthogonal_column = (row, column + d_column)
+                if not transition_is_walkable(
+                    grid_map, current, orthogonal_row
+                ):
                     continue
-                if not grid_map.walkable[row, column + d_column]:
+                if not transition_is_walkable(
+                    grid_map, current, orthogonal_column
+                ):
                     continue
 
             horizontal_distance = math.hypot(
@@ -425,7 +454,7 @@ def line_of_sight(grid_map: RescuerGridMap, start: GridIndex, end: GridIndex) ->
     cells = _bresenham_cells(start, end)
     previous = cells[0]
     for cell in cells:
-        if not grid_map.in_bounds(cell) or not grid_map.walkable[cell]:
+        if not transition_is_walkable(grid_map, previous, cell):
             return False
         d_row = cell[0] - previous[0]
         d_column = cell[1] - previous[1]
@@ -436,6 +465,26 @@ def line_of_sight(grid_map: RescuerGridMap, start: GridIndex, end: GridIndex) ->
                 return False
         previous = cell
     return True
+
+
+def path_height_statistics(
+    grid_map: RescuerGridMap,
+    path: Sequence[GridIndex],
+) -> tuple[float, float]:
+    """경로가 통과하는 최대 경사와 인접 셀 최대 높이 차를 반환한다."""
+    if not path:
+        return 0.0, 0.0
+    maximum_slope = max(float(grid_map.slope_deg[cell]) for cell in path)
+    maximum_step = 0.0
+    for start, end in zip(path, path[1:]):
+        maximum_step = max(
+            maximum_step,
+            abs(
+                float(grid_map.z_grid[end])
+                - float(grid_map.z_grid[start])
+            ),
+        )
+    return maximum_slope, maximum_step
 
 
 def simplify_grid_path(

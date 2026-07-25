@@ -8,6 +8,8 @@ import carb
 from geometry_msgs.msg import PointStamped
 from nav_msgs.msg import Path as PathMessage
 import numpy as np
+import omni.physx
+import omni.timeline
 import omni.usd
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 import rclpy
@@ -28,7 +30,6 @@ from sim_config import (
     PERSON_CLOTHING_INCLUDE_KEYWORDS,
     PERSON_ROLE_CLOTHING_COLOR_ENABLED,
     RESCUER_CHARACTER_KEYWORDS,
-    RESCUER_FOOT_Z,
     RESCUER_MOVE_SPEED_M_S,
     RESCUER_PATH_TOPIC,
     RESCUER_POSE_PUBLISH_PERIOD_SEC,
@@ -61,6 +62,19 @@ class PeopleManager:
         self._rescuer_waypoint_index = 0
         self._rescuer_status = "NOT_INITIALIZED"
         self._last_pose_publish_at = float("-inf")
+        self._last_navigation_log_sim_time = float("-inf")
+        self._last_navigation_sim_time = None
+        self._last_ground_z = None
+        self._last_z_correction = 0.0
+        self._last_move_command_applied = False
+        self._last_ground_loss_log_at = float("-inf")
+        self._last_large_ground_error_log_sim_time = float("-inf")
+        self._ground_query_error_logged = False
+        self._rescuer_xform_ops_logged = False
+        self._rescuer_foot_offset_m = float(PERSON_GROUND_CLEARANCE_M)
+        self._terrain_prim_path = str(self.terrain._terrain_prim.GetPath())
+        self._timeline = omni.timeline.get_timeline_interface()
+        self._scene_query = omni.physx.get_physx_scene_query_interface()
         self._path_subscription = None
         self._pose_publisher = None
         self._status_publisher = None
@@ -335,10 +349,13 @@ class PeopleManager:
         )
 
         rescuer_x, rescuer_y = RESCUER_XY
+        rescuer_ground_z = float(
+            self.terrain.height(float(rescuer_x), float(rescuer_y))
+        )
         rescuer_position = [
             float(rescuer_x),
             float(rescuer_y),
-            float(RESCUER_FOOT_Z),
+            rescuer_ground_z + float(PERSON_GROUND_CLEARANCE_M),
         ]
         self.rescuer = Person(
             "rescuer_01",
@@ -356,6 +373,8 @@ class PeopleManager:
             self.rescuer,
             rescuer_position,
         )
+        self._log_rescuer_xform_ops_once()
+        self._measure_rescuer_foot_offset()
         print(
             "[INFO] Spawned rescuer beside drones at "
             f"({rescuer_position[0]:.3f}, "
@@ -414,7 +433,9 @@ class PeopleManager:
         for pose_stamped in message.poses:
             point = pose_stamped.pose.position
             waypoint = np.asarray(
-                [point.x, point.y, point.z + PERSON_GROUND_CLEARANCE_M],
+                # Path의 Z는 보행에 사용하지 않는다. 실제 산 collision
+                # 표면 높이는 이동 프레임마다 아래 방향 raycast로 구한다.
+                [point.x, point.y, point.z],
                 dtype=np.float64,
             )
             if waypoint.shape != (3,) or not np.all(np.isfinite(waypoint)):
@@ -473,10 +494,19 @@ class PeopleManager:
             return
 
         target = self._rescuer_path[self._rescuer_waypoint_index]
+        ground_z = self._raycast_terrain_z(float(target[0]), float(target[1]))
+        if ground_z is None:
+            self._stop_rescuer_for_ground_loss(
+                "목표 waypoint 아래에서 산 지형 collision을 찾지 못함"
+            )
+            return
+        target = target.copy()
+        target[2] = ground_z + self._rescuer_foot_offset_m
         self.rescuer.update_target_position(
             target.tolist(),
             walk_speed=float(RESCUER_MOVE_SPEED_M_S),
         )
+        self._last_move_command_applied = True
         self._set_rescuer_status(
             f"WALKING:{self._rescuer_waypoint_index + 1}/"
             f"{len(self._rescuer_path)}"
@@ -494,12 +524,252 @@ class PeopleManager:
         position = self._current_rescuer_position()
         if position is None:
             return
+
+        sim_time = float(self._timeline.get_current_time())
+        if self._last_navigation_sim_time is None:
+            sim_dt = 0.0
+        else:
+            sim_dt = max(0.0, sim_time - self._last_navigation_sim_time)
+        self._last_navigation_sim_time = sim_time
+
         target = self._rescuer_path[self._rescuer_waypoint_index]
         distance_xy = float(np.linalg.norm(target[:2] - position[:2]))
+        ground_z = self._raycast_terrain_z(
+            float(position[0]), float(position[1])
+        )
+        self._last_move_command_applied = False
+        if ground_z is None:
+            self._last_ground_z = None
+            self._last_z_correction = 0.0
+            self._stop_rescuer_for_ground_loss(
+                "현재 구조자 XY 아래에서 산 지형 collision을 찾지 못함"
+            )
+        else:
+            self._last_ground_z = ground_z
+            self._apply_ground_following(position, ground_z)
+            self._refresh_current_ground_target(ground_z)
+
+        diagnostic_position = self._current_rescuer_position()
+        if diagnostic_position is None:
+            diagnostic_position = position
+        self._log_navigation_diagnostics(
+            sim_time=sim_time,
+            sim_dt=sim_dt,
+            position=diagnostic_position,
+            target=target,
+            distance_xy=distance_xy,
+        )
+
+        if ground_z is None:
+            return
         if distance_xy <= float(RESCUER_WAYPOINT_TOLERANCE_M):
             self._rescuer_waypoint_index += 1
             self._skip_reached_waypoints()
             self._send_current_waypoint()
+
+    @staticmethod
+    def _hit_prim_path(hit):
+        """Isaac Sim 버전에 따라 dict 또는 RaycastHit 객체로 오는 hit를 처리한다."""
+        for key in ("collision", "rigidBody", "material"):
+            if isinstance(hit, dict):
+                value = hit.get(key)
+            else:
+                value = getattr(hit, key, None)
+            if value:
+                return str(value)
+        return ""
+
+    @staticmethod
+    def _hit_position(hit):
+        """Raycast hit 위치를 dict/바인딩 객체 양쪽에서 안전하게 꺼낸다."""
+        if isinstance(hit, dict):
+            return hit.get("position")
+        return getattr(hit, "position", None)
+
+    def _is_terrain_hit(self, prim_path):
+        """산 Terrain prim 및 그 하위 collision만 지면으로 인정한다."""
+        terrain = self._terrain_prim_path.rstrip("/")
+        candidate = str(prim_path).rstrip("/")
+        return (
+            candidate == terrain
+            or candidate.startswith(f"{terrain}/")
+            or terrain.startswith(f"{candidate}/")
+        )
+
+    def _raycast_terrain_z(self, x, y):
+        """위에서 아래로 모든 hit를 검사해 산 Terrain 표면 Z만 반환한다."""
+        ray_top = max(
+            float(getattr(self.terrain, "z_max", 100.0)) + 20.0,
+            float(self._current_rescuer_position()[2]) + 20.0,
+        )
+        ray_bottom = float(getattr(self.terrain, "z_min", -100.0)) - 20.0
+        hits = []
+
+        def report_hit(hit):
+            prim_path = self._hit_prim_path(hit)
+            if self._is_terrain_hit(prim_path):
+                position = self._hit_position(hit)
+                if position is not None:
+                    hits.append((float(position[2]), prim_path))
+            return True
+
+        try:
+            self._scene_query.raycast_all(
+                carb.Float3(float(x), float(y), ray_top),
+                carb.Float3(0.0, 0.0, -1.0),
+                ray_top - ray_bottom,
+                report_hit,
+            )
+        except Exception as error:
+            if not self._ground_query_error_logged:
+                carb.log_error(
+                    "[RESCUER] PhysX 산 지형 raycast 실패: "
+                    f"{type(error).__name__}: {error}"
+                )
+                self._ground_query_error_logged = True
+            return None
+
+        if not hits:
+            return None
+        self._ground_query_error_logged = False
+        return max(hits, key=lambda item: item[0])[0]
+
+    def _measure_rescuer_foot_offset(self):
+        """Character visual 최저점과 발 기준 state 원점 사이 오프셋을 측정한다."""
+        try:
+            stage = omni.usd.get_context().get_stage()
+            root_path = str(self.rescuer._stage_prefix)
+            root_prim = stage.GetPrimAtPath(root_path)
+            bbox_cache = UsdGeom.BBoxCache(
+                Usd.TimeCode.Default(),
+                [UsdGeom.Tokens.default_, UsdGeom.Tokens.render],
+            )
+            world_range = bbox_cache.ComputeWorldBound(root_prim).ComputeAlignedRange()
+            visual_min_z = float(world_range.GetMin()[2])
+            state_z = float(self.rescuer.state.position[2])
+            measured = state_z - visual_min_z
+            if math.isfinite(measured) and -1.0 <= measured <= 1.0:
+                self._rescuer_foot_offset_m = (
+                    measured + float(PERSON_GROUND_CLEARANCE_M)
+                )
+            print(
+                "[RESCUER] 발 기준 측정: "
+                f"root={root_path}, state_z={state_z:.3f}, "
+                f"visual_min_z={visual_min_z:.3f}, "
+                f"foot_offset={self._rescuer_foot_offset_m:.3f}m"
+            )
+        except Exception as error:
+            carb.log_warn(
+                "[RESCUER] visual 발바닥 높이 측정 실패, 기본 여유 높이 사용: "
+                f"{type(error).__name__}: {error}"
+            )
+
+    def _log_rescuer_xform_ops_once(self):
+        """구조자 Prim의 기존 xformOp 구성을 변경 없이 한 번만 기록한다."""
+        if self._rescuer_xform_ops_logged or self.rescuer is None:
+            return
+        self._rescuer_xform_ops_logged = True
+
+        root_path = str(self.rescuer._stage_prefix)
+        stage = omni.usd.get_context().get_stage()
+        root_prim = stage.GetPrimAtPath(root_path)
+        if not root_prim.IsValid():
+            carb.log_warn(
+                f"[RESCUER] Character root Prim을 찾지 못했습니다: {root_path}"
+            )
+            return
+
+        try:
+            xformable = UsdGeom.Xformable(root_prim)
+            ordered_ops = xformable.GetOrderedXformOps()
+            op_names = [
+                str(op.GetAttr().GetName())
+                for op in ordered_ops
+            ]
+            print(
+                "[RESCUER] 기존 Character xformOp 유지: "
+                f"root={root_path}, ordered_ops={op_names}"
+            )
+        except Exception as error:
+            carb.log_warn(
+                "[RESCUER] Character xformOp 확인 실패: "
+                f"{type(error).__name__}: {error}"
+            )
+
+    def _apply_ground_following(self, position, ground_z):
+        """지면 목표 Z를 계산한다. 실제 적용은 Person의 공식 목표 API가 맡는다."""
+        desired_z = float(ground_z) + self._rescuer_foot_offset_m
+        requested = desired_z - float(position[2])
+        self._last_z_correction = requested
+
+        if abs(requested) >= 0.75:
+            sim_time = float(self._timeline.get_current_time())
+            if (
+                sim_time - self._last_large_ground_error_log_sim_time
+                >= 1.0
+            ):
+                carb.log_warn(
+                    "[RESCUER] 현재 지면 목표와 Z 차이가 큽니다: "
+                    f"current_z={position[2]:.3f}, "
+                    f"ground_z={ground_z:.3f}, "
+                    f"desired_z={desired_z:.3f}, "
+                    f"requested={requested:+.3f}m"
+                )
+                self._last_large_ground_error_log_sim_time = sim_time
+
+    def _refresh_current_ground_target(self, current_ground_z):
+        """raycast 지면 Z를 Person의 기존 XYZ 목표 갱신 경로로 적용한다."""
+        if self._rescuer_waypoint_index >= len(self._rescuer_path):
+            return
+        target = self._rescuer_path[self._rescuer_waypoint_index].copy()
+        target[2] = float(current_ground_z) + self._rescuer_foot_offset_m
+        self.rescuer.update_target_position(
+            target.tolist(),
+            walk_speed=float(RESCUER_MOVE_SPEED_M_S),
+        )
+        self._last_move_command_applied = True
+        if self._rescuer_status == "GROUND_LOST":
+            self._set_rescuer_status(
+                f"WALKING:{self._rescuer_waypoint_index + 1}/"
+                f"{len(self._rescuer_path)}"
+            )
+
+    def _stop_rescuer_for_ground_loss(self, reason):
+        position = self._current_rescuer_position()
+        if position is not None:
+            self.rescuer.update_target_position(
+                position.tolist(),
+                walk_speed=0.0,
+            )
+        self._last_move_command_applied = False
+        self._set_rescuer_status("GROUND_LOST")
+        now = time.monotonic()
+        if now - self._last_ground_loss_log_at >= 1.0:
+            carb.log_error(f"[RESCUER] 이동 정지: {reason}")
+            self._last_ground_loss_log_at = now
+
+    def _log_navigation_diagnostics(
+        self, sim_time, sim_dt, position, target, distance_xy
+    ):
+        if sim_time - self._last_navigation_log_sim_time < 1.0:
+            return
+        self._last_navigation_log_sim_time = sim_time
+        ground_text = (
+            f"{self._last_ground_z:.3f}"
+            if self._last_ground_z is not None
+            else "NONE"
+        )
+        print(
+            "[RESCUER][DIAG] "
+            f"current=({position[0]:.3f},{position[1]:.3f},{position[2]:.3f}), "
+            f"target=({target[0]:.3f},{target[1]:.3f},{target[2]:.3f}), "
+            f"distance_xy={distance_xy:.3f}m, ground_z={ground_text}, "
+            f"z_correction={self._last_z_correction:+.3f}m, "
+            f"waypoint={self._rescuer_waypoint_index + 1}/"
+            f"{len(self._rescuer_path)}, "
+            f"move_command={self._last_move_command_applied}, "
+            f"sim_dt={sim_dt:.4f}s"
+        )
 
     def _publish_rescuer_pose_if_due(self):
         now = time.monotonic()

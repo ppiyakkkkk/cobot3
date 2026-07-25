@@ -22,6 +22,7 @@ from forest_rescue_system.rescuer.rescuer_route_utils import (
     build_rescuer_grid_map,
     goal_cells_around_victim,
     nearest_walkable_cell,
+    path_height_statistics,
     path_length_m,
     simplify_grid_path,
     validate_bridge_usage,
@@ -56,7 +57,8 @@ class RescuerRoutePlannerNode(TimestampedNode):
         self.declare_parameter(
             "route_marker_topic", "/rescue/rescuer_route_markers"
         )
-        self.declare_parameter("max_slope_deg", 35.0)
+        self.declare_parameter("max_slope_deg", 42.0)
+        self.declare_parameter("max_step_height_m", 1.0)
         self.declare_parameter("river_clearance_m", 0.75)
         self.declare_parameter("bridge_expansion_m", 1.5)
         self.declare_parameter("obstacle_clearance_m", 0.8)
@@ -162,6 +164,9 @@ class RescuerRoutePlannerNode(TimestampedNode):
                 self.navigation_surface_path,
                 self.environment_mesh_path,
                 max_slope_deg=float(self.get_parameter("max_slope_deg").value),
+                max_step_height_m=float(
+                    self.get_parameter("max_step_height_m").value
+                ),
                 river_clearance_m=float(
                     self.get_parameter("river_clearance_m").value
                 ),
@@ -189,7 +194,9 @@ class RescuerRoutePlannerNode(TimestampedNode):
         self.get_logger().info(
             "구조자 보행 지도 준비 완료: "
             f"shape={self.grid_map.shape}, walkable={walkable_count}, "
-            f"river={river_count}, bridge={bridge_count}"
+            f"river={river_count}, bridge={bridge_count}, "
+            f"max_slope={float(self.get_parameter('max_slope_deg').value):.1f}deg, "
+            f"max_step={self.grid_map.max_step_height_m:.2f}m"
         )
         self._try_plan()
 
@@ -283,6 +290,9 @@ class RescuerRoutePlannerNode(TimestampedNode):
                 self.grid_map, raw_path
             )
             length_m = path_length_m(self.grid_map, simplified_path)
+            maximum_slope, maximum_step = path_height_statistics(
+                self.grid_map, raw_path
+            )
         except (ValueError, RuntimeError) as error:
             self.get_logger().error(f"구조자 경로 생성 실패: {error}")
             self._publish_route_status(f"PATH_FAILED:{error}")
@@ -311,6 +321,8 @@ class RescuerRoutePlannerNode(TimestampedNode):
             "path_points": len(simplified_path),
             "raw_grid_points": len(raw_path),
             "length_m": round(length_m, 3),
+            "max_slope_deg": round(maximum_slope, 2),
+            "max_step_height_m": round(maximum_step, 3),
             "bridge_required": bool(bridge_required),
             "selected_bridge": int(selected_bridge),
         }
@@ -320,6 +332,8 @@ class RescuerRoutePlannerNode(TimestampedNode):
         self.get_logger().warning(
             "구조자 경로 생성 완료: "
             f"points={len(simplified_path)}, length={length_m:.1f}m, "
+            f"max_slope={maximum_slope:.1f}deg, "
+            f"max_step={maximum_step:.2f}m, "
             f"bridge_required={bridge_required}, "
             f"selected_bridge={selected_message.data}"
         )
