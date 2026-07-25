@@ -15,7 +15,7 @@ from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Bool, Float32, String
 
-from forest_rescue_system.log_utils import TimestampedNode
+from forest_rescue_system.common.log_utils import TimestampedNode
 
 
 class ObstacleMonitorNode(TimestampedNode):

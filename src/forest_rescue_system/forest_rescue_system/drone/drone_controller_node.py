@@ -26,7 +26,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, Float32, String
 from tf2_ros import TransformBroadcaster
 
-from forest_rescue_system.log_utils import TimestampedNode
+from forest_rescue_system.common.log_utils import TimestampedNode
 
 
 class DroneControllerNode(TimestampedNode):

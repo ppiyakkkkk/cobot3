@@ -25,7 +25,7 @@ from tf2_ros import Buffer, TransformException, TransformListener
 import tf2_geometry_msgs  # noqa: F401
 
 from forest_rescue_interfaces.msg import VictimDetection
-from forest_rescue_system.log_utils import TimestampedNode
+from forest_rescue_system.common.log_utils import TimestampedNode
 
 
 class VictimLocalizerNode(TimestampedNode):

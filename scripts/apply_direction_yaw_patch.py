@@ -355,7 +355,7 @@ if __name__ == "__main__":
         nargs="?",
         default=(
             "~/b3_cobot3_ws/src/forest_rescue_system/"
-            "forest_rescue_system/drone_controller_node.py"
+            "forest_rescue_system/drone/drone_controller_node.py"
         ),
     )
     args = parser.parse_args()

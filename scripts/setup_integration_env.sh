@@ -21,7 +21,7 @@ fi
 SYSTEM_PYTHON="/usr/bin/python3"
 
 echo "[INFO] ROS/apt Python 영상 환경 확인"
-PYTHONNOUSERSITE=1 "${SYSTEM_PYTHON}" - <<'PY'
+"$SYSTEM_PYTHON" - <<'PY'
 import cv2
 import numpy
 import rclpy
@@ -38,7 +38,10 @@ python -m pip install \
     "empy==3.3.4" \
     catkin_pkg \
     lark-parser \
-    "numpy==1.26.4"
+    "numpy==1.26.4" \
+    mavsdk \
+    "open3d==0.19.0" \
+    "scipy==1.15.3"
 
 # 실제 YOLO 모드는 별도의 NumPy 1.x와 OpenCV wheel을 사용한다.
 # --with-yolo를 지정하면 패키지를 설치하고 YOLO11 가중치까지
@@ -86,7 +89,9 @@ import em
 import lark
 import mavsdk
 import numpy
+import open3d
 import rclpy
+import scipy
 from geometry_msgs.msg import PointStamped
 
 print("[OK] venv Empy:", em.__file__)
@@ -94,6 +99,8 @@ print("[OK] venv catkin_pkg:", catkin_pkg.__file__)
 print("[OK] venv lark:", lark.__file__)
 print("[OK] venv NumPy:", numpy.__version__)
 print("[OK] venv mavsdk:", mavsdk.__file__)
+print("[OK] venv Open3D:", open3d.__version__)
+print("[OK] venv SciPy:", scipy.__version__)
 print("[OK] venv rclpy:", rclpy.__file__)
 print("[OK] venv ROS message import")
 PY

@@ -23,7 +23,7 @@ from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Header, String
 from tf2_ros import Buffer, TransformException, TransformListener
 
-from forest_rescue_system.log_utils import TimestampedNode
+from forest_rescue_system.common.log_utils import TimestampedNode
 
 
 class PointCloudLocalMapperNode(TimestampedNode):

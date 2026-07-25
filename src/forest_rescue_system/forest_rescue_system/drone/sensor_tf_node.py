@@ -8,7 +8,7 @@ from geometry_msgs.msg import TransformStamped
 import rclpy
 from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
 
-from forest_rescue_system.log_utils import TimestampedNode
+from forest_rescue_system.common.log_utils import TimestampedNode
 
 
 class SensorTfNode(TimestampedNode):

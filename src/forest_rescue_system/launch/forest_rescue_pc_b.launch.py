@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 
-"""한 PC에서 모든 산림 구조 노드를 실행한다."""
+"""PC B에서 YOLO 탐지와 RGB-D 위치 추정 노드를 실행한다."""
 
 from forest_rescue_system.bringup.launch_common import (
-    ROLE_INTEGRATED,
+    ROLE_PC_B,
     make_launch_description,
 )
 
 
 def generate_launch_description():
-    return make_launch_description(ROLE_INTEGRATED)
+    return make_launch_description(ROLE_PC_B)

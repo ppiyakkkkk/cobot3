@@ -22,9 +22,18 @@ CAMERA_DOWN_TILT_DEG = 40.0
 CAMERA_RESOLUTION = [960, 720]
 
 # 왼쪽 메인 Viewport가 처음 따라갈 드론과 3인칭 추적 카메라 설정이다.
-# 실행 중에는 숫자키 1~4 또는 F키로 추적 대상을 변경할 수 있다.
+# 실행 중에는 숫자키 1~4/8/9로 대상을 바꾸고 0으로 자유 시점을 쓸 수 있다.
 FOLLOW_DRONE_PRIM_PATH = "/World/quadrotor_01/body"
 FOLLOW_CAMERA_PRIM_PATH = "/World/FollowCamera"
+FREE_CAMERA_PRIM_PATH = "/OmniverseKit_Persp"
+
+# 조난자·구조자를 주변 지형과 함께 내려다보는 상공 카메라 설정이다.
+# 사람 충돌 프록시는 실제 Character와 매 프레임 같은 위치로 동기화된다.
+VICTIM_FOLLOW_PRIM_PATH = "/World/person_colliders/victim_01"
+RESCUER_FOLLOW_PRIM_PATH = "/World/person_colliders/rescuer_01"
+PERSON_CAMERA_BACK_DISTANCE_M = 10.0
+PERSON_CAMERA_SIDE_DISTANCE_M = 8.0
+PERSON_CAMERA_HEIGHT_M = 18.0
 
 # 드론의 실제 진행방향을 기준으로 카메라를 뒤쪽·위쪽에 배치한다.
 # 카메라는 드론보다 앞쪽 지점을 바라보므로 비행 진행방향이 화면에 보인다.

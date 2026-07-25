@@ -17,7 +17,7 @@ from rclpy.qos import (
 )
 from visualization_msgs.msg import Marker, MarkerArray
 
-from forest_rescue_system.log_utils import TimestampedNode
+from forest_rescue_system.common.log_utils import TimestampedNode
 
 
 class RvizVisualizationNode(TimestampedNode):

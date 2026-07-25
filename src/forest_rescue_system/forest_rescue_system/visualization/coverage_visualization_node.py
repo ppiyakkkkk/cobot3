@@ -23,8 +23,8 @@ from std_msgs.msg import Float32, String
 from tf2_ros import Buffer, TransformException, TransformListener
 from visualization_msgs.msg import Marker, MarkerArray
 
-from forest_rescue_system import coverage_utils
-from forest_rescue_system.log_utils import TimestampedNode
+from forest_rescue_system.common.log_utils import TimestampedNode
+from forest_rescue_system.visualization import coverage_utils
 
 
 _COLOR_PARAMETERS = (

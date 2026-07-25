@@ -16,10 +16,10 @@ from std_srvs.srv import Trigger
 from visualization_msgs.msg import Marker, MarkerArray
 
 from forest_rescue_interfaces.msg import VictimDetection
-from forest_rescue_system.cooperative_search_planner import (
+from forest_rescue_system.mission.cooperative_search_planner import (
     CooperativeSearchPlanner,
 )
-from forest_rescue_system.log_utils import TimestampedNode
+from forest_rescue_system.common.log_utils import TimestampedNode
 
 
 class MissionManagerNode(TimestampedNode):
@@ -683,27 +683,6 @@ class MissionManagerNode(TimestampedNode):
             entry = assignment["entry_world_enu"]
             red, green, blue = colors[drone_index % len(colors)]
             x_min, x_max, y_min, y_max = bounds
-
-            zone = Marker()
-            zone.header.frame_id = "map"
-            zone.header.stamp = stamp
-            zone.ns = "cooperative_subzones"
-            zone.id = marker_id
-            marker_id += 1
-            zone.type = Marker.CUBE
-            zone.action = Marker.ADD
-            zone.pose.orientation.w = 1.0
-            zone.pose.position.x = (x_min + x_max) * 0.5
-            zone.pose.position.y = (y_min + y_max) * 0.5
-            zone.pose.position.z = target_z - 0.5
-            zone.scale.x = max(0.1, x_max - x_min)
-            zone.scale.y = max(0.1, y_max - y_min)
-            zone.scale.z = 0.18
-            zone.color.r = red
-            zone.color.g = green
-            zone.color.b = blue
-            zone.color.a = 0.28
-            marker_array.markers.append(zone)
 
             entry_marker = Marker()
             entry_marker.header.frame_id = "map"

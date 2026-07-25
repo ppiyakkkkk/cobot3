@@ -16,8 +16,8 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
 from visualization_msgs.msg import Marker, MarkerArray
 
-from forest_rescue_system.log_utils import TimestampedNode
-from forest_rescue_system.rescuer_route_utils import (
+from forest_rescue_system.common.log_utils import TimestampedNode
+from forest_rescue_system.rescuer.rescuer_route_utils import (
     astar_to_goal_set,
     build_rescuer_grid_map,
     goal_cells_around_victim,

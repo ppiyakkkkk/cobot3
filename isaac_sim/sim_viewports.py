@@ -18,6 +18,12 @@ from sim_config import (
     FOLLOW_CAMERA_PRIM_PATH,
     FOLLOW_CAMERA_TARGET_HEIGHT_M,
     FOLLOW_DRONE_PRIM_PATH,
+    FREE_CAMERA_PRIM_PATH,
+    PERSON_CAMERA_BACK_DISTANCE_M,
+    PERSON_CAMERA_HEIGHT_M,
+    PERSON_CAMERA_SIDE_DISTANCE_M,
+    RESCUER_FOLLOW_PRIM_PATH,
+    VICTIM_FOLLOW_PRIM_PATH,
 )
 
 
@@ -32,6 +38,9 @@ class ViewportManager:
         self._follow_camera_ready = False
         self._follow_previous_position = None
         self._follow_direction_xy = None
+        self._view_mode = "drone"
+        self._person_follow_prim_path = None
+        self._person_follow_label = None
 
         # 실행 중인 드론만 추적 후보로 등록한다.
         self._follow_drone_prim_paths = [
@@ -50,7 +59,7 @@ class ViewportManager:
             else FOLLOW_DRONE_PRIM_PATH
         )
 
-        # 숫자키 1~4와 F키 입력 구독 상태다.
+        # 숫자키 0~4/8/9와 F키 입력 구독 상태다.
         self._input_interface = None
         self._keyboard = None
         self._keyboard_subscription = None
@@ -294,7 +303,7 @@ class ViewportManager:
             )
 
     def _setup_follow_keyboard_shortcuts(self):
-        """숫자키 1~4와 F키로 메인 추적 대상을 바꿀 수 있게 한다."""
+        """숫자키로 자유 시점·드론·사람 추적 대상을 바꿀 수 있게 한다."""
         if self._keyboard_subscription is not None:
             return
 
@@ -321,7 +330,8 @@ class ViewportManager:
             )
             print(
                 "[FOLLOW VIEWPORT] 단축키 준비: "
-                f"{shortcuts}; F=다음 드론"
+                f"0=자유 시점; {shortcuts}; "
+                "8=조난자 상공; 9=구조자 상공; F=다음 드론"
             )
         except Exception as error:
             self._input_interface = None
@@ -353,6 +363,33 @@ class ViewportManager:
 
             if event.input in key_to_index:
                 self.set_follow_drone(key_to_index[event.input])
+                return True
+
+            if event.input in (
+                carb.input.KeyboardInput.KEY_0,
+                carb.input.KeyboardInput.NUMPAD_0,
+            ):
+                self.release_follow_camera()
+                return True
+
+            if event.input in (
+                carb.input.KeyboardInput.KEY_8,
+                carb.input.KeyboardInput.NUMPAD_8,
+            ):
+                self.set_follow_person(
+                    VICTIM_FOLLOW_PRIM_PATH,
+                    "조난자",
+                )
+                return True
+
+            if event.input in (
+                carb.input.KeyboardInput.KEY_9,
+                carb.input.KeyboardInput.NUMPAD_9,
+            ):
+                self.set_follow_person(
+                    RESCUER_FOLLOW_PRIM_PATH,
+                    "구조자",
+                )
                 return True
 
             if event.input == carb.input.KeyboardInput.F:
@@ -395,10 +432,16 @@ class ViewportManager:
             )
             return False
 
+        self._activate_follow_camera()
+        self._view_mode = "drone"
+        self._person_follow_prim_path = None
+        self._person_follow_label = None
+
         if (
             index == self._follow_drone_index
             and target_path == self._follow_drone_prim_path
         ):
+            self.update_follow_viewport()
             return True
 
         self._follow_drone_index = index
@@ -415,6 +458,49 @@ class ViewportManager:
             "[FOLLOW VIEWPORT] 추적 대상 변경: "
             f"quadrotor_{index + 1:02d} "
             f"({self._follow_drone_prim_path})"
+        )
+        return True
+
+    def _activate_follow_camera(self):
+        """잠금 추적 모드에서 사용하는 전용 카메라를 다시 연결한다."""
+        if self._follow_viewport_api is not None:
+            self._follow_viewport_api.camera_path = FOLLOW_CAMERA_PRIM_PATH
+
+    def release_follow_camera(self):
+        """0번 키: 메인 Viewport를 마우스로 조작 가능한 자유 시점으로 돌린다."""
+        if self._follow_viewport_api is None:
+            return False
+
+        self._view_mode = "free"
+        self._person_follow_prim_path = None
+        self._person_follow_label = None
+        self._follow_viewport_api.camera_path = FREE_CAMERA_PRIM_PATH
+        print(
+            "[FOLLOW VIEWPORT] 잠금 해제: 자유 시점 "
+            f"({FREE_CAMERA_PRIM_PATH})"
+        )
+        return True
+
+    def set_follow_person(self, target_path, label):
+        """8/9번 키: 조난자 또는 구조자를 상공에서 계속 내려다본다."""
+        stage = omni.usd.get_context().get_stage()
+        target_prim = stage.GetPrimAtPath(target_path)
+        if not target_prim.IsValid():
+            carb.log_warn(
+                f"{label} 추적 Prim을 찾지 못했습니다: {target_path}. "
+                "rescue_search 모드인지 확인하세요."
+            )
+            return False
+
+        self._activate_follow_camera()
+        self._view_mode = "person"
+        self._person_follow_prim_path = target_path
+        self._person_follow_label = label
+        self._follow_previous_position = None
+        self._follow_direction_xy = None
+        self.update_follow_viewport()
+        print(
+            f"[FOLLOW VIEWPORT] {label} 상공 시점: {target_path}"
         )
         return True
 
@@ -443,6 +529,11 @@ class ViewportManager:
     def update_follow_viewport(self):
         """드론 뒤에서 실제 진행방향 앞쪽을 바라보도록 카메라를 갱신한다."""
         if not self._follow_camera_ready:
+            return
+        if self._view_mode == "free":
+            return
+        if self._view_mode == "person":
+            self._update_person_follow_viewport()
             return
 
         stage = omni.usd.get_context().get_stage()
@@ -550,6 +641,43 @@ class ViewportManager:
         set_camera_view(
             eye=eye,
             target=target,
+            camera_prim_path=FOLLOW_CAMERA_PRIM_PATH,
+            viewport_api=self._follow_viewport_api,
+        )
+
+    def _update_person_follow_viewport(self):
+        """사람을 중심에 두고 주변 지형도 보이는 사선 상공 시점을 갱신한다."""
+        if not self._person_follow_prim_path:
+            return
+
+        stage = omni.usd.get_context().get_stage()
+        target_prim = stage.GetPrimAtPath(self._person_follow_prim_path)
+        if not target_prim.IsValid():
+            return
+
+        xform_cache = UsdGeom.XformCache(Usd.TimeCode.Default())
+        world_matrix = xform_cache.GetLocalToWorldTransform(target_prim)
+        translation = world_matrix.ExtractTranslation()
+        person_position = np.array(
+            [
+                float(translation[0]),
+                float(translation[1]),
+                float(translation[2]),
+            ],
+            dtype=np.float64,
+        )
+        eye = np.array(
+            [
+                person_position[0] - PERSON_CAMERA_BACK_DISTANCE_M,
+                person_position[1] - PERSON_CAMERA_SIDE_DISTANCE_M,
+                person_position[2] + PERSON_CAMERA_HEIGHT_M,
+            ],
+            dtype=np.float64,
+        )
+
+        set_camera_view(
+            eye=eye,
+            target=person_position,
             camera_prim_path=FOLLOW_CAMERA_PRIM_PATH,
             viewport_api=self._follow_viewport_api,
         )

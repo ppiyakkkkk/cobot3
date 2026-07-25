@@ -10,7 +10,7 @@ import rclpy
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
-from forest_rescue_system.log_utils import TimestampedNode
+from forest_rescue_system.common.log_utils import TimestampedNode
 
 
 class MappingManagerNode(TimestampedNode):

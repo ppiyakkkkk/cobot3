@@ -19,7 +19,7 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import String
 
 from forest_rescue_interfaces.msg import VictimDetection
-from forest_rescue_system.log_utils import TimestampedNode
+from forest_rescue_system.common.log_utils import TimestampedNode
 
 
 class HumanDetectorNode(TimestampedNode):
