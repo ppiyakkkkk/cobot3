@@ -41,6 +41,10 @@ class DroneControllerNode(TimestampedNode):
         self.declare_parameter("takeoff_altitude_m", 6.0)
         self.declare_parameter("altitude_acceptance_radius_m", 0.1)
         self.declare_parameter("takeoff_tolerance_m", 0.2)
+        # CONNECTED는 MAVSDK 링크 연결만 의미한다. PX4 Health까지 준비된
+        # 뒤 READY_FOR_TAKEOFF를 발행해 중앙 관리자가 안전하게 이륙시킨다.
+        self.declare_parameter("health_ready_timeout_sec", 60.0)
+        self.declare_parameter("early_takeoff_wait_timeout_sec", 90.0)
         self.declare_parameter("search_yaw_deg", 0.0)
         self.declare_parameter("waypoint_hold_seconds", 0.2)
         self.declare_parameter("waypoint_acceptance_radius_m", 0.8)
@@ -393,6 +397,8 @@ class DroneControllerNode(TimestampedNode):
         self.drone = System(port=server_port)
         self.connected = False
         self.health_ready = False
+        self.takeoff_ready = False
+        self.takeoff_in_progress = False
         self.offboard_started = False
         self.flight_limits_applied = False
         self.search_task = None
@@ -746,6 +752,29 @@ class DroneControllerNode(TimestampedNode):
         asyncio.create_task(self._position_telemetry_loop())
         asyncio.create_task(self._attitude_telemetry_loop())
         asyncio.create_task(self._relative_altitude_loop())
+
+        # MAVSDK 연결 직후에는 PX4가 Arm/Takeoff 명령을 아직 거부할 수
+        # 있다. 위치·Home Health까지 확인한 뒤에만 이륙 가능 상태를
+        # 외부에 알린다.
+        self._publish_status("PREPARING")
+        try:
+            await self._wait_for_health(
+                timeout_sec=float(
+                    self.get_parameter("health_ready_timeout_sec").value
+                )
+            )
+        except asyncio.TimeoutError:
+            self.get_logger().error(
+                f"{self.drone_id} PX4 Health 준비 시간 초과"
+            )
+            self._publish_status("ERROR_HEALTH_TIMEOUT")
+            return
+
+        self.takeoff_ready = True
+        self._publish_status("READY_FOR_TAKEOFF")
+        self.get_logger().info(
+            f"{self.drone_id} PX4 명령 준비 완료: Arm/Takeoff 가능"
+        )
 
     async def _configure_telemetry_rates(self):
         """다중 드론 운용 시 MAVSDK callback queue가 밀리지 않게 제한한다."""
@@ -1159,13 +1188,49 @@ class DroneControllerNode(TimestampedNode):
         await asyncio.wait_for(wait_stream(), timeout=timeout_sec)
 
     async def _takeoff(self):
-        if not self.connected:
-            self._publish_status("ERROR_NOT_CONNECTED")
+        if self.takeoff_in_progress:
+            self.get_logger().warning(
+                f"{self.drone_id} 이륙이 이미 진행 중이므로 중복 명령 무시"
+            )
             return
+
+        # DDS 또는 시작 순서 때문에 TAKEOFF가 준비 상태보다 먼저 도착해도
+        # 즉시 임무 실패로 만들지 않고 PX4 준비 완료까지 보류한다.
+        if not self.takeoff_ready:
+            self.get_logger().warning(
+                f"{self.drone_id} 조기 TAKEOFF 수신: "
+                "PX4 준비 완료까지 대기"
+            )
+            deadline = (
+                self.async_loop.time()
+                + float(
+                    self.get_parameter(
+                        "early_takeoff_wait_timeout_sec"
+                    ).value
+                )
+            )
+            while not self.takeoff_ready and self.async_loop.time() < deadline:
+                await asyncio.sleep(0.1)
+
+            if not self.takeoff_ready:
+                self.get_logger().error(
+                    f"{self.drone_id} PX4 준비 대기 시간 초과: "
+                    "TAKEOFF 취소"
+                )
+                self._publish_status("ERROR_TAKEOFF_NOT_READY")
+                return
+
+        self.takeoff_in_progress = True
         try:
             self._publish_status("PREPARING")
             if not self.health_ready:
-                await self._wait_for_health()
+                await self._wait_for_health(
+                    timeout_sec=float(
+                        self.get_parameter(
+                            "health_ready_timeout_sec"
+                        ).value
+                    )
+                )
 
             altitude = float(
                 self.get_parameter("takeoff_altitude_m").value
@@ -1197,6 +1262,8 @@ class DroneControllerNode(TimestampedNode):
         except (ActionError, ParamError, asyncio.TimeoutError) as error:
             self.get_logger().error(f"이륙 실패: {error}")
             self._publish_status(f"ERROR_TAKEOFF_{type(error).__name__}")
+        finally:
+            self.takeoff_in_progress = False
 
     async def _ensure_offboard(self):
         if self.offboard_started:

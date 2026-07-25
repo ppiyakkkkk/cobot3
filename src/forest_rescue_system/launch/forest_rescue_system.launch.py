@@ -359,7 +359,6 @@ def generate_launch_description():
 
     return LaunchDescription(
         [
-            SetEnvironmentVariable(name="PYTHONNOUSERSITE", value="1"),
             DeclareLaunchArgument(
                 "config",
                 default_value=default_config,

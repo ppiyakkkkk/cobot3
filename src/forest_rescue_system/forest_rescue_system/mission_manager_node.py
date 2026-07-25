@@ -778,7 +778,7 @@ class MissionManagerNode(TimestampedNode):
             bool(self.get_parameter("auto_takeoff_on_connect").value)
             and not self.initial_takeoff_requested
             and all(
-                self.drone_status[item] == "CONNECTED"
+                self.drone_status[item] == "READY_FOR_TAKEOFF"
                 for item in self.drone_ids
             )
         ):
