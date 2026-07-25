@@ -1,6 +1,21 @@
 #!/usr/bin/env python3
-"""rescue_search 전용 조난자·구조자 생성과 구조자 경로 추종."""
+"""rescue_search 전용 조난자·구조자 생성과 구조자 경로 추종.
 
+구조자 이동은 두 계층으로 분리한다.
+
+1. Pegasus ``Person`` / Animation Graph:
+   - 기존 걷기 애니메이션과 XY 목표 추종을 담당한다.
+2. 이 모듈의 ground follower:
+   - 현재 구조자 World XY 아래의 보행 가능 PhysX 표면을 찾는다.
+   - Animation Graph Character root의 World Z를 직접 보정한다.
+
+Pegasus ``Person.update_target_position()``은 목표 XYZ를 저장하지만,
+실제 이동은 Animation Graph의 PathPoints가 담당한다. 산악 지형에서 이
+경로가 Z를 따라가지 않는 경우가 있으므로, 공식 Animation Graph API인
+``character.set_world_transform()``으로 root Z만 별도 적용한다.
+"""
+
+from dataclasses import dataclass
 import math
 import time
 
@@ -8,6 +23,7 @@ import carb
 from geometry_msgs.msg import PointStamped
 from nav_msgs.msg import Path as PathMessage
 import numpy as np
+import omni.anim.graph.core as ag
 import omni.physx
 import omni.timeline
 import omni.usd
@@ -21,6 +37,7 @@ from pegasus.simulator.logic.people.person import Person
 from sim_config import (
     FOR_TEST_VICTIM_SPAWN_ENABLED,
     FOR_TEST_VICTIM_WORLD_XYZ,
+    NAVIGATION_STRUCTURE_ALIASES,
     PERSON_COLLIDER_CYLINDER_HEIGHT_M,
     PERSON_COLLIDER_RADIUS_M,
     PERSON_COLLIDER_TOTAL_HEIGHT_M,
@@ -45,6 +62,50 @@ from sim_config import (
 from sim_utils import write_ground_truth
 
 
+# 구조자 Z 보정은 경로계획과 독립된 실행 계층이다.
+# 60 Hz에서 8 m/s는 프레임당 약 0.133 m로, 내리막을 부드럽게 따라가면서
+# 수 미터 공중에 오래 남지 않게 한다.
+RESCUER_GROUND_FOLLOW_MAX_SPEED_M_S = 8.0
+RESCUER_GROUND_SNAP_TOLERANCE_M = 0.015
+
+# navigation surface가 가리키는 높이와 PhysX hit가 크게 다르면,
+# 다리 collision이 없는데 아래 Terrain을 잘못 지면으로 선택한 것으로 본다.
+RESCUER_GROUND_NAV_RAYCAST_MAX_ERROR_M = 2.5
+
+# 지나치게 작은 dt 또는 첫 프레임에서도 제한된 보정이 가능하도록 사용한다.
+RESCUER_GROUND_FOLLOW_MIN_DT_SEC = 1.0 / 120.0
+
+# Terrain/등록 다리 외에 지면으로 잘못 선택되면 위험한 이름들이다.
+NON_WALKABLE_GROUND_KEYWORDS = (
+    "river",
+    "water",
+    "stream",
+    "creek",
+    "brook",
+    "canal",
+    "channel",
+    "lake",
+    "pond",
+    "rock",
+    "boulder",
+    "personcollider",
+    "personcolliders",
+    "victim",
+    "rescuer",
+)
+
+
+@dataclass(frozen=True)
+class WalkableGroundHit:
+    """현재 XY에서 선택한 보행 가능 PhysX 표면."""
+
+    z: float
+    prim_path: str
+    surface_type: str
+    navigation_z: float
+    navigation_error_m: float
+
+
 class PeopleManager:
     """두 사람과 충돌 프록시, 구조자 ROS Path 추종을 관리한다."""
 
@@ -64,21 +125,57 @@ class PeopleManager:
         self._last_pose_publish_at = float("-inf")
         self._last_navigation_log_sim_time = float("-inf")
         self._last_navigation_sim_time = None
-        self._last_ground_z = None
-        self._last_z_correction = 0.0
-        self._last_move_command_applied = False
         self._last_ground_loss_log_at = float("-inf")
         self._last_large_ground_error_log_sim_time = float("-inf")
         self._ground_query_error_logged = False
+        self._character_transform_error_logged = False
         self._rescuer_xform_ops_logged = False
+
         self._rescuer_foot_offset_m = float(PERSON_GROUND_CLEARANCE_M)
         self._terrain_prim_path = str(self.terrain._terrain_prim.GetPath())
         self._timeline = omni.timeline.get_timeline_interface()
         self._scene_query = omni.physx.get_physx_scene_query_interface()
+
         self._path_subscription = None
         self._pose_publisher = None
         self._status_publisher = None
 
+        # 지면 추종 진단 상태
+        self._last_ground_hit = None
+        self._last_ground_z = None
+        self._last_navigation_surface_z = None
+        self._last_desired_z = None
+        self._last_requested_z_correction = 0.0
+        self._last_applied_z_correction = 0.0
+        self._last_foot_error_m = None
+        self._last_move_command_applied = False
+        self._last_waypoint_surface_z = None
+        self._last_waypoint_raycast_z = None
+        self._last_waypoint_ground_prim = "NONE"
+
+        self._navigation_structures = tuple(
+            dict(structure)
+            for structure in getattr(self.terrain, "_navigation_structures", [])
+            if str(structure.get("path", "")).strip()
+        )
+        self._navigation_structure_paths = tuple(
+            str(structure["path"])
+            for structure in self._navigation_structures
+        )
+        self._navigation_structure_aliases = tuple(
+            self._normalize_token(value)
+            for value in NAVIGATION_STRUCTURE_ALIASES
+            if str(value).strip()
+        )
+        self._non_walkable_ground_keywords = tuple(
+            self._normalize_token(value)
+            for value in NON_WALKABLE_GROUND_KEYWORDS
+            if str(value).strip()
+        )
+
+    # ------------------------------------------------------------------
+    # 사람 asset 및 Material
+    # ------------------------------------------------------------------
     @staticmethod
     def _select_people_assets(available_assets):
         """가능한 경우 조난자와 구조자에 서로 다른 모델을 선택한다."""
@@ -103,14 +200,19 @@ class PeopleManager:
             )
             return victim_asset, victim_asset
 
-        keywords = tuple(str(value).lower() for value in RESCUER_CHARACTER_KEYWORDS)
+        keywords = tuple(
+            str(value).lower() for value in RESCUER_CHARACTER_KEYWORDS
+        )
 
         def score(asset_name):
             lowered = asset_name.lower()
             keyword_score = 0
             for index, keyword in enumerate(keywords):
                 if keyword in lowered:
-                    keyword_score = max(keyword_score, len(keywords) - index)
+                    keyword_score = max(
+                        keyword_score,
+                        len(keywords) - index,
+                    )
             return keyword_score
 
         rescuer_asset = max(candidates, key=lambda item: (score(item), item))
@@ -119,6 +221,14 @@ class PeopleManager:
     @staticmethod
     def _normalize_material_name(value):
         """Prim/Material 이름을 키워드 비교용 소문자 문자열로 바꾼다."""
+        return "".join(
+            character.lower()
+            for character in str(value)
+            if character.isalnum()
+        )
+
+    @staticmethod
+    def _normalize_token(value):
         return "".join(
             character.lower()
             for character in str(value)
@@ -246,11 +356,13 @@ class PeopleManager:
         selection_mode = "clothing_keyword"
         if not targets and PERSON_CLOTHING_FALLBACK_TO_NON_SKIN_PARTS:
             subset_targets = [
-                prim for prim in fallback_targets
+                prim
+                for prim in fallback_targets
                 if prim.IsA(UsdGeom.Subset)
             ]
             targets = subset_targets or [
-                prim for prim in fallback_targets
+                prim
+                for prim in fallback_targets
                 if prim.IsA(UsdGeom.Mesh)
             ]
             selection_mode = "non_skin_fallback"
@@ -282,6 +394,9 @@ class PeopleManager:
             f"failed={len(failed_paths)}, targets=[{preview}]"
         )
 
+    # ------------------------------------------------------------------
+    # 사람 생성 및 ROS bridge
+    # ------------------------------------------------------------------
     def spawn_people(self):
         """rescue_search 모드에서 조난자와 구조자를 생성한다."""
         victim_asset, rescuer_asset = self._select_people_assets(
@@ -381,6 +496,11 @@ class PeopleManager:
             f"{rescuer_position[1]:.3f}, "
             f"{rescuer_position[2]:.3f})"
         )
+        print(
+            "[RESCUER] 보행 가능 표면 등록: "
+            f"terrain={self._terrain_prim_path}, "
+            f"structures={list(self._navigation_structure_paths)}"
+        )
         self._initialize_ros_bridge()
 
     def _initialize_ros_bridge(self):
@@ -418,6 +538,9 @@ class PeopleManager:
             f"status={RESCUER_STATUS_TOPIC}"
         )
 
+    # ------------------------------------------------------------------
+    # 경로 수신 및 XY 추종
+    # ------------------------------------------------------------------
     def _rescuer_path_callback(self, message):
         if self.rescuer is None:
             return
@@ -433,19 +556,24 @@ class PeopleManager:
         for pose_stamped in message.poses:
             point = pose_stamped.pose.position
             waypoint = np.asarray(
-                # Path의 Z는 보행에 사용하지 않는다. 실제 산 collision
-                # 표면 높이는 이동 프레임마다 아래 방향 raycast로 구한다.
+                # Path의 Z는 navigation surface 높이로 보관한다.
+                # Person에는 XY 진행만 맡기고, 실제 Z는 ground follower가 적용한다.
                 [point.x, point.y, point.z],
                 dtype=np.float64,
             )
             if waypoint.shape != (3,) or not np.all(np.isfinite(waypoint)):
                 continue
-            if waypoints and np.linalg.norm(waypoint - waypoints[-1]) < 0.05:
+            if (
+                waypoints
+                and np.linalg.norm(waypoint - waypoints[-1]) < 0.05
+            ):
                 continue
             waypoints.append(waypoint)
 
         if not waypoints:
-            carb.log_error("수신한 구조자 Path에 유효한 Waypoint가 없습니다.")
+            carb.log_error(
+                "수신한 구조자 Path에 유효한 Waypoint가 없습니다."
+            )
             self._set_rescuer_status("PATH_REJECTED_EMPTY")
             return
 
@@ -460,13 +588,130 @@ class PeopleManager:
             f"speed={RESCUER_MOVE_SPEED_M_S:.1f}m/s"
         )
 
-    def _current_rescuer_position(self):
+    def _ensure_character_graph(self):
+        """Play 상태의 Animation Graph Character handle을 반환한다."""
         if self.rescuer is None:
             return None
-        position = np.asarray(self.rescuer.state.position, dtype=np.float64)
+
+        graph = getattr(self.rescuer, "character_graph", None)
+        if graph is not None:
+            return graph
+
+        skel_path = str(
+            getattr(self.rescuer, "character_skel_root_stage_path", "")
+        )
+        if not skel_path:
+            return None
+
+        try:
+            graph = ag.get_character(skel_path)
+        except Exception:
+            graph = None
+
+        if graph is not None:
+            self.rescuer.character_graph = graph
+        return graph
+
+    def _read_character_world_transform(self):
+        """Animation Graph의 실제 World 위치와 회전을 읽는다."""
+        graph = self._ensure_character_graph()
+        if graph is None:
+            return None
+
+        position = carb.Float3(0.0, 0.0, 0.0)
+        rotation = carb.Float4(0.0, 0.0, 0.0, 1.0)
+        try:
+            graph.get_world_transform(position, rotation)
+        except Exception as error:
+            if not self._character_transform_error_logged:
+                carb.log_error(
+                    "[RESCUER] Character World Transform 읽기 실패: "
+                    f"{type(error).__name__}: {error}"
+                )
+                self._character_transform_error_logged = True
+            return None
+
+        values = np.asarray(
+            [position[0], position[1], position[2]],
+            dtype=np.float64,
+        )
+        if not np.all(np.isfinite(values)):
+            return None
+        self._character_transform_error_logged = False
+        return values, rotation
+
+    def _current_rescuer_position(self):
+        """가능하면 Character root의 실제 World 위치를 사용한다."""
+        transform = self._read_character_world_transform()
+        if transform is not None:
+            position, _rotation = transform
+            self._synchronize_person_state(position)
+            return position
+
+        if self.rescuer is None:
+            return None
+        position = np.asarray(
+            self.rescuer.state.position,
+            dtype=np.float64,
+        )
         if position.shape != (3,) or not np.all(np.isfinite(position)):
             return None
         return position
+
+    def _synchronize_person_state(self, position):
+        """즉시 pose 발행과 proxy 동기화를 위해 Person state도 맞춘다."""
+        if self.rescuer is None:
+            return
+        position = np.asarray(position, dtype=np.float64)
+        if position.shape != (3,) or not np.all(np.isfinite(position)):
+            return
+
+        state = getattr(self.rescuer, "_state", None)
+        if state is not None:
+            state.position = position.copy()
+
+        # Pegasus의 속도 계산에서 Z 강제 보정이 수직 속도 spike로 잡히지 않게
+        # 직전 위치의 Z만 같이 맞춘다. XY 속도 계산은 그대로 유지한다.
+        previous = getattr(self.rescuer, "_previous_position", None)
+        if isinstance(previous, np.ndarray) and previous.shape == (3,):
+            previous[2] = float(position[2])
+
+    def _set_character_world_z(self, desired_z):
+        """공식 Animation Graph API로 Character root의 Z만 변경한다."""
+        transform = self._read_character_world_transform()
+        if transform is None:
+            return False
+
+        current, rotation = transform
+        updated = np.asarray(
+            [current[0], current[1], float(desired_z)],
+            dtype=np.float64,
+        )
+        graph = self._ensure_character_graph()
+        if graph is None:
+            return False
+
+        try:
+            graph.set_world_transform(
+                carb.Float3(
+                    float(updated[0]),
+                    float(updated[1]),
+                    float(updated[2]),
+                ),
+                rotation,
+            )
+        except Exception as error:
+            if not self._character_transform_error_logged:
+                carb.log_error(
+                    "[RESCUER] Character root Z 적용 실패: "
+                    f"{type(error).__name__}: {error}"
+                )
+                self._character_transform_error_logged = True
+            return False
+
+        self._character_transform_error_logged = False
+        self._synchronize_person_state(updated)
+        return True
 
     def _skip_reached_waypoints(self):
         position = self._current_rescuer_position()
@@ -480,8 +725,10 @@ class PeopleManager:
             self._rescuer_waypoint_index += 1
 
     def _send_current_waypoint(self):
+        """다음 XY 목표를 보내고 Path Z와 실제 표면 Z를 함께 검증한다."""
         if self.rescuer is None or not self._rescuer_path:
             return
+
         if self._rescuer_waypoint_index >= len(self._rescuer_path):
             current_position = self._current_rescuer_position()
             if current_position is not None:
@@ -494,16 +741,36 @@ class PeopleManager:
             return
 
         target = self._rescuer_path[self._rescuer_waypoint_index]
-        ground_z = self._raycast_terrain_z(float(target[0]), float(target[1]))
-        if ground_z is None:
+        path_surface_z = float(target[2])
+        target_hit = self._query_walkable_ground(
+            float(target[0]),
+            float(target[1]),
+            navigation_hint_z=path_surface_z,
+        )
+        if target_hit is None:
             self._stop_rescuer_for_ground_loss(
-                "목표 waypoint 아래에서 산 지형 collision을 찾지 못함"
+                "목표 waypoint 아래에서 navigation surface와 일치하는 "
+                "보행 가능 collision을 찾지 못함"
             )
             return
-        target = target.copy()
-        target[2] = ground_z + self._rescuer_foot_offset_m
+
+        self._last_waypoint_surface_z = path_surface_z
+        self._last_waypoint_raycast_z = float(target_hit.z)
+        self._last_waypoint_ground_prim = target_hit.prim_path
+
+        current_position = self._current_rescuer_position()
+        if current_position is None:
+            return
+
+        # Animation Graph에는 XY 보행만 맡긴다. 목표 Z는 현재 실제 root Z로
+        # 유지하여 3D PathPoints가 캐릭터를 공중으로 끌어당기지 않게 한다.
+        animation_target = [
+            float(target[0]),
+            float(target[1]),
+            float(current_position[2]),
+        ]
         self.rescuer.update_target_position(
-            target.tolist(),
+            animation_target,
             walk_speed=float(RESCUER_MOVE_SPEED_M_S),
         )
         self._last_move_command_applied = True
@@ -512,64 +779,42 @@ class PeopleManager:
             f"{len(self._rescuer_path)}"
         )
 
-    def update_rescuer_navigation(self):
-        """매 시뮬레이션 프레임 ROS 콜백과 Waypoint 진행을 갱신한다."""
-        if self._ros_node is None or self.rescuer is None:
-            return
-        rclpy.spin_once(self._ros_node, timeout_sec=0.0)
-        self._publish_rescuer_pose_if_due()
-        if not self._rescuer_path or self._rescuer_status == "ARRIVED":
-            return
-
-        position = self._current_rescuer_position()
-        if position is None:
-            return
-
-        sim_time = float(self._timeline.get_current_time())
-        if self._last_navigation_sim_time is None:
-            sim_dt = 0.0
-        else:
-            sim_dt = max(0.0, sim_time - self._last_navigation_sim_time)
-        self._last_navigation_sim_time = sim_time
-
-        target = self._rescuer_path[self._rescuer_waypoint_index]
-        distance_xy = float(np.linalg.norm(target[:2] - position[:2]))
-        ground_z = self._raycast_terrain_z(
-            float(position[0]), float(position[1])
-        )
-        self._last_move_command_applied = False
-        if ground_z is None:
-            self._last_ground_z = None
-            self._last_z_correction = 0.0
-            self._stop_rescuer_for_ground_loss(
-                "현재 구조자 XY 아래에서 산 지형 collision을 찾지 못함"
+        surface_difference = float(target_hit.z) - path_surface_z
+        if abs(surface_difference) > 0.5:
+            carb.log_warn(
+                "[RESCUER] Waypoint navigation/PhysX 높이 차이: "
+                f"waypoint_z={path_surface_z:.3f}, "
+                f"raycast_z={target_hit.z:.3f}, "
+                f"diff={surface_difference:+.3f}m, "
+                f"prim={target_hit.prim_path}"
             )
-        else:
-            self._last_ground_z = ground_z
-            self._apply_ground_following(position, ground_z)
-            self._refresh_current_ground_target(ground_z)
 
-        diagnostic_position = self._current_rescuer_position()
-        if diagnostic_position is None:
-            diagnostic_position = position
-        self._log_navigation_diagnostics(
-            sim_time=sim_time,
-            sim_dt=sim_dt,
-            position=diagnostic_position,
-            target=target,
-            distance_xy=distance_xy,
-        )
-
-        if ground_z is None:
+    def _refresh_current_xy_target(self, current_z):
+        """현재 Waypoint의 XY와 보정된 현재 Z로 Animation Graph 목표를 갱신한다."""
+        if self._rescuer_waypoint_index >= len(self._rescuer_path):
             return
-        if distance_xy <= float(RESCUER_WAYPOINT_TOLERANCE_M):
-            self._rescuer_waypoint_index += 1
-            self._skip_reached_waypoints()
-            self._send_current_waypoint()
+        target = self._rescuer_path[self._rescuer_waypoint_index]
+        self.rescuer.update_target_position(
+            [
+                float(target[0]),
+                float(target[1]),
+                float(current_z),
+            ],
+            walk_speed=float(RESCUER_MOVE_SPEED_M_S),
+        )
+        self._last_move_command_applied = True
+        if self._rescuer_status == "GROUND_LOST":
+            self._set_rescuer_status(
+                f"WALKING:{self._rescuer_waypoint_index + 1}/"
+                f"{len(self._rescuer_path)}"
+            )
 
+    # ------------------------------------------------------------------
+    # 보행 가능 지면 판정
+    # ------------------------------------------------------------------
     @staticmethod
     def _hit_prim_path(hit):
-        """Isaac Sim 버전에 따라 dict 또는 RaycastHit 객체로 오는 hit를 처리한다."""
+        """Isaac Sim 버전별 raycast hit에서 Prim 경로를 꺼낸다."""
         for key in ("collision", "rigidBody", "material"):
             if isinstance(hit, dict):
                 value = hit.get(key)
@@ -586,31 +831,107 @@ class PeopleManager:
             return hit.get("position")
         return getattr(hit, "position", None)
 
-    def _is_terrain_hit(self, prim_path):
-        """산 Terrain prim 및 그 하위 collision만 지면으로 인정한다."""
-        terrain = self._terrain_prim_path.rstrip("/")
-        candidate = str(prim_path).rstrip("/")
+    @staticmethod
+    def _paths_overlap(first, second):
+        first = str(first).rstrip("/")
+        second = str(second).rstrip("/")
+        if not first or not second:
+            return False
         return (
-            candidate == terrain
-            or candidate.startswith(f"{terrain}/")
-            or terrain.startswith(f"{candidate}/")
+            first == second
+            or first.startswith(f"{second}/")
+            or second.startswith(f"{first}/")
         )
 
-    def _raycast_terrain_z(self, x, y):
-        """위에서 아래로 모든 hit를 검사해 산 Terrain 표면 Z만 반환한다."""
+    def _classify_walkable_prim(self, prim_path):
+        """Terrain 또는 navigation surface에 등록된 구조물만 허용한다."""
+        candidate = str(prim_path).strip()
+        if not candidate:
+            return None
+
+        normalized = self._normalize_token(candidate)
+        if any(
+            keyword and keyword in normalized
+            for keyword in self._non_walkable_ground_keywords
+        ):
+            return None
+
+        if self._paths_overlap(candidate, self._terrain_prim_path):
+            return "terrain"
+
+        for structure_path in self._navigation_structure_paths:
+            if self._paths_overlap(candidate, structure_path):
+                return "navigation_structure"
+
+        # 등록된 구조물의 collision Prim이 별도 경로로 생성되는 환경을 위한
+        # fallback이다. sim_config.py에서 navigation structure로 명시한
+        # bridge/deck 계열 이름만 허용한다.
+        if any(
+            alias and alias in normalized
+            for alias in self._navigation_structure_aliases
+        ):
+            return "navigation_structure_alias"
+
+        return None
+
+    def _navigation_height(self, x, y):
+        """실행 중 TerrainHeightField가 사용한 navigation surface 높이."""
+        try:
+            value = float(self.terrain.navigation_height(float(x), float(y)))
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            try:
+                value = float(self.terrain.height(float(x), float(y)))
+            except (RuntimeError, TypeError, ValueError):
+                return float("nan")
+        return value if math.isfinite(value) else float("nan")
+
+    def _navigation_structure_at(self, x, y, margin_m=0.10):
+        """확장 margin이 아닌 실제 구조물 AABB 안에 있는지 확인한다."""
+        x = float(x)
+        y = float(y)
+        margin = max(0.0, float(margin_m))
+        for structure in self._navigation_structures:
+            if (
+                float(structure["x_min"]) - margin
+                <= x
+                <= float(structure["x_max"]) + margin
+                and float(structure["y_min"]) - margin
+                <= y
+                <= float(structure["y_max"]) + margin
+            ):
+                return structure
+        return None
+
+    def _query_walkable_ground(self, x, y, navigation_hint_z=None):
+        """현재 XY의 모든 PhysX hit 중 navigation surface와 맞는 지면을 선택한다."""
+        current = self._current_rescuer_position()
+        current_z = (
+            float(current[2])
+            if current is not None and math.isfinite(float(current[2]))
+            else float(getattr(self.terrain, "z_max", 100.0))
+        )
         ray_top = max(
             float(getattr(self.terrain, "z_max", 100.0)) + 20.0,
-            float(self._current_rescuer_position()[2]) + 20.0,
+            current_z + 20.0,
         )
         ray_bottom = float(getattr(self.terrain, "z_min", -100.0)) - 20.0
-        hits = []
+        accepted_hits = []
 
         def report_hit(hit):
             prim_path = self._hit_prim_path(hit)
-            if self._is_terrain_hit(prim_path):
-                position = self._hit_position(hit)
-                if position is not None:
-                    hits.append((float(position[2]), prim_path))
+            surface_type = self._classify_walkable_prim(prim_path)
+            if surface_type is None:
+                return True
+
+            position = self._hit_position(hit)
+            if position is None:
+                return True
+            try:
+                hit_z = float(position[2])
+            except (TypeError, ValueError, IndexError):
+                return True
+            if math.isfinite(hit_z):
+                accepted_hits.append((hit_z, prim_path, surface_type))
             return True
 
         try:
@@ -623,19 +944,291 @@ class PeopleManager:
         except Exception as error:
             if not self._ground_query_error_logged:
                 carb.log_error(
-                    "[RESCUER] PhysX 산 지형 raycast 실패: "
+                    "[RESCUER] PhysX 보행 지면 raycast 실패: "
                     f"{type(error).__name__}: {error}"
                 )
                 self._ground_query_error_logged = True
             return None
 
-        if not hits:
-            return None
-        self._ground_query_error_logged = False
-        return max(hits, key=lambda item: item[0])[0]
+        if navigation_hint_z is None or not math.isfinite(
+            float(navigation_hint_z)
+        ):
+            navigation_z = self._navigation_height(x, y)
+        else:
+            navigation_z = float(navigation_hint_z)
 
+        if not accepted_hits:
+            return None
+
+        expected_structure = self._navigation_structure_at(x, y)
+        if expected_structure is not None:
+            # 실제 다리 AABB 안에서는 Terrain hit로 대체하지 않는다.
+            # 다리 collision이 누락된 경우 아래 Terrain으로 내려가 공중/낙하
+            # 현상이 생기므로 안전하게 GROUND_LOST로 전환한다.
+            structure_hits = [
+                item
+                for item in accepted_hits
+                if item[2].startswith("navigation_structure")
+            ]
+            if not structure_hits:
+                return None
+            candidate_hits = structure_hits
+        else:
+            # navigation surface 생성 시 다리 주변에 XY margin을 주므로,
+            # 실제 Mesh 바깥의 접근부에서는 Terrain 위 보행을 허용한다.
+            candidate_hits = accepted_hits
+
+        # navigation surface와 가장 가까운 물리 표면을 우선한다.
+        # navigation_z가 없으면 가장 높은 허용 표면을 선택한다.
+        if math.isfinite(navigation_z):
+            selected = min(
+                candidate_hits,
+                key=lambda item: (
+                    abs(float(item[0]) - navigation_z),
+                    -float(item[0]),
+                ),
+            )
+            navigation_error = abs(float(selected[0]) - navigation_z)
+            if (
+                expected_structure is not None
+                and navigation_error
+                > float(RESCUER_GROUND_NAV_RAYCAST_MAX_ERROR_M)
+            ):
+                return None
+        else:
+            selected = max(candidate_hits, key=lambda item: float(item[0]))
+            navigation_error = float("nan")
+
+        self._ground_query_error_logged = False
+        return WalkableGroundHit(
+            z=float(selected[0]),
+            prim_path=str(selected[1]),
+            surface_type=str(selected[2]),
+            navigation_z=float(navigation_z),
+            navigation_error_m=float(navigation_error),
+        )
+
+    # ------------------------------------------------------------------
+    # 실제 Character root Z 보정
+    # ------------------------------------------------------------------
+    def _apply_ground_following(self, position, ground_hit, sim_dt):
+        """지면 높이에 맞춰 Animation Graph Character root Z를 직접 보정한다."""
+        desired_z = float(ground_hit.z) + self._rescuer_foot_offset_m
+        current_z = float(position[2])
+        requested = desired_z - current_z
+
+        effective_dt = max(
+            float(RESCUER_GROUND_FOLLOW_MIN_DT_SEC),
+            float(sim_dt),
+        )
+        max_step = (
+            float(RESCUER_GROUND_FOLLOW_MAX_SPEED_M_S)
+            * effective_dt
+        )
+        if abs(requested) <= float(RESCUER_GROUND_SNAP_TOLERANCE_M):
+            applied = requested
+        else:
+            applied = float(np.clip(requested, -max_step, max_step))
+
+        new_z = current_z + applied
+        applied_ok = self._set_character_world_z(new_z)
+
+        self._last_ground_hit = ground_hit
+        self._last_ground_z = float(ground_hit.z)
+        self._last_navigation_surface_z = float(ground_hit.navigation_z)
+        self._last_desired_z = desired_z
+        self._last_requested_z_correction = requested
+        self._last_applied_z_correction = applied if applied_ok else 0.0
+
+        if not applied_ok:
+            self._last_foot_error_m = requested
+            return False
+
+        corrected_position = self._current_rescuer_position()
+        corrected_z = (
+            float(corrected_position[2])
+            if corrected_position is not None
+            else new_z
+        )
+        self._last_foot_error_m = corrected_z - desired_z
+
+        if abs(requested) >= 0.75:
+            sim_time = float(self._timeline.get_current_time())
+            if (
+                sim_time - self._last_large_ground_error_log_sim_time
+                >= 1.0
+            ):
+                carb.log_warn(
+                    "[RESCUER] 큰 지면 Z 오차를 단계 보정 중: "
+                    f"current_z={current_z:.3f}, "
+                    f"ground_z={ground_hit.z:.3f}, "
+                    f"desired_z={desired_z:.3f}, "
+                    f"requested={requested:+.3f}m, "
+                    f"applied={applied:+.3f}m, "
+                    f"prim={ground_hit.prim_path}"
+                )
+                self._last_large_ground_error_log_sim_time = sim_time
+        return True
+
+    def update_rescuer_navigation(self):
+        """매 시뮬레이션 프레임 ROS, XY 추종, 실제 지면 Z를 갱신한다."""
+        if self._ros_node is None or self.rescuer is None:
+            return
+
+        rclpy.spin_once(self._ros_node, timeout_sec=0.0)
+
+        # 경로가 없을 때도 실제 현재 pose는 계속 발행한다.
+        if not self._rescuer_path or self._rescuer_status == "ARRIVED":
+            self._publish_rescuer_pose_if_due()
+            return
+
+        position = self._current_rescuer_position()
+        if position is None:
+            return
+
+        sim_time = float(self._timeline.get_current_time())
+        if self._last_navigation_sim_time is None:
+            sim_dt = 0.0
+        else:
+            sim_dt = max(0.0, sim_time - self._last_navigation_sim_time)
+        self._last_navigation_sim_time = sim_time
+
+        target = self._rescuer_path[self._rescuer_waypoint_index]
+        distance_xy = float(np.linalg.norm(target[:2] - position[:2]))
+
+        # 현재 XY의 navigation surface 높이를 hint로 사용한다.
+        current_navigation_z = self._navigation_height(
+            float(position[0]),
+            float(position[1]),
+        )
+        ground_hit = self._query_walkable_ground(
+            float(position[0]),
+            float(position[1]),
+            navigation_hint_z=current_navigation_z,
+        )
+
+        self._last_move_command_applied = False
+        if ground_hit is None:
+            self._clear_ground_diagnostics()
+            self._stop_rescuer_for_ground_loss(
+                "현재 구조자 XY 아래에서 navigation surface와 일치하는 "
+                "Terrain/다리 collision을 찾지 못함"
+            )
+            self._publish_rescuer_pose_if_due()
+            return
+
+        if not self._apply_ground_following(position, ground_hit, sim_dt):
+            self._stop_rescuer_for_ground_loss(
+                "보행 지면은 찾았지만 Animation Graph root Z를 적용하지 못함"
+            )
+            self._publish_rescuer_pose_if_due()
+            return
+
+        corrected_position = self._current_rescuer_position()
+        if corrected_position is None:
+            corrected_position = position
+        self._refresh_current_xy_target(float(corrected_position[2]))
+
+        self._log_navigation_diagnostics(
+            sim_time=sim_time,
+            position=corrected_position,
+            target=target,
+            distance_xy=distance_xy,
+            sim_dt=sim_dt,
+        )
+
+        # 보정된 동일한 XYZ를 ROS와 physics proxy가 사용한다.
+        self._publish_rescuer_pose_if_due()
+
+        if distance_xy <= float(RESCUER_WAYPOINT_TOLERANCE_M):
+            self._rescuer_waypoint_index += 1
+            self._skip_reached_waypoints()
+            self._send_current_waypoint()
+
+    def _clear_ground_diagnostics(self):
+        self._last_ground_hit = None
+        self._last_ground_z = None
+        self._last_navigation_surface_z = None
+        self._last_desired_z = None
+        self._last_requested_z_correction = 0.0
+        self._last_applied_z_correction = 0.0
+        self._last_foot_error_m = None
+
+    def _stop_rescuer_for_ground_loss(self, reason):
+        position = self._current_rescuer_position()
+        if position is not None:
+            self.rescuer.update_target_position(
+                position.tolist(),
+                walk_speed=0.0,
+            )
+        self._last_move_command_applied = False
+        self._set_rescuer_status("GROUND_LOST")
+        now = time.monotonic()
+        if now - self._last_ground_loss_log_at >= 1.0:
+            carb.log_error(f"[RESCUER] 이동 정지: {reason}")
+            self._last_ground_loss_log_at = now
+
+    @staticmethod
+    def _format_optional(value):
+        if value is None:
+            return "NONE"
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return str(value)
+        return f"{value:.3f}" if math.isfinite(value) else "NONE"
+
+    def _log_navigation_diagnostics(
+        self,
+        sim_time,
+        position,
+        target,
+        distance_xy,
+        sim_dt,
+    ):
+        if sim_time - self._last_navigation_log_sim_time < 1.0:
+            return
+        self._last_navigation_log_sim_time = sim_time
+
+        hit = self._last_ground_hit
+        ground_prim = hit.prim_path if hit is not None else "NONE"
+        ground_type = hit.surface_type if hit is not None else "NONE"
+
+        print(
+            "[RESCUER][GROUND] "
+            f"current=({position[0]:.3f},{position[1]:.3f},"
+            f"{position[2]:.3f}), "
+            f"current_z={position[2]:.3f}, "
+            f"ground_prim={ground_prim}, "
+            f"ground_type={ground_type}, "
+            f"ground_z={self._format_optional(self._last_ground_z)}, "
+            f"navigation_z="
+            f"{self._format_optional(self._last_navigation_surface_z)}, "
+            f"desired_z={self._format_optional(self._last_desired_z)}, "
+            f"requested_z="
+            f"{self._last_requested_z_correction:+.3f}m, "
+            f"applied_z={self._last_applied_z_correction:+.3f}m, "
+            f"foot_error="
+            f"{self._format_optional(self._last_foot_error_m)}m, "
+            f"waypoint=({target[0]:.3f},{target[1]:.3f},"
+            f"{target[2]:.3f}), "
+            f"waypoint_navigation_z="
+            f"{self._format_optional(self._last_waypoint_surface_z)}, "
+            f"waypoint_raycast_z="
+            f"{self._format_optional(self._last_waypoint_raycast_z)}, "
+            f"waypoint_ground_prim={self._last_waypoint_ground_prim}, "
+            f"distance_xy={distance_xy:.3f}m, "
+            f"index={self._rescuer_waypoint_index + 1}/"
+            f"{len(self._rescuer_path)}, "
+            f"move_command={self._last_move_command_applied}, "
+            f"sim_dt={sim_dt:.4f}s"
+        )
+
+    # ------------------------------------------------------------------
+    # 구조자 발 오프셋 및 상태/pose
+    # ------------------------------------------------------------------
     def _measure_rescuer_foot_offset(self):
-        """Character visual 최저점과 발 기준 state 원점 사이 오프셋을 측정한다."""
+        """Character visual 최저점과 root state 원점 사이 오프셋을 측정한다."""
         try:
             stage = omni.usd.get_context().get_stage()
             root_path = str(self.rescuer._stage_prefix)
@@ -644,7 +1237,9 @@ class PeopleManager:
                 Usd.TimeCode.Default(),
                 [UsdGeom.Tokens.default_, UsdGeom.Tokens.render],
             )
-            world_range = bbox_cache.ComputeWorldBound(root_prim).ComputeAlignedRange()
+            world_range = (
+                bbox_cache.ComputeWorldBound(root_prim).ComputeAlignedRange()
+            )
             visual_min_z = float(world_range.GetMin()[2])
             state_z = float(self.rescuer.state.position[2])
             measured = state_z - visual_min_z
@@ -665,7 +1260,7 @@ class PeopleManager:
             )
 
     def _log_rescuer_xform_ops_once(self):
-        """구조자 Prim의 기존 xformOp 구성을 변경 없이 한 번만 기록한다."""
+        """Character Prim의 기존 xformOp를 변경하지 않고 기록만 한다."""
         if self._rescuer_xform_ops_logged or self.rescuer is None:
             return
         self._rescuer_xform_ops_logged = True
@@ -696,81 +1291,6 @@ class PeopleManager:
                 f"{type(error).__name__}: {error}"
             )
 
-    def _apply_ground_following(self, position, ground_z):
-        """지면 목표 Z를 계산한다. 실제 적용은 Person의 공식 목표 API가 맡는다."""
-        desired_z = float(ground_z) + self._rescuer_foot_offset_m
-        requested = desired_z - float(position[2])
-        self._last_z_correction = requested
-
-        if abs(requested) >= 0.75:
-            sim_time = float(self._timeline.get_current_time())
-            if (
-                sim_time - self._last_large_ground_error_log_sim_time
-                >= 1.0
-            ):
-                carb.log_warn(
-                    "[RESCUER] 현재 지면 목표와 Z 차이가 큽니다: "
-                    f"current_z={position[2]:.3f}, "
-                    f"ground_z={ground_z:.3f}, "
-                    f"desired_z={desired_z:.3f}, "
-                    f"requested={requested:+.3f}m"
-                )
-                self._last_large_ground_error_log_sim_time = sim_time
-
-    def _refresh_current_ground_target(self, current_ground_z):
-        """raycast 지면 Z를 Person의 기존 XYZ 목표 갱신 경로로 적용한다."""
-        if self._rescuer_waypoint_index >= len(self._rescuer_path):
-            return
-        target = self._rescuer_path[self._rescuer_waypoint_index].copy()
-        target[2] = float(current_ground_z) + self._rescuer_foot_offset_m
-        self.rescuer.update_target_position(
-            target.tolist(),
-            walk_speed=float(RESCUER_MOVE_SPEED_M_S),
-        )
-        self._last_move_command_applied = True
-        if self._rescuer_status == "GROUND_LOST":
-            self._set_rescuer_status(
-                f"WALKING:{self._rescuer_waypoint_index + 1}/"
-                f"{len(self._rescuer_path)}"
-            )
-
-    def _stop_rescuer_for_ground_loss(self, reason):
-        position = self._current_rescuer_position()
-        if position is not None:
-            self.rescuer.update_target_position(
-                position.tolist(),
-                walk_speed=0.0,
-            )
-        self._last_move_command_applied = False
-        self._set_rescuer_status("GROUND_LOST")
-        now = time.monotonic()
-        if now - self._last_ground_loss_log_at >= 1.0:
-            carb.log_error(f"[RESCUER] 이동 정지: {reason}")
-            self._last_ground_loss_log_at = now
-
-    def _log_navigation_diagnostics(
-        self, sim_time, sim_dt, position, target, distance_xy
-    ):
-        if sim_time - self._last_navigation_log_sim_time < 1.0:
-            return
-        self._last_navigation_log_sim_time = sim_time
-        ground_text = (
-            f"{self._last_ground_z:.3f}"
-            if self._last_ground_z is not None
-            else "NONE"
-        )
-        print(
-            "[RESCUER][DIAG] "
-            f"current=({position[0]:.3f},{position[1]:.3f},{position[2]:.3f}), "
-            f"target=({target[0]:.3f},{target[1]:.3f},{target[2]:.3f}), "
-            f"distance_xy={distance_xy:.3f}m, ground_z={ground_text}, "
-            f"z_correction={self._last_z_correction:+.3f}m, "
-            f"waypoint={self._rescuer_waypoint_index + 1}/"
-            f"{len(self._rescuer_path)}, "
-            f"move_command={self._last_move_command_applied}, "
-            f"sim_dt={sim_dt:.4f}s"
-        )
-
     def _publish_rescuer_pose_if_due(self):
         now = time.monotonic()
         if now - self._last_pose_publish_at < float(
@@ -780,6 +1300,7 @@ class PeopleManager:
         position = self._current_rescuer_position()
         if position is None:
             return
+
         message = PointStamped()
         message.header.frame_id = "map"
         message.header.stamp = self._ros_node.get_clock().now().to_msg()
@@ -808,6 +1329,9 @@ class PeopleManager:
             rclpy.shutdown()
         self._owns_rclpy_context = False
 
+    # ------------------------------------------------------------------
+    # 사람용 kinematic collision proxy
+    # ------------------------------------------------------------------
     def _create_person_physics_proxy(
         self,
         person_name,
@@ -852,15 +1376,24 @@ class PeopleManager:
         )
 
     def sync_person_physics_proxies(self):
-        """걷는 사람의 현재 World 위치로 물리 충돌체를 이동한다."""
+        """보정된 Person World 위치로 물리 충돌체를 이동한다."""
         for person_name, proxy in self._person_physics_proxies.items():
-            person_position = np.asarray(
-                proxy["person"].state.position,
-                dtype=np.float64,
-            )
+            person = proxy["person"]
 
-            if person_position.shape != (3,) or not np.all(
-                np.isfinite(person_position)
+            # 구조자는 Animation Graph root에서 읽어 Person state와 동기화한
+            # 값이 우선이다. 조난자는 기존 state 위치를 사용한다.
+            if person is self.rescuer:
+                person_position = self._current_rescuer_position()
+            else:
+                person_position = np.asarray(
+                    person.state.position,
+                    dtype=np.float64,
+                )
+
+            if (
+                person_position is None
+                or person_position.shape != (3,)
+                or not np.all(np.isfinite(person_position))
             ):
                 carb.log_warn(
                     f"Invalid person position for {person_name}: "
