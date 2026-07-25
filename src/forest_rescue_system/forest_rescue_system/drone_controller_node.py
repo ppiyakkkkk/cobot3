@@ -121,7 +121,7 @@ class DroneControllerNode(TimestampedNode):
         self.declare_parameter("search_xy_priority_enabled", True)
         self.declare_parameter(
             "search_keep_high_altitude_after_escape",
-            True,
+            False,
         )
         # 상승 회피 후 계속 같은 높은 고도에 머무르지 않고, 다음 수색
         # Waypoint마다 지형 안전고도를 넘지 않는 범위에서 1m씩 회복한다.
@@ -938,6 +938,63 @@ class DroneControllerNode(TimestampedNode):
             )
             if not completed:
                 return
+
+            # 협동 진입은 지형 변화 때문에 높은 안전고도를 유지할 수 있다.
+            # 그 고도를 첫 수색 구간까지 끌고 가지 않도록, 첫 협동 수색
+            # Waypoint의 계획 고도로 현재 XY에서 먼저 단계 하강한다.
+            # 하강 중 장애물이 감지되면 기존 안전 정책에 따라 높은 고도를
+            # 유지하고 수색을 계속한다.
+            if self.cooperative_search_waypoints:
+                first_search_down_m = float(
+                    self.cooperative_search_waypoints[0][2]
+                )
+                altitude_tolerance_m = max(
+                    0.1,
+                    float(
+                        self.get_parameter(
+                            "waypoint_altitude_tolerance_m"
+                        ).value
+                    ),
+                )
+                if (
+                    self.latest_down_m
+                    < first_search_down_m - altitude_tolerance_m
+                ):
+                    self.get_logger().info(
+                        "협동 진입 완료 후 첫 수색 고도로 하강: "
+                        f"현재D={self.latest_down_m:.1f}, "
+                        f"첫수색D={first_search_down_m:.1f}"
+                    )
+                    descended = await self._descend_after_vertical_escape(
+                        first_search_down_m,
+                        self.latest_down_m,
+                        yaw_deg,
+                        altitude_tolerance_m,
+                    )
+                    if self.stop_search_event.is_set():
+                        return
+                    if descended:
+                        self.get_logger().info(
+                            "협동 첫 수색 고도 하강 완료: "
+                            f"D={self.latest_down_m:.1f}"
+                        )
+                    elif bool(
+                        self.get_parameter(
+                            "vertical_escape_keep_high_on_descent_failure"
+                        ).value
+                    ):
+                        self.get_logger().warning(
+                            "협동 첫 수색 고도 하강 중 장애물 감지: "
+                            "현재 높은 안전고도를 유지하고 수색을 계속합니다."
+                        )
+                    else:
+                        self.get_logger().error(
+                            "협동 첫 수색 고도 하강 실패로 협동 수색을 중단합니다."
+                        )
+                        self._publish_status(
+                            "ERROR_COOP_ENTRY_DESCENT"
+                        )
+                        return
 
             mode = self.cooperative_repeat_mode
             pass_count = 0

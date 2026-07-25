@@ -48,11 +48,12 @@ class MissionManagerNode(TimestampedNode):
         self.declare_parameter("require_map_position_before_detection", True)
         self.declare_parameter("start_exclusion_radius_m", 15.0)
         self.declare_parameter("detection_position_consistency_radius_m", 4.0)
-        self.declare_parameter("detection_position_timeout_sec", 1.0)
-        # 완전히 연속된 프레임만 요구하지 않고, 짧은 시간창 안에서
-        # 위치가 일치하는 양성 탐지를 누적한다.
-        self.declare_parameter("detection_window_sec", 2.0)
-        self.declare_parameter("maximum_missed_detections", 2)
+        # Localizer의 TF 재시도 제한(기본 2초)보다 길어야 동일 stamp의
+        # map 위치가 늦게 도착해도 양성 탐지와 정상적으로 짝지을 수 있다.
+        self.declare_parameter("detection_position_timeout_sec", 3.0)
+        # 미탐 프레임은 무시하고, 최근 시간창 안의 유효한 양성 탐지만
+        # 누적한다. 기본값은 3초 안에 탐지 3회다.
+        self.declare_parameter("detection_window_sec", 3.0)
         self.declare_parameter("victim_approach_height_m", 7.0)
         self.declare_parameter(
             "search_zone_bounds_xy",
@@ -67,6 +68,17 @@ class MissionManagerNode(TimestampedNode):
             [-34.0, 40.0, -29.0, 40.0, -39.0, 40.0],
         )
         self.declare_parameter("auto_takeoff_on_connect", True)
+
+        # 확정된 조난자 위치를 구조자 경로계획기로 전달하고, 구조자가
+        # 도착해야 최종 COMPLETE로 전환한다.
+        self.declare_parameter("victim_goal_topic", "/rescue/victim_goal")
+        self.declare_parameter(
+            "rescuer_status_topic", "/rescue/rescuer/status"
+        )
+        self.declare_parameter(
+            "rescuer_route_status_topic", "/rescue/rescuer/route_status"
+        )
+        self.declare_parameter("require_rescuer_arrival", True)
 
         # 특정 드론 담당 구역을 런타임에 다시 나누는 협동 수색 설정이다.
         self.declare_parameter(
@@ -176,9 +188,6 @@ class MissionManagerNode(TimestampedNode):
         self.cooperative_plan_publishers = {}
         self.drone_status = {drone_id: "UNKNOWN" for drone_id in self.drone_ids}
         self.detection_counts = {drone_id: 0 for drone_id in self.drone_ids}
-        self.detection_miss_counts = {
-            drone_id: 0 for drone_id in self.drone_ids
-        }
         self.search_finished = set()
         self.failed_drones = set()
         self.latest_camera_positions = {}
@@ -196,6 +205,9 @@ class MissionManagerNode(TimestampedNode):
         self.last_detection_delay_log_at = 0.0
         self.last_exclusion_log_at = {drone_id: 0.0 for drone_id in self.drone_ids}
         self.last_zone_log_at = {drone_id: 0.0 for drone_id in self.drone_ids}
+        self.last_position_timeout_log_at = {
+            drone_id: 0.0 for drone_id in self.drone_ids
+        }
         self.latest_drone_local_positions = {}
         self.cooperative_plan = None
         self.cooperative_active_drones = []
@@ -204,6 +216,12 @@ class MissionManagerNode(TimestampedNode):
         self.cooperative_started_at = None
         self.cooperative_owner_drone = None
         self.cooperative_target_bounds = None
+
+        self.rescuer_status = "UNKNOWN"
+        self.rescuer_route_status = "UNKNOWN"
+        self.rescuer_arrived = False
+        self.victim_goal_published = False
+        self.confirmed_victim_position = None
 
         marker_qos = QoSProfile(depth=1)
         marker_qos.reliability = ReliabilityPolicy.RELIABLE
@@ -263,10 +281,13 @@ class MissionManagerNode(TimestampedNode):
                 10,
             )
 
+        state_qos = QoSProfile(depth=1)
+        state_qos.reliability = ReliabilityPolicy.RELIABLE
+        state_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
         self.state_publisher = self.create_publisher(
             String,
             "/mission/state",
-            10,
+            state_qos,
         )
         self.mode_publisher = self.create_publisher(
             String,
@@ -277,6 +298,23 @@ class MissionManagerNode(TimestampedNode):
             String,
             "/mission/finder_drone",
             10,
+        )
+        self.victim_goal_publisher = self.create_publisher(
+            PointStamped,
+            str(self.get_parameter("victim_goal_topic").value),
+            marker_qos,
+        )
+        self.create_subscription(
+            String,
+            str(self.get_parameter("rescuer_status_topic").value),
+            self._rescuer_status_callback,
+            marker_qos,
+        )
+        self.create_subscription(
+            String,
+            str(self.get_parameter("rescuer_route_status_topic").value),
+            self._rescuer_route_status_callback,
+            marker_qos,
         )
         self.start_service = self.create_service(
             Trigger,
@@ -714,13 +752,17 @@ class MissionManagerNode(TimestampedNode):
         self.finder_hovering = False
         self.camera_position_received = False
         self.map_position_received = False
+        self.rescuer_status = "IDLE"
+        self.rescuer_route_status = "IDLE"
+        self.rescuer_arrived = False
+        self.victim_goal_published = False
+        self.confirmed_victim_position = None
         self.search_finished.clear()
         self.failed_drones.clear()
         self.latest_camera_positions.clear()
         self.latest_map_positions.clear()
         for drone_id in self.drone_ids:
             self.detection_counts[drone_id] = 0
-            self.detection_miss_counts[drone_id] = 0
             self.pending_detection_stamps[drone_id].clear()
             self.confirmed_map_sequences[drone_id].clear()
             self.recent_map_positions[drone_id].clear()
@@ -854,7 +896,9 @@ class MissionManagerNode(TimestampedNode):
             return
 
         if not detection.detected:
-            self._register_detection_miss(
+            # 미탐 프레임은 양성 탐지 누적을 초기화하지 않는다.
+            # 다만 3초 시간창을 벗어난 오래된 양성 기록은 제거한다.
+            self._prune_detection_window(
                 drone_id,
                 self._stamp_to_seconds(detection.header.stamp),
             )
@@ -864,7 +908,9 @@ class MissionManagerNode(TimestampedNode):
             self.get_parameter("minimum_detection_confidence").value
         )
         if float(detection.confidence) < minimum_confidence:
-            self._register_detection_miss(
+            # 낮은 confidence 프레임도 누적에 영향 없이 무시하고,
+            # 오래된 양성 기록만 시간 기준으로 정리한다.
+            self._prune_detection_window(
                 drone_id,
                 self._stamp_to_seconds(detection.header.stamp),
             )
@@ -880,7 +926,6 @@ class MissionManagerNode(TimestampedNode):
             drone_id,
             self._stamp_to_seconds(detection.header.stamp),
         )
-        self.detection_miss_counts[drone_id] = 0
         pending = self.pending_detection_stamps[drone_id]
         pending[stamp_ns] = (
             now,
@@ -899,6 +944,13 @@ class MissionManagerNode(TimestampedNode):
             inserted_at = record[0]
             if now - inserted_at > timeout:
                 pending.pop(old_stamp, None)
+                if now - self.last_position_timeout_log_at[drone_id] >= 2.0:
+                    self.get_logger().warning(
+                        f"{drone_id} 양성 탐지의 동일 stamp map 위치가 "
+                        f"{timeout:.1f}초 안에 도착하지 않아 검증에서 제외: "
+                        f"stamp_ns={old_stamp}"
+                    )
+                    self.last_position_timeout_log_at[drone_id] = now
         # 프로세스 스케줄링에 따라 Localizer의 map 메시지가 Detection보다
         # 먼저 도착할 수도 있으므로 짧게 보관한 동일 stamp 결과도 확인한다.
         cached_map = self.recent_map_positions[drone_id].get(stamp_ns)
@@ -941,7 +993,7 @@ class MissionManagerNode(TimestampedNode):
         self._try_complete_mission()
 
     def _validate_synchronized_detection(self, drone_id, message):
-        """동일 영상 stamp의 위치가 연속해서 일치할 때만 확정한다."""
+        """시간창 안에 유효한 위치 동기화 탐지가 3회 쌓이면 확정한다."""
         if self.state not in {
             "SEARCHING",
             "COOP_SEARCH_TRANSIT",
@@ -1009,9 +1061,8 @@ class MissionManagerNode(TimestampedNode):
                 sequence.clear()
 
         # (RGB 촬영시각, x, y, z) 형태로 저장한다. 처리 부하나 YOLO
-        # 추론 지연이 아니라 실제 영상 간 시각 차이로 2초 창을 판정한다.
+        # 추론 지연이 아니라 실제 영상 간 시각 차이로 시간창을 판정한다.
         sequence.append((measurement_time, x, y, z))
-        self.detection_miss_counts[drone_id] = 0
         required = int(
             self.get_parameter("required_detection_frames").value
         )
@@ -1045,6 +1096,13 @@ class MissionManagerNode(TimestampedNode):
         self.map_position_received = True
         self._publish_finder(drone_id)
         self._publish_state("VICTIM_DETECTED")
+        self.confirmed_victim_position = (victim_x, victim_y, victim_z)
+        self._publish_victim_goal(
+            victim_x,
+            victim_y,
+            victim_z,
+            source_stamp=message.header.stamp,
+        )
         self._send_command(
             drone_id,
             f"APPROACH_VICTIM:{victim_x:.3f},{victim_y:.3f},{approach_z:.3f}",
@@ -1074,32 +1132,9 @@ class MissionManagerNode(TimestampedNode):
             if now - record[0] <= window_sec
         ]
         self.detection_counts[drone_id] = len(sequence)
-        if not sequence:
-            self.detection_miss_counts[drone_id] = 0
-
-    def _register_detection_miss(self, drone_id, measurement_time=None):
-        """중간 미탐은 허용하되, 너무 많이 연속되면 누적을 해제한다."""
-        self._prune_detection_window(drone_id, measurement_time)
-        sequence = self.confirmed_map_sequences[drone_id]
-        if not sequence:
-            return
-
-        self.detection_miss_counts[drone_id] += 1
-        maximum_misses = max(0, int(
-            self.get_parameter("maximum_missed_detections").value
-        ))
-        if self.detection_miss_counts[drone_id] <= maximum_misses:
-            return
-
-        self.get_logger().info(
-            f"{drone_id} 탐지 미확인 {self.detection_miss_counts[drone_id]}회 "
-            f"> 허용 {maximum_misses}회: 시간창 누적 초기화"
-        )
-        self._reset_drone_detection_sequence(drone_id)
 
     def _reset_drone_detection_sequence(self, drone_id):
         self.detection_counts[drone_id] = 0
-        self.detection_miss_counts[drone_id] = 0
         self.pending_detection_stamps[drone_id].clear()
         self.confirmed_map_sequences[drone_id].clear()
         self.recent_map_positions[drone_id].clear()
@@ -1116,8 +1151,53 @@ class MissionManagerNode(TimestampedNode):
         """use_sim_time 적용 시 /clock 기준 현재 시각을 초로 반환한다."""
         return self.get_clock().now().nanoseconds / 1.0e9
 
+    def _publish_victim_goal(self, x, y, z, source_stamp=None):
+        if self.victim_goal_published:
+            return
+        message = PointStamped()
+        message.header.frame_id = "map"
+        if source_stamp is None:
+            message.header.stamp = self.get_clock().now().to_msg()
+        else:
+            message.header.stamp = source_stamp
+        message.point.x = float(x)
+        message.point.y = float(y)
+        message.point.z = float(z)
+        self.victim_goal_publisher.publish(message)
+        self.victim_goal_published = True
+        self.get_logger().warning(
+            "구조자 목표 발행: "
+            f"({x:.2f}, {y:.2f}, {z:.2f})"
+        )
+
+    def _rescuer_status_callback(self, message):
+        status = message.data.strip()
+        if status == self.rescuer_status:
+            return
+        self.rescuer_status = status
+        self.get_logger().info(f"구조자 이동 상태: {status}")
+        if status == "ARRIVED":
+            self.rescuer_arrived = True
+            self.get_logger().warning("구조자가 조난자 주변에 도착했습니다.")
+        self._try_complete_mission()
+
+    def _rescuer_route_status_callback(self, message):
+        status = message.data.strip()
+        if status == self.rescuer_route_status:
+            return
+        self.rescuer_route_status = status
+        self.get_logger().info(f"구조자 경로 상태: {status}")
+        if status.startswith("PATH_FAILED"):
+            self._publish_state("RESCUER_PATH_FAILED")
+            self.get_logger().error(
+                "구조자 경로 생성 실패로 임무 완료를 보류합니다: " + status
+            )
+
     def _try_complete_mission(self):
-        if self.finder_drone is None or self.state == "COMPLETE":
+        if self.finder_drone is None or self.state in {
+            "COMPLETE",
+            "COMPLETE_WITH_LANDING_ERROR",
+        }:
             return
         return_drone_ids = [
             item
@@ -1129,11 +1209,16 @@ class MissionManagerNode(TimestampedNode):
             or self.drone_status[item] == "LANDED"
             for item in return_drone_ids
         )
+        require_rescuer = bool(
+            self.get_parameter("require_rescuer_arrival").value
+        )
+        rescuer_resolved = self.rescuer_arrived or not require_rescuer
         if (
             self.finder_hovering
             and self.camera_position_received
             and self.map_position_received
             and returners_resolved
+            and rescuer_resolved
         ):
             landing_failures = [
                 item
@@ -1143,14 +1228,14 @@ class MissionManagerNode(TimestampedNode):
             if landing_failures:
                 self._publish_state("COMPLETE_WITH_LANDING_ERROR")
                 self.get_logger().error(
-                    "조난자 위치 Hover는 완료했지만 홈 착륙 실패: "
+                    "구조자는 조난자에게 도착했지만 홈 착륙 실패: "
                     + ", ".join(landing_failures)
                 )
             else:
                 self._publish_state("COMPLETE")
                 self.get_logger().info(
                     f"임무 완료: {self.finder_drone}는 조난자 위치 Hover, "
-                    "나머지 드론은 홈 착륙 완료"
+                    "나머지 드론은 홈 착륙, 구조자는 조난자 주변 도착"
                 )
 
     def _load_search_plan_metadata(self, log_result=True):

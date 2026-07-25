@@ -103,6 +103,31 @@ coverage_evaluation_manager_node:
     auto_return_after_evaluation: true
     result_directory: ~/b3_cobot3_ws/coverage_results
     evaluation_result_topic: /forest_rescue/coverage/evaluation_result
+rescuer_route_planner_node:
+  ros__parameters:
+    operation_mode: rescue_search
+    navigation_surface_path: ~/b3_cobot3_ws/isaac_sim/generated_navigation_surface.npz
+    environment_mesh_path: ~/b3_cobot3_ws/isaac_sim/generated_environment_meshes.npz
+    map_frame: map
+    victim_goal_topic: /rescue/victim_goal
+    rescuer_pose_topic: /rescue/rescuer/position
+    rescuer_path_topic: /rescue/rescuer_path
+    route_status_topic: /rescue/rescuer/route_status
+    selected_bridge_topic: /rescue/rescuer/selected_bridge
+    route_marker_topic: /rescue/rescuer_route_markers
+    max_slope_deg: 35.0
+    river_clearance_m: 0.75
+    bridge_expansion_m: 1.5
+    obstacle_clearance_m: 0.8
+    block_rocks: true
+    # 숲 전체를 막으면 길이 사라질 수 있으므로 초기 버전에서는 식생은
+    # 통과 가능으로 두고 강·급경사·바위만 차단한다.
+    block_vegetation: false
+    goal_min_standoff_m: 1.2
+    goal_max_standoff_m: 2.2
+    slope_cost_weight: 1.5
+    map_retry_period_sec: 1.0
+    replan_position_change_m: 1.0
 mission_manager_node:
   ros__parameters:
     operation_mode: rescue_search
@@ -119,7 +144,7 @@ mission_manager_node:
     - 46.7
     required_detection_frames: 3
     minimum_detection_confidence: 0.4
-    detection_start_delay_sec: 5.0
+    detection_start_delay_sec: 1.0
     require_map_position_before_detection: true
     start_exclusion_radius_m: 15.0
     start_exclusion_centers_xy:
@@ -132,9 +157,9 @@ mission_manager_node:
     - -34.0
     - 45.0
     detection_position_consistency_radius_m: 4.0
-    detection_position_timeout_sec: 1.0
-    detection_window_sec: 2.0
-    maximum_missed_detections: 2
+    # Localizer의 Depth 재시도(3초)+TF 재시도(2.5초)보다 길게 기다린다.
+    detection_position_timeout_sec: 6.0
+    detection_window_sec: 3.0
     victim_approach_height_m: 7.0
     search_zone_bounds_xy:
     - -46.7
@@ -150,6 +175,10 @@ mission_manager_node:
     - -46.7
     - -13.55
     auto_takeoff_on_connect: true
+    victim_goal_topic: /rescue/victim_goal
+    rescuer_status_topic: /rescue/rescuer/status
+    rescuer_route_status_topic: /rescue/rescuer/route_status
+    require_rescuer_arrival: true
     terrain_mesh_path: ~/b3_cobot3_ws/isaac_sim/generated_terrain_mesh.npz
     cooperative_lane_spacing_m: 4.0
     cooperative_sample_spacing_m: 4.0
@@ -186,16 +215,16 @@ human_detector_01:
     model_path: ~/b3_cobot3_ws/models/yolo11s.pt
     person_class_id: 0
     confidence_threshold: 0.4
-    inference_period_sec: 0.05
-    inference_image_size: 960
+    inference_period_sec: 0.25
+    inference_image_size: 640
     save_confirmed_image: true
     detected_images_dir: ~/b3_cobot3_ws/detected_images
     saved_image_jpeg_quality: 95
-    detection_start_delay_sec: 5.0
+    positive_detection_log_period_sec: 1.0
+    detection_start_delay_sec: 1.0
     detect_only_while_searching: true
     active_detection_states:
     - SEARCHING
-    - COOP_SEARCH_PREPARING
     - COOP_SEARCH_TRANSIT
     - COOP_SEARCHING
     mock_delay_sec: 8.0
@@ -224,10 +253,14 @@ victim_localizer_01:
     roi_center_ratio: 0.5
     minimum_depth_m: 0.2
     maximum_depth_m: 30.0
-    depth_buffer_duration_sec: 1.0
+    depth_buffer_duration_sec: 3.0
+    # 4대의 원본 Depth를 보관하므로 메모리 폭증을 막기 위해 40장으로 제한
     depth_buffer_max_frames: 40
     max_depth_detection_time_delta_sec: 0.25
-    tf_retry_timeout_sec: 1.0
+    detection_retry_timeout_sec: 3.0
+    detection_retry_period_sec: 0.05
+    detection_retry_max_items: 80
+    tf_retry_timeout_sec: 2.5
     tf_retry_period_sec: 0.02
     tf_retry_max_points: 40
     log_period_sec: 10.0
@@ -267,15 +300,15 @@ pointcloud_local_mapper_01:
     accumulated_cloud_body_topic: /drone_01/obstacle/accumulated_cloud_body
     local_costmap_topic: /drone_01/obstacle/local_costmap
     accumulation_sec: 1.5
-    processing_period_sec: 0.1
-    publish_period_sec: 0.2
-    tf_retry_period_sec: 0.02
+    processing_period_sec: 0.3
+    publish_period_sec: 0.5
+    tf_retry_period_sec: 0.05
     tf_exact_wait_sec: 1.0
-    pending_cloud_queue_size: 30
-    max_pending_clouds_per_cycle: 8
+    pending_cloud_queue_size: 8
+    max_pending_clouds_per_cycle: 2
     voxel_size_m: 0.25
     minimum_voxel_observations: 2
-    maximum_points_per_scan: 30000
+    maximum_points_per_scan: 8000
     minimum_height_m: -1.2
     maximum_height_m: 1.8
     local_costmap_size_m: 14.0
@@ -393,7 +426,7 @@ drone_controller_01:
     - 40.0
     - 31.0
     search_plan_path: ~/b3_cobot3_ws/isaac_sim/generated_search_plan.json
-    takeoff_altitude_m: 6.0
+    takeoff_altitude_m: 5.0
     altitude_acceptance_radius_m: 0.1
     takeoff_tolerance_m: 0.2
     search_yaw_deg: 0.0
@@ -449,7 +482,7 @@ drone_controller_01:
     search_high_altitude_skip_horizontal_avoidance: true
     search_high_altitude_threshold_m: 1.0
     search_xy_priority_enabled: true
-    search_keep_high_altitude_after_escape: true
+    search_keep_high_altitude_after_escape: false
     avoidance_max_lateral_offset_m: 2.0
     avoidance_max_lateral_to_forward_ratio: 0.8
     avoidance_vector_max_age_sec: 1.2
@@ -484,8 +517,8 @@ drone_controller_01:
     search_waypoints: 0,0,-6
     map_frame: map
     search_altitude_recovery_enabled: true
-    search_altitude_recovery_step_m: 1.0
-    search_altitude_recovery_min_excess_m: 1.5
+    search_altitude_recovery_step_m: 2.0
+    search_altitude_recovery_min_excess_m: 1.0
     cooperative_transit_climb_only_enabled: true
     direction_yaw_pre_align_threshold_deg: 75.0
 human_detector_02:
@@ -500,16 +533,16 @@ human_detector_02:
     model_path: ~/b3_cobot3_ws/models/yolo11s.pt
     person_class_id: 0
     confidence_threshold: 0.4
-    inference_period_sec: 0.05
-    inference_image_size: 960
+    inference_period_sec: 0.25
+    inference_image_size: 640
     save_confirmed_image: true
     detected_images_dir: ~/b3_cobot3_ws/detected_images
     saved_image_jpeg_quality: 95
-    detection_start_delay_sec: 5.0
+    positive_detection_log_period_sec: 1.0
+    detection_start_delay_sec: 1.0
     detect_only_while_searching: true
     active_detection_states:
     - SEARCHING
-    - COOP_SEARCH_PREPARING
     - COOP_SEARCH_TRANSIT
     - COOP_SEARCHING
     mock_delay_sec: 8.0
@@ -538,10 +571,13 @@ victim_localizer_02:
     roi_center_ratio: 0.5
     minimum_depth_m: 0.2
     maximum_depth_m: 30.0
-    depth_buffer_duration_sec: 1.0
+    depth_buffer_duration_sec: 3.0
     depth_buffer_max_frames: 40
     max_depth_detection_time_delta_sec: 0.25
-    tf_retry_timeout_sec: 1.0
+    detection_retry_timeout_sec: 3.0
+    detection_retry_period_sec: 0.05
+    detection_retry_max_items: 80
+    tf_retry_timeout_sec: 2.5
     tf_retry_period_sec: 0.02
     tf_retry_max_points: 40
     log_period_sec: 10.0
@@ -581,15 +617,15 @@ pointcloud_local_mapper_02:
     accumulated_cloud_body_topic: /drone_02/obstacle/accumulated_cloud_body
     local_costmap_topic: /drone_02/obstacle/local_costmap
     accumulation_sec: 1.5
-    processing_period_sec: 0.1
-    publish_period_sec: 0.2
-    tf_retry_period_sec: 0.02
+    processing_period_sec: 0.3
+    publish_period_sec: 0.5
+    tf_retry_period_sec: 0.05
     tf_exact_wait_sec: 1.0
-    pending_cloud_queue_size: 30
-    max_pending_clouds_per_cycle: 8
+    pending_cloud_queue_size: 8
+    max_pending_clouds_per_cycle: 2
     voxel_size_m: 0.25
     minimum_voxel_observations: 2
-    maximum_points_per_scan: 30000
+    maximum_points_per_scan: 8000
     minimum_height_m: -1.2
     maximum_height_m: 1.8
     local_costmap_size_m: 14.0
@@ -707,7 +743,7 @@ drone_controller_02:
     - 40.0
     - 31.0
     search_plan_path: ~/b3_cobot3_ws/isaac_sim/generated_search_plan.json
-    takeoff_altitude_m: 6.0
+    takeoff_altitude_m: 5.0
     altitude_acceptance_radius_m: 0.1
     takeoff_tolerance_m: 0.2
     search_yaw_deg: 0.0
@@ -763,7 +799,7 @@ drone_controller_02:
     search_high_altitude_skip_horizontal_avoidance: true
     search_high_altitude_threshold_m: 1.0
     search_xy_priority_enabled: true
-    search_keep_high_altitude_after_escape: true
+    search_keep_high_altitude_after_escape: false
     avoidance_max_lateral_offset_m: 2.0
     avoidance_max_lateral_to_forward_ratio: 0.8
     avoidance_vector_max_age_sec: 1.2
@@ -798,8 +834,8 @@ drone_controller_02:
     search_waypoints: 0,0,-6
     map_frame: map
     search_altitude_recovery_enabled: true
-    search_altitude_recovery_step_m: 1.0
-    search_altitude_recovery_min_excess_m: 1.5
+    search_altitude_recovery_step_m: 2.0
+    search_altitude_recovery_min_excess_m: 1.0
     cooperative_transit_climb_only_enabled: true
     direction_yaw_pre_align_threshold_deg: 75.0
 human_detector_03:
@@ -814,16 +850,16 @@ human_detector_03:
     model_path: ~/b3_cobot3_ws/models/yolo11s.pt
     person_class_id: 0
     confidence_threshold: 0.4
-    inference_period_sec: 0.05
-    inference_image_size: 960
+    inference_period_sec: 0.25
+    inference_image_size: 640
     save_confirmed_image: true
     detected_images_dir: ~/b3_cobot3_ws/detected_images
     saved_image_jpeg_quality: 95
-    detection_start_delay_sec: 5.0
+    positive_detection_log_period_sec: 1.0
+    detection_start_delay_sec: 1.0
     detect_only_while_searching: true
     active_detection_states:
     - SEARCHING
-    - COOP_SEARCH_PREPARING
     - COOP_SEARCH_TRANSIT
     - COOP_SEARCHING
     mock_delay_sec: 8.0
@@ -852,10 +888,13 @@ victim_localizer_03:
     roi_center_ratio: 0.5
     minimum_depth_m: 0.2
     maximum_depth_m: 30.0
-    depth_buffer_duration_sec: 1.0
+    depth_buffer_duration_sec: 3.0
     depth_buffer_max_frames: 40
     max_depth_detection_time_delta_sec: 0.25
-    tf_retry_timeout_sec: 1.0
+    detection_retry_timeout_sec: 3.0
+    detection_retry_period_sec: 0.05
+    detection_retry_max_items: 80
+    tf_retry_timeout_sec: 2.5
     tf_retry_period_sec: 0.02
     tf_retry_max_points: 40
     log_period_sec: 10.0
@@ -895,15 +934,15 @@ pointcloud_local_mapper_03:
     accumulated_cloud_body_topic: /drone_03/obstacle/accumulated_cloud_body
     local_costmap_topic: /drone_03/obstacle/local_costmap
     accumulation_sec: 1.5
-    processing_period_sec: 0.1
-    publish_period_sec: 0.2
-    tf_retry_period_sec: 0.02
+    processing_period_sec: 0.3
+    publish_period_sec: 0.5
+    tf_retry_period_sec: 0.05
     tf_exact_wait_sec: 1.0
-    pending_cloud_queue_size: 30
-    max_pending_clouds_per_cycle: 8
+    pending_cloud_queue_size: 8
+    max_pending_clouds_per_cycle: 2
     voxel_size_m: 0.25
     minimum_voxel_observations: 2
-    maximum_points_per_scan: 30000
+    maximum_points_per_scan: 8000
     minimum_height_m: -1.2
     maximum_height_m: 1.8
     local_costmap_size_m: 14.0
@@ -1021,7 +1060,7 @@ drone_controller_03:
     - 40.0
     - 31.0
     search_plan_path: ~/b3_cobot3_ws/isaac_sim/generated_search_plan.json
-    takeoff_altitude_m: 6.0
+    takeoff_altitude_m: 5.0
     altitude_acceptance_radius_m: 0.1
     takeoff_tolerance_m: 0.2
     search_yaw_deg: 0.0
@@ -1077,7 +1116,7 @@ drone_controller_03:
     search_high_altitude_skip_horizontal_avoidance: true
     search_high_altitude_threshold_m: 1.0
     search_xy_priority_enabled: true
-    search_keep_high_altitude_after_escape: true
+    search_keep_high_altitude_after_escape: false
     avoidance_max_lateral_offset_m: 2.0
     avoidance_max_lateral_to_forward_ratio: 0.8
     avoidance_vector_max_age_sec: 1.2
@@ -1112,8 +1151,8 @@ drone_controller_03:
     search_waypoints: 0,0,-6
     map_frame: map
     search_altitude_recovery_enabled: true
-    search_altitude_recovery_step_m: 1.0
-    search_altitude_recovery_min_excess_m: 1.5
+    search_altitude_recovery_step_m: 2.0
+    search_altitude_recovery_min_excess_m: 1.0
     cooperative_transit_climb_only_enabled: true
     direction_yaw_pre_align_threshold_deg: 75.0
 human_detector_04:
@@ -1128,16 +1167,16 @@ human_detector_04:
     model_path: ~/b3_cobot3_ws/models/yolo11s.pt
     person_class_id: 0
     confidence_threshold: 0.4
-    inference_period_sec: 0.05
-    inference_image_size: 960
+    inference_period_sec: 0.25
+    inference_image_size: 640
     save_confirmed_image: true
     detected_images_dir: ~/b3_cobot3_ws/detected_images
     saved_image_jpeg_quality: 95
-    detection_start_delay_sec: 5.0
+    positive_detection_log_period_sec: 1.0
+    detection_start_delay_sec: 1.0
     detect_only_while_searching: true
     active_detection_states:
     - SEARCHING
-    - COOP_SEARCH_PREPARING
     - COOP_SEARCH_TRANSIT
     - COOP_SEARCHING
     mock_delay_sec: 8.0
@@ -1166,10 +1205,13 @@ victim_localizer_04:
     roi_center_ratio: 0.5
     minimum_depth_m: 0.2
     maximum_depth_m: 30.0
-    depth_buffer_duration_sec: 1.0
+    depth_buffer_duration_sec: 3.0
     depth_buffer_max_frames: 40
     max_depth_detection_time_delta_sec: 0.25
-    tf_retry_timeout_sec: 1.0
+    detection_retry_timeout_sec: 3.0
+    detection_retry_period_sec: 0.05
+    detection_retry_max_items: 80
+    tf_retry_timeout_sec: 2.5
     tf_retry_period_sec: 0.02
     tf_retry_max_points: 40
     log_period_sec: 10.0
@@ -1209,15 +1251,15 @@ pointcloud_local_mapper_04:
     accumulated_cloud_body_topic: /drone_04/obstacle/accumulated_cloud_body
     local_costmap_topic: /drone_04/obstacle/local_costmap
     accumulation_sec: 1.5
-    processing_period_sec: 0.1
-    publish_period_sec: 0.2
-    tf_retry_period_sec: 0.02
+    processing_period_sec: 0.3
+    publish_period_sec: 0.5
+    tf_retry_period_sec: 0.05
     tf_exact_wait_sec: 1.0
-    pending_cloud_queue_size: 30
-    max_pending_clouds_per_cycle: 8
+    pending_cloud_queue_size: 8
+    max_pending_clouds_per_cycle: 2
     voxel_size_m: 0.25
     minimum_voxel_observations: 2
-    maximum_points_per_scan: 30000
+    maximum_points_per_scan: 8000
     minimum_height_m: -1.2
     maximum_height_m: 1.8
     local_costmap_size_m: 14.0
@@ -1335,7 +1377,7 @@ drone_controller_04:
     - 45.0
     - 31.0
     search_plan_path: ~/b3_cobot3_ws/isaac_sim/generated_search_plan.json
-    takeoff_altitude_m: 6.0
+    takeoff_altitude_m: 5.0
     altitude_acceptance_radius_m: 0.1
     takeoff_tolerance_m: 0.2
     search_yaw_deg: 0.0
@@ -1391,7 +1433,7 @@ drone_controller_04:
     search_high_altitude_skip_horizontal_avoidance: true
     search_high_altitude_threshold_m: 1.0
     search_xy_priority_enabled: true
-    search_keep_high_altitude_after_escape: true
+    search_keep_high_altitude_after_escape: false
     avoidance_max_lateral_offset_m: 2.0
     avoidance_max_lateral_to_forward_ratio: 0.8
     avoidance_vector_max_age_sec: 1.2
@@ -1426,7 +1468,7 @@ drone_controller_04:
     search_waypoints: 0,0,-6
     map_frame: map
     search_altitude_recovery_enabled: true
-    search_altitude_recovery_step_m: 1.0
-    search_altitude_recovery_min_excess_m: 1.5
+    search_altitude_recovery_step_m: 2.0
+    search_altitude_recovery_min_excess_m: 1.0
     cooperative_transit_climb_only_enabled: true
     direction_yaw_pre_align_threshold_deg: 75.0

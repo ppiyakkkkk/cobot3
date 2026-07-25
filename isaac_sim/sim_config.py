@@ -13,7 +13,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # 카메라 및 센서 설정
 # ---------------------------------------------------------------------------
-CAMERA_FOCAL_LENGTH_MM = 10.0
+CAMERA_FOCAL_LENGTH_MM = 12.0
 # 드론 body에 고정된 RGB/Depth 카메라의 하향각이다.
 # 0도는 기체 정면, 90도는 수직으로 지면을 바라본다.
 # 산림 수색에서 전방과 지면을 함께 담도록 40도로 설정한다.
@@ -21,8 +21,8 @@ CAMERA_DOWN_TILT_DEG = 40.0
 # 작은 원거리 사람의 픽셀 크기를 확보하기 위해 4:3 비율을 유지하며 상향한다.
 CAMERA_RESOLUTION = [960, 720]
 
-# 왼쪽 메인 Viewport가 따라갈 드론과 3인칭 추적 카메라 설정이다.
-# 추적 대상을 바꾸려면 quadrotor_01을 quadrotor_02 또는 03으로 변경한다.
+# 왼쪽 메인 Viewport가 처음 따라갈 드론과 3인칭 추적 카메라 설정이다.
+# 실행 중에는 숫자키 1~4 또는 F키로 추적 대상을 변경할 수 있다.
 FOLLOW_DRONE_PRIM_PATH = "/World/quadrotor_01/body"
 FOLLOW_CAMERA_PRIM_PATH = "/World/FollowCamera"
 
@@ -156,17 +156,20 @@ def should_spawn_people():
 configure_drone_count(DEFAULT_DRONE_COUNT)
 configure_operation_mode(DEFAULT_OPERATION_MODE)
 
-# 일반 실행에서는 아래 후보 좌표 중 한 곳에 조난자를 생성한다.
+# 일반 rescue_search 실행에서는 아래 4개 후보 중 한 곳을 무작위로 선택한다.
+# 각 항목은 World ENU 기준 [X, Y, Z] 형식이다.
+# 현재 PeopleManager는 일반 랜덤 스폰 시 X·Y를 사용하고,
+# 실제 Z는 Terrain 높이 + PERSON_GROUND_CLEARANCE_M으로 다시 계산한다.
 VICTIM_SPAWN_POSITIONS = [
-    [33.0, 29.0, 13.7],
-    # [-0.9, -1.8, -0.9],
-    # [33.0, -22.0, 50.6],
+    [-1.0, 36.0, 0.0],    # 후보 2: 중거리 육상 이동 시험
+    [33.0, 29.0, 0.0],   # 후보 3: 다리 횡단 여부 확인용
+    [29.0, -20.0, 0.0],  # 후보 4: 장거리·다리 횡단 종합 시험
 ]
 
 # 착륙 복귀 시험용 조난자 위치다.
 # World ENU 기준 (X, Y, Z)를 한 줄에서 직접 지정한다.
 FOR_TEST_VICTIM_SPAWN_ENABLED = True
-FOR_TEST_VICTIM_WORLD_XYZ = (2.0, 38.0, 20.0)
+FOR_TEST_VICTIM_WORLD_XYZ = (-2.0, 35.0, 20.0)
 
 # True이면 X·Y만 그대로 사용하고 Z는 실제 Terrain 표면으로 자동 보정한다.
 # 사람이 경사면 위에서 뜨거나 묻히지 않게 하는 기본 시험 모드다.
@@ -176,6 +179,51 @@ FOR_TEST_VICTIM_KEEP_ON_GROUND = True
 # 구조자의 발 높이는 첫 번째 드론의 초기 World Z와 동일하게 맞춘다.
 RESCUER_XY = (-34.0, 34.0)
 RESCUER_FOOT_Z = float(_AVAILABLE_DRONE_CONFIGS[0][2][2])
+
+# 조난자와 구조자는 rescue_search 모드에서만 생성한다. 두 역할이 화면에서
+# 쉽게 구분되도록 가능한 경우 서로 다른 Character asset을 선택한다.
+VICTIM_PREFERRED_CHARACTER = "original_female_adult_business_02"
+RESCUER_CHARACTER_KEYWORDS = (
+    "construction",
+    "worker",
+    "police",
+    "security",
+    "male",
+)
+
+# 조난자와 구조자를 카메라 영상에서 쉽게 구분하기 위한 의상 Material 색상이다.
+# RGB 값은 각각 0.0~1.0 범위다.
+PERSON_ROLE_CLOTHING_COLOR_ENABLED = True
+VICTIM_CLOTHING_COLOR_RGB = (1.0, 0.15, 0.0) # 주황
+RESCUER_CLOTHING_COLOR_RGB = (0.90, 0.025, 0.020)  # 선명한 빨강
+
+# Character Asset마다 Mesh/Material 이름이 다르므로 경로와 Material 이름에서
+# 아래 단어를 찾아 의상 부분을 우선 선택한다.
+PERSON_CLOTHING_INCLUDE_KEYWORDS = (
+    "cloth", "clothing", "outfit", "apparel", "garment",
+    "shirt", "tshirt", "top", "jacket", "coat", "vest",
+    "suit", "blazer", "uniform", "hoodie", "sweater",
+    "pants", "trouser", "jean", "skirt", "dress",
+    "shoe", "boot", "sneaker",
+)
+
+# 피부·얼굴·눈·머리카락 계열은 의상 색상 덮어쓰기에서 제외한다.
+PERSON_CLOTHING_EXCLUDE_KEYWORDS = (
+    "skin", "face", "head", "eye", "iris", "pupil", "hair",
+    "brow", "lash", "teeth", "tooth", "tongue", "mouth", "lip",
+)
+
+# 의상 이름을 하나도 찾지 못하면, 제외 대상이 아닌 Material Subset과 Mesh에
+# 역할 색상을 적용한다. Asset 이름이 일반적인 경우를 위한 보조 처리다.
+PERSON_CLOTHING_FALLBACK_TO_NON_SKIN_PARTS = True
+
+# 시뮬레이션 검증 시간을 줄이기 위해 실제 보행보다 빠른 속도를 사용한다.
+RESCUER_MOVE_SPEED_M_S = 3.0
+RESCUER_WAYPOINT_TOLERANCE_M = 0.65
+RESCUER_POSE_PUBLISH_PERIOD_SEC = 0.20
+RESCUER_PATH_TOPIC = "/rescue/rescuer_path"
+RESCUER_POSITION_TOPIC = "/rescue/rescuer/position"
+RESCUER_STATUS_TOPIC = "/rescue/rescuer/status"
 
 # 지형 보간 오차로 발이 지면에 묻히지 않도록 아주 조금 띄운다.
 PERSON_GROUND_CLEARANCE_M = 0.08
@@ -198,7 +246,7 @@ SEARCH_LANE_SPACING_M = 7.0
 # 강가·급경사 구간에서 고도 변화가 한 번에 커지지 않도록 수색점 간격을
 # 기존 7m보다 촘촘하게 둔다.
 SEARCH_SAMPLE_SPACING_M = 5.0
-SEARCH_CLEARANCE_M = 6.0
+SEARCH_CLEARANCE_M = 5.0
 
 # 급격한 하천 사면과 다리 진입부의 높이 변화를 놓치지 않도록 선분을
 # 0.5m 간격으로 검사한다.

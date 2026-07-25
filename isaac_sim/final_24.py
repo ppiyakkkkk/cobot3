@@ -404,11 +404,16 @@ class ForestRescueSimulation:
             # 왼쪽 메인 Viewport의 3인칭 카메라가 지정 드론을 따라간다.
             self.viewport_manager.update_follow_viewport()
 
-            # 구조 수색 모드에서만 Person 충돌체를 동기화한다.
+            # rescue_search 모드에서만 구조자 ROS Path를 처리하고
+            # Person 충돌체를 현재 위치에 동기화한다.
             if self.people_manager is not None:
+                self.people_manager.update_rescuer_navigation()
                 self.people_manager.sync_person_physics_proxies()
 
         carb.log_warn("Forest-rescue simulation is closing.")
+        if self.people_manager is not None:
+            self.people_manager.shutdown_ros()
+        self.viewport_manager.shutdown()
         self.timeline.stop()
         simulation_app.close()
 

@@ -5,7 +5,7 @@ Panels:
     Property Tree Widget:
       Expanded: ~
       Splitter Ratio: 0.5
-    Tree Height: 615
+    Tree Height: 293
   - Class: rviz_common/Selection
     Name: Selection
   - Class: rviz_common/Tool Properties
@@ -97,7 +97,7 @@ Visualization Manager:
       Buffer Length: 1
       Class: rviz_default_plugins/Path
       Color: 255; 70; 70
-      Enabled: true
+      Enabled: false
       Head Diameter: 0.30000001192092896
       Head Length: 0.20000000298023224
       Length: 0.30000001192092896
@@ -120,12 +120,12 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /drone_01/search_path
-      Value: true
+      Value: false
     - Alpha: 1
       Buffer Length: 1
       Class: rviz_default_plugins/Path
       Color: 70; 255; 70
-      Enabled: true
+      Enabled: false
       Head Diameter: 0.30000001192092896
       Head Length: 0.20000000298023224
       Length: 0.30000001192092896
@@ -148,12 +148,12 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /drone_02/search_path
-      Value: true
+      Value: false
     - Alpha: 1
       Buffer Length: 1
       Class: rviz_default_plugins/Path
       Color: 70; 120; 255
-      Enabled: true
+      Enabled: false
       Head Diameter: 0.30000001192092896
       Head Length: 0.20000000298023224
       Length: 0.30000001192092896
@@ -176,12 +176,12 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /drone_03/search_path
-      Value: true
+      Value: false
     - Alpha: 1
       Buffer Length: 1
       Class: rviz_default_plugins/Path
       Color: 255; 200; 40
-      Enabled: true
+      Enabled: false
       Head Diameter: 0.30000001192092896
       Head Length: 0.20000000298023224
       Length: 0.30000001192092896
@@ -204,7 +204,7 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /drone_04/search_path
-      Value: true
+      Value: false
     - Alpha: 1
       Buffer Length: 1
       Class: rviz_default_plugins/Path
@@ -433,7 +433,10 @@ Visualization Manager:
       Enabled: true
       Name: Cooperative Search Zones
       Namespaces:
-        {}
+        cooperative_entries: true
+        cooperative_labels: true
+        cooperative_subzones: true
+        cooperative_target: true
       Topic:
         Depth: 1
         Durability Policy: Transient Local
@@ -459,7 +462,8 @@ Visualization Manager:
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
       Name: Camera Coverage
-      Namespaces: {}
+      Namespaces:
+        {}
       Topic:
         Depth: 1
         Durability Policy: Transient Local
@@ -470,7 +474,8 @@ Visualization Manager:
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
       Name: Camera Flashlight
-      Namespaces: {}
+      Namespaces:
+        {}
       Topic:
         Depth: 1
         Durability Policy: Volatile
@@ -481,8 +486,8 @@ Visualization Manager:
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
-        Max Value: 43.20232009887695
-        Min Value: 32.01727294921875
+        Max Value: 39.37017822265625
+        Min Value: 35.402069091796875
         Value: true
       Axis: Z
       Channel Name: intensity
@@ -629,7 +634,7 @@ Visualization Manager:
         Value: /drone_01/victim/annotated_image
       Value: false
     - Class: rviz_default_plugins/Image
-      Enabled: false
+      Enabled: true
       Max Value: 1
       Median window: 5
       Min Value: 0
@@ -641,7 +646,7 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Best Effort
         Value: /drone_02/victim/annotated_image
-      Value: false
+      Value: true
     - Class: rviz_default_plugins/Image
       Enabled: false
       Max Value: 1
@@ -1037,9 +1042,11 @@ Visualization Manager:
       Enabled: true
       Name: Environment Groups
       Namespaces:
+        bridges: true
         broadleafforest: true
         bushes: true
         pineforest: true
+        river: true
         rocks: true
       Topic:
         Depth: 1
@@ -1047,6 +1054,46 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /forest_rescue/environment_meshes
+      Value: true
+    - Alpha: 1
+      Buffer Length: 1
+      Class: rviz_default_plugins/Path
+      Color: 255; 170; 0
+      Enabled: true
+      Head Diameter: 0.30000001192092896
+      Head Length: 0.20000000298023224
+      Length: 0.30000001192092896
+      Line Style: Lines
+      Line Width: 0.14000000059604645
+      Name: Rescuer Walking Path
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Pose Color: 255; 255; 0
+      Pose Style: None
+      Radius: 0.029999999329447746
+      Shaft Diameter: 0.10000000149011612
+      Shaft Length: 0.10000000149011612
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        Filter size: 50
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /rescue/rescuer_path
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Rescuer Route Markers
+      Namespaces:
+        {}
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /rescue/rescuer_route_markers
       Value: true
   Enabled: true
   Global Options:
@@ -1076,18 +1123,18 @@ Visualization Manager:
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: -3.2015326023101807
-        Y: 5.675826072692871
-        Z: 32.10295104980469
+        X: -2.988706588745117
+        Y: 7.962416648864746
+        Z: 37.99894714355469
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.625000536441803
+      Pitch: 1.315000295639038
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz_default_plugins)
-      Yaw: 0.7500016689300537
+      Yaw: 1.5300015211105347
     Saved: ~
 Window Geometry:
   Displays:
@@ -1103,7 +1150,7 @@ Window Geometry:
   Height: 836
   Hide Left Dock: false
   Hide Right Dock: false
-  QMainWindow State: 000000ff00000000fd000000010000000000000156000002eafc0200000007fb0000002400440072006f006e006500200030003400200044006500740065006300740069006f006e000000003d0000006f0000002800fffffffb0000002400440072006f006e006500200030003300200044006500740065006300740069006f006e000000003d000000850000002800fffffffb0000002400440072006f006e006500200030003200200044006500740065006300740069006f006e000000003d000000a40000002800fffffffb0000002400440072006f006e006500200030003100200044006500740065006300740069006f006e000000003d000000d60000002800fffffffb000000100044006900730070006c006100790073010000003d000002ea000000c900fffffffb0000001200530065006c0065006300740069006f006e00000002690000005c0000005c00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007300000002bc0000006b0000005c00ffffff0000049e000002ea00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd000000010000000000000156000002eafc0200000007fb0000002400440072006f006e006500200030003400200044006500740065006300740069006f006e000000003d000001f20000002800fffffffb0000002400440072006f006e006500200030003300200044006500740065006300740069006f006e000000003d000001220000002800fffffffb0000002400440072006f006e006500200030003200200044006500740065006300740069006f006e010000003d0000013c0000002800fffffffb0000002400440072006f006e006500200030003100200044006500740065006300740069006f006e000000003d000000d60000002800fffffffb000000100044006900730070006c006100790073010000017f000001a8000000c900fffffffb0000001200530065006c0065006300740069006f006e00000002690000005c0000005c00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007300000002bc0000006b0000005c00ffffff0000049e000002ea00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Selection:
     collapsed: false
   Tool Properties:

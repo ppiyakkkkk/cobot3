@@ -1,0 +1,83 @@
+{
+  "format_version": 1,
+  "operation_mode": "eval_coverage",
+  "status": "completed",
+  "incomplete_reason": null,
+  "drone_count": 4,
+  "drone_ids": [
+    "quadrotor_01",
+    "quadrotor_02",
+    "quadrotor_03",
+    "quadrotor_04"
+  ],
+  "failed_drones": [],
+  "started_at_kst": "2026-07-24T18:23:19.081+09:00",
+  "finished_at_kst": "2026-07-24T19:12:43.619+09:00",
+  "elapsed_sim_sec": 815.296038725,
+  "forward": {
+    "total_area_m2": 10857.92345715977,
+    "covered_area_m2": 10329.77855967882,
+    "coverage_percent": 95.13585724227326,
+    "covered_triangles": 7575,
+    "total_triangles": 7938,
+    "per_drone": {
+      "quadrotor_01": {
+        "terrain_covered_area_m2": 2321.2955282441317,
+        "terrain_covered_triangles": 1595,
+        "scene_covered_triangles": 8810
+      },
+      "quadrotor_02": {
+        "terrain_covered_area_m2": 1759.5263931672562,
+        "terrain_covered_triangles": 1087,
+        "scene_covered_triangles": 14368
+      },
+      "quadrotor_03": {
+        "terrain_covered_area_m2": 2855.1688953065886,
+        "terrain_covered_triangles": 2044,
+        "scene_covered_triangles": 19917
+      },
+      "quadrotor_04": {
+        "terrain_covered_area_m2": 3393.7877429608443,
+        "terrain_covered_triangles": 2849,
+        "scene_covered_triangles": 22838
+      }
+    },
+    "sim_time_sec": 545.000025886
+  },
+  "forward_reverse": {
+    "total_area_m2": 10857.92345715977,
+    "covered_area_m2": 10356.745638155648,
+    "coverage_percent": 95.38422037158824,
+    "covered_triangles": 7594,
+    "total_triangles": 7938,
+    "per_drone": {
+      "quadrotor_01": {
+        "terrain_covered_area_m2": 2344.335089630958,
+        "terrain_covered_triangles": 1611,
+        "scene_covered_triangles": 9603
+      },
+      "quadrotor_02": {
+        "terrain_covered_area_m2": 1759.5263931672562,
+        "terrain_covered_triangles": 1087,
+        "scene_covered_triangles": 16951
+      },
+      "quadrotor_03": {
+        "terrain_covered_area_m2": 2856.8704185233373,
+        "terrain_covered_triangles": 2045,
+        "scene_covered_triangles": 21956
+      },
+      "quadrotor_04": {
+        "terrain_covered_area_m2": 3396.0137368340966,
+        "terrain_covered_triangles": 2851,
+        "scene_covered_triangles": 23850
+      }
+    },
+    "sim_time_sec": 934.008044362
+  },
+  "reverse_gain": {
+    "area_m2": 26.967078476827737,
+    "percentage_points": 0.24836312931498128
+  },
+  "search_repeat_mode": "forward_reverse_once",
+  "coverage_denominator": "terrain_triangle_surface_area_m2"
+}

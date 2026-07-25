@@ -11,7 +11,12 @@ from geometry_msgs.msg import PointStamped
 import numpy as np
 import rclpy
 from rclpy.duration import Duration
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import (
+    DurabilityPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+    qos_profile_sensor_data,
+)
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import String
 from tf2_ros import Buffer, TransformException, TransformListener
@@ -58,13 +63,19 @@ class VictimLocalizerNode(TimestampedNode):
         # YOLO 추론 결과는 원본 RGB 촬영 시점보다 늦게 도착한다. 최신
         # Depth 한 장만 사용하지 않고 최근 프레임을 보관한 뒤 RGB stamp와
         # 가장 가까운 Depth를 선택한다.
-        self.declare_parameter("depth_buffer_duration_sec", 1.0)
-        self.declare_parameter("depth_buffer_max_frames", 40)
-        self.declare_parameter("max_depth_detection_time_delta_sec", 0.25)
+        self.declare_parameter("depth_buffer_duration_sec", 3.0)
+        self.declare_parameter("depth_buffer_max_frames", 120)
+        self.declare_parameter("max_depth_detection_time_delta_sec", 0.35)
+        # Detection이 Depth보다 먼저 도착하거나 YOLO 처리 지연으로 대응
+        # 프레임이 아직 버퍼에 없을 수 있다. 양성 탐지를 즉시 버리지 않고
+        # 잠시 보관한 뒤 Depth/CameraInfo가 들어올 때마다 다시 처리한다.
+        self.declare_parameter("detection_retry_timeout_sec", 3.0)
+        self.declare_parameter("detection_retry_period_sec", 0.05)
+        self.declare_parameter("detection_retry_max_items", 80)
         # Detection 콜백 안에서 TF를 기다리면 단일 실행기가 막혀 TF 수신
         # 콜백도 처리되지 못한다. 요청 시각의 TF가 조금 늦게 도착하는 경우를
         # 위해 Point를 잠시 보관하고 별도 타이머에서 비동기로 재시도한다.
-        self.declare_parameter("tf_retry_timeout_sec", 1.0)
+        self.declare_parameter("tf_retry_timeout_sec", 2.0)
         self.declare_parameter("tf_retry_period_sec", 0.02)
         self.declare_parameter("tf_retry_max_points", 40)
         self.declare_parameter("log_period_sec", 10.0)
@@ -100,8 +111,14 @@ class VictimLocalizerNode(TimestampedNode):
         self.last_log_times = {}
         self.mission_state = "IDLE"
         self.position_locked = False
+        self.pending_detections = OrderedDict()
         self.pending_tf_points = OrderedDict()
         self.last_tf_error = None
+        self.depth_rx_count = 0
+        self.camera_info_rx_count = 0
+        self.detection_rx_count = 0
+        self.positive_detection_rx_count = 0
+        self.map_position_tx_count = 0
 
         self.camera_position_publisher = self.create_publisher(
             PointStamped,
@@ -132,11 +149,14 @@ class VictimLocalizerNode(TimestampedNode):
             self._detection_callback,
             10,
         )
+        state_qos = QoSProfile(depth=1)
+        state_qos.reliability = ReliabilityPolicy.RELIABLE
+        state_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
         self.create_subscription(
             String,
             str(self.get_parameter("mission_state_topic").value),
             self._mission_state_callback,
-            10,
+            state_qos,
         )
 
         self.tf_buffer = Buffer()
@@ -148,6 +168,21 @@ class VictimLocalizerNode(TimestampedNode):
             ),
             self._retry_pending_transforms,
         )
+        self.detection_retry_timer = self.create_timer(
+            max(
+                0.02,
+                float(
+                    self.get_parameter(
+                        "detection_retry_period_sec"
+                    ).value
+                ),
+            ),
+            self._retry_pending_detections,
+        )
+        self.diagnostics_timer = self.create_timer(
+            5.0,
+            self._log_pipeline_diagnostics,
+        )
 
         self.get_logger().info(
             f"{self.drone_id} Depth 기반 조난자 위치 계산 노드 시작"
@@ -155,11 +190,13 @@ class VictimLocalizerNode(TimestampedNode):
 
     def _mission_state_callback(self, message):
         state = message.data.strip().upper()
+        previous_state = self.mission_state
         if (
-            state in self.active_localization_states
-            and self.mission_state not in self.active_localization_states
+            self._localization_is_active(state)
+            and not self._localization_is_active(self.mission_state)
         ):
             self.position_locked = False
+            self.pending_detections.clear()
             self.pending_tf_points.clear()
             self.last_tf_error = None
             self.last_log_times.clear()
@@ -167,8 +204,13 @@ class VictimLocalizerNode(TimestampedNode):
                 "새 수색 임무 시작: 조난자 위치 고정을 해제합니다."
             )
         self.mission_state = state
+        if state != previous_state:
+            self.get_logger().info(
+                f"위치 계산 임무 상태 수신: {previous_state} → {state}"
+            )
 
     def _depth_callback(self, message):
+        self.depth_rx_count += 1
         try:
             depth = self.bridge.imgmsg_to_cv2(
                 message,
@@ -193,28 +235,121 @@ class VictimLocalizerNode(TimestampedNode):
             (stamp_ns, self.latest_depth_header, self.latest_depth)
         )
         self._prune_depth_buffer(stamp_ns)
+        # Detection이 먼저 도착한 경우 새 Depth를 받은 즉시 다시 매칭한다.
+        self._retry_pending_detections()
 
     def _camera_info_callback(self, message):
+        self.camera_info_rx_count += 1
         self.camera_info = message
+        self._retry_pending_detections()
 
     def _detection_callback(self, detection):
-        if self.mission_state not in self.active_localization_states:
+        self.detection_rx_count += 1
+        if detection.detected:
+            self.positive_detection_rx_count += 1
+        if not self._localization_is_active(self.mission_state):
+            if detection.detected and self._should_log("inactive_positive"):
+                self.get_logger().warning(
+                    "양성 탐지 메시지를 받았지만 현재 임무 상태가 위치 계산 "
+                    f"대상이 아니어서 보류합니다: state={self.mission_state}"
+                )
             return
         if self.position_locked:
             return
         if not detection.detected:
             return
-        if self.latest_depth is None or self.camera_info is None:
-            if self._should_log("missing_depth_or_info"):
-                self.get_logger().warning(
-                    "Depth 또는 CameraInfo를 아직 받지 못했습니다."
-                )
+
+        detection_stamp_ns = self._stamp_to_nanoseconds(
+            detection.header.stamp
+        )
+        # 동일 stamp가 중복 수신되면 최초 대기 시각은 유지한다.
+        if detection_stamp_ns not in self.pending_detections:
+            self.pending_detections[detection_stamp_ns] = {
+                "detection": detection,
+                "queued_at": time.monotonic(),
+                "last_reason": "QUEUED",
+            }
+            self.get_logger().info(
+                f"[stamp={detection_stamp_ns}] localizer 양성 탐지 수신: "
+                "Depth 위치 계산 대기열에 등록"
+            )
+
+        maximum_items = max(
+            1,
+            int(
+                self.get_parameter(
+                    "detection_retry_max_items"
+                ).value
+            ),
+        )
+        while len(self.pending_detections) > maximum_items:
+            old_stamp, old_record = self.pending_detections.popitem(
+                last=False
+            )
+            self.get_logger().warning(
+                f"[stamp={old_stamp}] 위치 계산 실패: "
+                "PENDING_QUEUE_OVERFLOW "
+                f"(last_reason={old_record['last_reason']})"
+            )
+
+        self._retry_pending_detections()
+
+    def _retry_pending_detections(self):
+        """늦게 도착한 Depth/CameraInfo로 보류된 양성 탐지를 재처리한다."""
+        if not self.pending_detections:
             return
+        if self.position_locked:
+            self.pending_detections.clear()
+            return
+        if not self._localization_is_active(self.mission_state):
+            return
+
+        timeout_sec = max(
+            0.1,
+            float(
+                self.get_parameter(
+                    "detection_retry_timeout_sec"
+                ).value
+            ),
+        )
+        now = time.monotonic()
+        for stamp_ns, record in list(self.pending_detections.items()):
+            processed, reason = self._try_localize_detection(
+                record["detection"]
+            )
+            if processed:
+                self.pending_detections.pop(stamp_ns, None)
+                if reason not in {"MAP_PUBLISHED", "TF_PENDING"}:
+                    self.get_logger().warning(
+                        f"[stamp={stamp_ns}] 위치 계산 실패: {reason}"
+                    )
+                continue
+
+            record["last_reason"] = reason
+            if now - record["queued_at"] < timeout_sec:
+                continue
+
+            self.pending_detections.pop(stamp_ns, None)
+            self.get_logger().warning(
+                f"[stamp={stamp_ns}] 위치 계산 실패: {reason} "
+                f"({timeout_sec:.1f}초 재시도 만료)"
+            )
+
+    def _try_localize_detection(self, detection):
+        """한 양성 탐지의 Depth 역투영을 시도한다.
+
+        반환값은 (처리 완료 여부, 현재 실패/대기 사유)다. 처리 완료에는
+        map TF 즉시 발행뿐 아니라 TF 재시도 큐 등록도 포함된다.
+        """
+        if self.latest_depth is None:
+            return False, "DEPTH_NOT_RECEIVED"
+        if self.camera_info is None:
+            return False, "CAMERA_INFO_MISSING"
+        if not self.depth_buffer:
+            return False, "DEPTH_BUFFER_EMPTY"
 
         # YOLO 추론 지연 때문에 콜백 시점의 최신 Depth는 원본 RGB보다 훨씬
         # 뒤일 수 있다. 최근 버퍼에서 RGB stamp와 가장 가까운 Depth를 찾는다.
-        if not self.depth_buffer:
-            return
         detection_stamp_ns = self._stamp_to_nanoseconds(detection.header.stamp)
         depth_stamp_ns, depth_header, selected_depth = min(
             self.depth_buffer,
@@ -225,20 +360,16 @@ class VictimLocalizerNode(TimestampedNode):
             self.get_parameter("max_depth_detection_time_delta_sec").value
         )
         if stamp_delta_sec > max_delta_sec:
-            if self._should_log("depth_stamp_mismatch"):
-                self.get_logger().warning(
-                    "RGB 탐지와 Depth 시각 불일치로 위치 계산 보류: "
-                    f"차이={stamp_delta_sec:.3f}초"
-                )
-            return
+            return (
+                False,
+                "DEPTH_TIMESTAMP_MISMATCH"
+                f"(delta={stamp_delta_sec:.3f}s,"
+                f" depth_stamp={depth_stamp_ns})",
+            )
 
         roi, u, v = self._extract_center_roi(detection, selected_depth)
         if roi.size == 0:
-            if self._should_log("invalid_bbox"):
-                self.get_logger().warning(
-                    "탐지 Bounding Box가 유효하지 않습니다."
-                )
-            return
+            return True, "INVALID_BOUNDING_BOX"
 
         minimum_depth = float(
             self.get_parameter("minimum_depth_m").value
@@ -252,13 +383,16 @@ class VictimLocalizerNode(TimestampedNode):
             & (roi <= maximum_depth)
         ]
         if valid.size == 0:
-            if self._should_log("invalid_depth"):
-                self.get_logger().warning(
-                    "사람 영역에서 유효한 Depth 값을 찾지 못했습니다."
-                )
-            return
+            # Detection이 Depth보다 먼저 도착한 경우 현재 가장 가까운
+            # 프레임에는 값이 없어도 다음 Depth 프레임에는 생길 수 있다.
+            return False, "INVALID_DEPTH_PIXELS"
 
         depth_m = float(np.median(valid))
+        self.get_logger().info(
+            f"[stamp={detection_stamp_ns}] Depth 선택 성공: "
+            f"delta={stamp_delta_sec:.3f}초, depth={depth_m:.2f}m, "
+            f"valid_pixels={valid.size}"
+        )
 
         # CameraInfo가 Depth와 다른 해상도로 발행되면 내부 파라미터도
         # 현재 Depth 영상 크기에 맞춰 스케일링한다.
@@ -272,11 +406,7 @@ class VictimLocalizerNode(TimestampedNode):
         cx = float(self.camera_info.k[2]) * scale_x
         cy = float(self.camera_info.k[5]) * scale_y
         if fx <= 0.0 or fy <= 0.0:
-            if self._should_log("invalid_camera_info"):
-                self.get_logger().error(
-                    "CameraInfo 내부 초점거리가 잘못됐습니다."
-                )
-            return
+            return False, "INVALID_CAMERA_INTRINSICS"
 
         # ROS optical frame: X=오른쪽, Y=아래, Z=카메라 전방
         point = PointStamped()
@@ -301,14 +431,34 @@ class VictimLocalizerNode(TimestampedNode):
                 f"y={point.point.y:.2f}, "
                 f"z={point.point.z:.2f}m"
             )
+        map_published = self._publish_map_position(point)
         if (
-            self._publish_map_position(point)
+            map_published
             and self.mission_state in ("VICTIM_DETECTED", "VICTIM_LOCATED")
         ):
             self.position_locked = True
             self.get_logger().info(
                 "조난자 위치를 현재 임무의 확정 위치로 고정했습니다."
             )
+        if not map_published:
+            self.get_logger().info(
+                f"[stamp={detection_stamp_ns}] Camera 좌표 계산 성공, "
+                "Camera→map TF 비동기 재시도 대기"
+            )
+        return True, "MAP_PUBLISHED" if map_published else "TF_PENDING"
+
+    def _localization_is_active(self, state):
+        """전역 수색 상태와 향후 세부 수색/회피 상태를 모두 허용한다."""
+        normalized = str(state).strip().upper()
+        if normalized in self.active_localization_states:
+            return True
+        return normalized.startswith(
+            (
+                "COOP_SEARCHING_",
+                "SEARCHING_",
+                "AVOIDING_OBSTACLE",
+            )
+        )
 
     def _should_log(self, key):
         """토픽 계산은 유지하면서 같은 종류의 로그만 주기 제한한다."""
@@ -318,6 +468,22 @@ class VictimLocalizerNode(TimestampedNode):
             return False
         self.last_log_times[key] = now
         return True
+
+    def _log_pipeline_diagnostics(self):
+        """탐지 이후 어느 입력 단계가 끊겼는지 주기적으로 표시한다."""
+        if not self._localization_is_active(self.mission_state):
+            return
+        self.get_logger().info(
+            "조난자 위치 파이프라인: "
+            f"state={self.mission_state}, "
+            f"depth_rx={self.depth_rx_count}, "
+            f"camera_info_rx={self.camera_info_rx_count}, "
+            f"detection_rx={self.detection_rx_count}, "
+            f"positive_rx={self.positive_detection_rx_count}, "
+            f"pending_depth={len(self.pending_detections)}, "
+            f"pending_tf={len(self.pending_tf_points)}, "
+            f"map_tx={self.map_position_tx_count}"
+        )
 
     @staticmethod
     def _stamp_to_nanoseconds(stamp):
@@ -478,6 +644,11 @@ class VictimLocalizerNode(TimestampedNode):
     def _publish_transformed_map_point(self, map_point):
         """변환 완료된 map 좌표를 발행하고 공통 로그를 출력한다."""
         self.map_position_publisher.publish(map_point)
+        self.map_position_tx_count += 1
+        stamp_ns = self._stamp_to_nanoseconds(map_point.header.stamp)
+        self.get_logger().info(
+            f"[stamp={stamp_ns}] map 위치 발행 성공"
+        )
         if self._should_log("map_position"):
             self.get_logger().info(
                 "조난자 map 좌표: "

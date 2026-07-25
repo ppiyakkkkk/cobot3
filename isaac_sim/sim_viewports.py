@@ -9,6 +9,7 @@ from pxr import Gf, Sdf, Usd, UsdGeom
 
 from sim_config import (
     CAMERA_PRIM_PATHS,
+    DRONE_CONFIGS,
     FOLLOW_CAMERA_BACK_DISTANCE_M,
     FOLLOW_CAMERA_DIRECTION_SMOOTHING,
     FOLLOW_CAMERA_HEIGHT_M,
@@ -31,6 +32,28 @@ class ViewportManager:
         self._follow_camera_ready = False
         self._follow_previous_position = None
         self._follow_direction_xy = None
+
+        # 실행 중인 드론만 추적 후보로 등록한다.
+        self._follow_drone_prim_paths = [
+            f"{prim_path}/body"
+            for prim_path, _, _ in DRONE_CONFIGS
+        ]
+        if FOLLOW_DRONE_PRIM_PATH in self._follow_drone_prim_paths:
+            self._follow_drone_index = self._follow_drone_prim_paths.index(
+                FOLLOW_DRONE_PRIM_PATH
+            )
+        else:
+            self._follow_drone_index = 0
+        self._follow_drone_prim_path = (
+            self._follow_drone_prim_paths[self._follow_drone_index]
+            if self._follow_drone_prim_paths
+            else FOLLOW_DRONE_PRIM_PATH
+        )
+
+        # 숫자키 1~4와 F키 입력 구독 상태다.
+        self._input_interface = None
+        self._keyboard = None
+        self._keyboard_subscription = None
 
     def create_docked_camera_viewports(self):
         """ROS2CameraGraph의 실제 센서 Viewport를 드론 수에 맞춰 배치한다.
@@ -228,11 +251,11 @@ class ViewportManager:
             )
 
             stage = omni.usd.get_context().get_stage()
-            target_prim = stage.GetPrimAtPath(FOLLOW_DRONE_PRIM_PATH)
+            target_prim = stage.GetPrimAtPath(self._follow_drone_prim_path)
             if not target_prim.IsValid():
                 raise RuntimeError(
                     "추적 대상 드론 Prim을 찾지 못했습니다: "
-                    f"{FOLLOW_DRONE_PRIM_PATH}"
+                    f"{self._follow_drone_prim_path}"
                 )
 
             # 센서 카메라와 분리된 Viewport 전용 Camera Prim이다.
@@ -253,10 +276,11 @@ class ViewportManager:
 
             # 첫 프레임부터 드론이 화면 중앙에 보이도록 즉시 위치를 맞춘다.
             self.update_follow_viewport()
+            self._setup_follow_keyboard_shortcuts()
 
             print(
                 "[INFO] Main Viewport forward follow camera enabled: "
-                f"target={FOLLOW_DRONE_PRIM_PATH}, "
+                f"target={self._follow_drone_prim_path}, "
                 f"camera={FOLLOW_CAMERA_PRIM_PATH}, "
                 f"back_distance={FOLLOW_CAMERA_BACK_DISTANCE_M:.1f}m, "
                 f"look_ahead={FOLLOW_CAMERA_LOOK_AHEAD_M:.1f}m"
@@ -269,13 +293,160 @@ class ViewportManager:
                 f"기본 Viewport를 유지합니다: {error}"
             )
 
+    def _setup_follow_keyboard_shortcuts(self):
+        """숫자키 1~4와 F키로 메인 추적 대상을 바꿀 수 있게 한다."""
+        if self._keyboard_subscription is not None:
+            return
+
+        try:
+            import carb.input
+            import omni.appwindow
+
+            app_window = omni.appwindow.get_default_app_window()
+            if app_window is None:
+                raise RuntimeError("기본 AppWindow를 찾지 못했습니다.")
+
+            self._keyboard = app_window.get_keyboard()
+            self._input_interface = carb.input.acquire_input_interface()
+            self._keyboard_subscription = (
+                self._input_interface.subscribe_to_keyboard_events(
+                    self._keyboard,
+                    self._on_follow_keyboard_event,
+                )
+            )
+
+            shortcuts = ", ".join(
+                f"{index + 1}=quadrotor_{index + 1:02d}"
+                for index in range(len(self._follow_drone_prim_paths))
+            )
+            print(
+                "[FOLLOW VIEWPORT] 단축키 준비: "
+                f"{shortcuts}; F=다음 드론"
+            )
+        except Exception as error:
+            self._input_interface = None
+            self._keyboard = None
+            self._keyboard_subscription = None
+            carb.log_error(
+                "메인 추적 Viewport 키보드 단축키 등록 실패: "
+                f"{error}"
+            )
+
+    def _on_follow_keyboard_event(self, event):
+        """키 입력을 드론 인덱스로 변환한다."""
+        try:
+            import carb.input
+
+            if event.type != carb.input.KeyboardEventType.KEY_PRESS:
+                return False
+
+            key_to_index = {
+                carb.input.KeyboardInput.KEY_1: 0,
+                carb.input.KeyboardInput.KEY_2: 1,
+                carb.input.KeyboardInput.KEY_3: 2,
+                carb.input.KeyboardInput.KEY_4: 3,
+                carb.input.KeyboardInput.NUMPAD_1: 0,
+                carb.input.KeyboardInput.NUMPAD_2: 1,
+                carb.input.KeyboardInput.NUMPAD_3: 2,
+                carb.input.KeyboardInput.NUMPAD_4: 3,
+            }
+
+            if event.input in key_to_index:
+                self.set_follow_drone(key_to_index[event.input])
+                return True
+
+            if event.input == carb.input.KeyboardInput.F:
+                if self._follow_drone_prim_paths:
+                    next_index = (
+                        self._follow_drone_index + 1
+                    ) % len(self._follow_drone_prim_paths)
+                    self.set_follow_drone(next_index)
+                return True
+        except Exception as error:
+            carb.log_error(f"추적 드론 단축키 처리 실패: {error}")
+        return False
+
+    def set_follow_drone(self, drone_index):
+        """왼쪽 메인 Viewport가 추적할 드론을 실행 중에 변경한다."""
+        if not self._follow_drone_prim_paths:
+            carb.log_warn("추적할 드론이 없습니다.")
+            return False
+
+        try:
+            index = int(drone_index)
+        except (TypeError, ValueError):
+            carb.log_warn(f"잘못된 추적 드론 인덱스: {drone_index!r}")
+            return False
+
+        if not 0 <= index < len(self._follow_drone_prim_paths):
+            carb.log_warn(
+                "현재 생성되지 않은 드론입니다: "
+                f"requested={index + 1}, "
+                f"available=1~{len(self._follow_drone_prim_paths)}"
+            )
+            return False
+
+        target_path = self._follow_drone_prim_paths[index]
+        stage = omni.usd.get_context().get_stage()
+        target_prim = stage.GetPrimAtPath(target_path)
+        if not target_prim.IsValid():
+            carb.log_warn(
+                f"추적 대상 드론 Prim을 찾지 못했습니다: {target_path}"
+            )
+            return False
+
+        if (
+            index == self._follow_drone_index
+            and target_path == self._follow_drone_prim_path
+        ):
+            return True
+
+        self._follow_drone_index = index
+        self._follow_drone_prim_path = target_path
+
+        # 이전 드론의 위치와 진행방향을 새 드론에 섞지 않는다.
+        self._follow_previous_position = None
+        self._follow_direction_xy = None
+
+        if self._follow_camera_ready:
+            self.update_follow_viewport()
+
+        print(
+            "[FOLLOW VIEWPORT] 추적 대상 변경: "
+            f"quadrotor_{index + 1:02d} "
+            f"({self._follow_drone_prim_path})"
+        )
+        return True
+
+    def shutdown(self):
+        """키보드 이벤트 구독을 해제한다."""
+        if (
+            self._input_interface is not None
+            and self._keyboard is not None
+            and self._keyboard_subscription is not None
+        ):
+            try:
+                self._input_interface.unsubscribe_to_keyboard_events(
+                    self._keyboard,
+                    self._keyboard_subscription,
+                )
+            except Exception as error:
+                carb.log_warn(
+                    "추적 Viewport 키보드 구독 해제 실패: "
+                    f"{error}"
+                )
+
+        self._keyboard_subscription = None
+        self._keyboard = None
+        self._input_interface = None
+
     def update_follow_viewport(self):
         """드론 뒤에서 실제 진행방향 앞쪽을 바라보도록 카메라를 갱신한다."""
         if not self._follow_camera_ready:
             return
 
         stage = omni.usd.get_context().get_stage()
-        target_prim = stage.GetPrimAtPath(FOLLOW_DRONE_PRIM_PATH)
+        target_prim = stage.GetPrimAtPath(self._follow_drone_prim_path)
         if not target_prim.IsValid():
             return
 

@@ -36,6 +36,7 @@ RESCUE_OBSTACLE_STATES = [
     "COOP_SEARCHING",
     "COOP_SEARCH_COMPLETE",
     "VICTIM_DETECTED",
+    "RESCUER_PATH_FAILED",
     "RETURNING_NO_VICTIM",
     "COMPLETE",
     "COMPLETE_WITH_LANDING_ERROR",
@@ -181,6 +182,22 @@ def _launch_nodes(context):
                 operation_mode=operation_mode,
                 drone_ids=drone_ids,
             ),
+        )
+        nodes.append(
+            Node(
+                package="forest_rescue_system",
+                executable="rescuer_route_planner",
+                name="rescuer_route_planner_node",
+                output="screen",
+                prefix=[coverage_python],
+                parameters=[
+                    config,
+                    {
+                        "use_sim_time": use_sim_time,
+                        "operation_mode": operation_mode,
+                    },
+                ],
+            )
         )
         obstacle_states = RESCUE_OBSTACLE_STATES
     elif operation_mode == "mapping_3d":

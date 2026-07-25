@@ -9,7 +9,12 @@ from pathlib import Path
 import cv2
 from cv_bridge import CvBridge, CvBridgeError
 import rclpy
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import (
+    DurabilityPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+    qos_profile_sensor_data,
+)
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
 
@@ -40,7 +45,7 @@ class HumanDetectorNode(TimestampedNode):
         self.declare_parameter("person_class_id", 0)
         # 수색 중 짧게 보이는 원거리 사람도 후보로 유지한다.
         # 최종 확정은 mission_manager의 3회/시간창 검증에서 수행한다.
-        self.declare_parameter("confidence_threshold", 0.40)
+        self.declare_parameter("confidence_threshold", 0.35)
         self.declare_parameter("inference_period_sec", 0.2)
         # 작은 원거리 사람 탐지를 위해 YOLO 내부 입력 크기를 조절한다.
         # 값은 Ultralytics stride에 맞는 32의 배수 사용을 권장한다.
@@ -53,6 +58,9 @@ class HumanDetectorNode(TimestampedNode):
             "~/b3_cobot3_ws/detected_images",
         )
         self.declare_parameter("saved_image_jpeg_quality", 95)
+        # YOLO 양성 결과는 기존 코드에서 화면에만 표시되고 로그가 없어
+        # Localizer/mission_manager로 전달됐는지 구분하기 어려웠다.
+        self.declare_parameter("positive_detection_log_period_sec", 1.0)
         # 시작 지점의 구조자를 조난자로 확정하지 않도록, 수색 시작 후
         # 일정 시간 동안 실제/Mock 탐지를 모두 비활성화한다.
         self.declare_parameter("detection_start_delay_sec", 60.0)
@@ -61,7 +69,6 @@ class HumanDetectorNode(TimestampedNode):
             "active_detection_states",
             [
                 "SEARCHING",
-                "COOP_SEARCH_PREPARING",
                 "COOP_SEARCH_TRANSIT",
                 "COOP_SEARCHING",
             ],
@@ -107,6 +114,7 @@ class HumanDetectorNode(TimestampedNode):
         self.mission_state = "IDLE"
         self.search_started_at = None
         self.delay_notice_printed = False
+        self.last_positive_detection_log_at = 0.0
         self.latest_detected_image = None
         self.latest_detection_stamp_ns = None
         self.confirmed_image_saved = False
@@ -132,11 +140,14 @@ class HumanDetectorNode(TimestampedNode):
             self._image_callback,
             qos_profile_sensor_data,
         )
+        state_qos = QoSProfile(depth=1)
+        state_qos.reliability = ReliabilityPolicy.RELIABLE
+        state_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
         self.create_subscription(
             String,
             str(self.get_parameter("mission_state_topic").value),
             self._mission_state_callback,
-            10,
+            state_qos,
         )
         self.create_subscription(
             String,
@@ -175,6 +186,7 @@ class HumanDetectorNode(TimestampedNode):
             self.latest_detected_image = None
             self.latest_detection_stamp_ns = None
             self.confirmed_image_saved = False
+            self.last_positive_detection_log_at = 0.0
             self.get_logger().info(
                 f"{state} 진입: {self.detection_start_delay_sec:.1f}초 후 "
                 "사람 탐지를 시작합니다."
@@ -275,6 +287,7 @@ class HumanDetectorNode(TimestampedNode):
                 int(message.header.stamp.sec) * 1_000_000_000
                 + int(message.header.stamp.nanosec)
             )
+            self._log_positive_detection(detection)
 
         self.detection_publisher.publish(detection)
 
@@ -284,6 +297,26 @@ class HumanDetectorNode(TimestampedNode):
         )
         annotated_message.header = message.header
         self.annotated_image_publisher.publish(annotated_message)
+
+    def _log_positive_detection(self, detection):
+        """YOLO 후보가 실제 ROS 탐지 메시지로 발행됐음을 주기 제한해 알린다."""
+        now = time.monotonic()
+        period = max(
+            0.1,
+            float(
+                self.get_parameter(
+                    "positive_detection_log_period_sec"
+                ).value
+            ),
+        )
+        if now - self.last_positive_detection_log_at < period:
+            return
+        self.last_positive_detection_log_at = now
+        self.get_logger().warning(
+            f"YOLO person 후보 탐지: conf={detection.confidence:.2f}, "
+            f"bbox=({detection.x_min}, {detection.y_min}, "
+            f"{detection.x_max}, {detection.y_max}) → 위치 검증 요청"
+        )
 
     def _detection_is_enabled(self):
         """수색 전 또는 초기 유예시간에는 사람 탐지 결과를 차단한다."""

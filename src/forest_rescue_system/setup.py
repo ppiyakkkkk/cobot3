@@ -39,6 +39,7 @@ setup(
             "rviz_visualization = forest_rescue_system.rviz_visualization_node:main",
             "coverage_visualization = forest_rescue_system.coverage_visualization_node:main",
             "coverage_evaluation_manager = forest_rescue_system.coverage_evaluation_manager_node:main",
+            "rescuer_route_planner = forest_rescue_system.rescuer_route_planner_node:main",
         ],
     },
 )

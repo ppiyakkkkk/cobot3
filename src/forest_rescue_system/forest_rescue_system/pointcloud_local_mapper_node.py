@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""최근 PointCloud를 map 좌표에 누적해 로컬 코스트맵을 만든다.
+"""최근 PointCloud를 map 좌표에 누적해 경량 로컬 코스트맵을 만든다.
 
 LiDAR 프레임을 그대로 합치면 드론 이동에 따라 같은 나무가 여러 위치에
 늘어져 보인다. 이 노드는 각 스캔을 측정 시점의 TF로 map 좌표에 고정한 뒤
@@ -27,7 +27,7 @@ from forest_rescue_system.log_utils import TimestampedNode
 
 
 class PointCloudLocalMapperNode(TimestampedNode):
-    """3초 슬라이딩 PointCloud와 rolling 2D costmap을 발행한다."""
+    """짧은 슬라이딩 PointCloud와 rolling 2D costmap을 발행한다."""
 
     def __init__(self):
         super().__init__("pointcloud_local_mapper_node")
@@ -52,19 +52,19 @@ class PointCloudLocalMapperNode(TimestampedNode):
         # 오래된 나무 voxel이 좌우 판단을 계속 끌고 가지 않도록 최근
         # 1.5초만 누적한다. A*는 이 짧은 로컬 지도를 방향 힌트로 사용한다.
         self.declare_parameter("accumulation_sec", 1.5)
-        self.declare_parameter("processing_period_sec", 0.10)
-        self.declare_parameter("publish_period_sec", 0.20)
+        self.declare_parameter("processing_period_sec", 0.30)
+        self.declare_parameter("publish_period_sec", 0.50)
         # PointCloud가 TF보다 수십 ms 먼저 도착할 수 있으므로 메시지를 잠시
         # 보류했다가 같은 시각의 TF가 들어오면 처리한다.
-        self.declare_parameter("tf_retry_period_sec", 0.02)
+        self.declare_parameter("tf_retry_period_sec", 0.05)
         self.declare_parameter("tf_exact_wait_sec", 1.00)
         # 누적 지도는 위치 정확도가 중요하므로 exact timestamp TF만 허용한다.
         # 다른 시각의 latest TF로 대체하는 기능은 의도적으로 두지 않는다.
-        self.declare_parameter("pending_cloud_queue_size", 30)
-        self.declare_parameter("max_pending_clouds_per_cycle", 8)
+        self.declare_parameter("pending_cloud_queue_size", 8)
+        self.declare_parameter("max_pending_clouds_per_cycle", 2)
         self.declare_parameter("voxel_size_m", 0.25)
         self.declare_parameter("minimum_voxel_observations", 2)
-        self.declare_parameter("maximum_points_per_scan", 30000)
+        self.declare_parameter("maximum_points_per_scan", 8000)
         self.declare_parameter("minimum_height_m", -1.2)
         self.declare_parameter("maximum_height_m", 1.8)
         self.declare_parameter("local_costmap_size_m", 14.0)
@@ -170,9 +170,12 @@ class PointCloudLocalMapperNode(TimestampedNode):
         self.exact_wait_max_sec = 0.0
 
         self.get_logger().info(
-            f"{self.get_parameter('drone_id').value} 3초 PointCloud 누적기 시작: "
+            f"{self.get_parameter('drone_id').value} 로컬 PointCloud 누적기 시작: "
             f"window={self.accumulation_sec:.1f}s, map={self.map_frame}, "
-            f"body={self.body_frame}, tf_policy=exact_only"
+            f"body={self.body_frame}, process={self.processing_period_sec:.2f}s, "
+            f"publish={self.publish_period_sec:.2f}s, "
+            f"max_points={int(self.get_parameter('maximum_points_per_scan').value)}, "
+            f"tf_policy=exact_only"
         )
 
     def _mission_state_callback(self, message):
