@@ -170,15 +170,14 @@ configure_operation_mode(DEFAULT_OPERATION_MODE)
 # 현재 PeopleManager는 일반 랜덤 스폰 시 X·Y를 사용하고,
 # 실제 Z는 Terrain 높이 + PERSON_GROUND_CLEARANCE_M으로 다시 계산한다.
 VICTIM_SPAWN_POSITIONS = [
-    [-2.0, 35.0, 0.0],    # 후보 2: 중거리 육상 이동 시험
-    [33.0, 29.0, 0.0],   # 후보 3: 다리 횡단 여부 확인용
-    [29.0, -20.0, 0.0],  # 후보 4: 장거리·다리 횡단 종합 시험
+    [-2.0, 35.0, 0.0],    # 후보 1: 중거리 육상 이동 시험
+    [21.0, 18.0, 0.0],   # 후보 2: 다리 횡단 여부 확인용
 ]
 
 # 착륙 복귀 시험용 조난자 위치다.
 # World ENU 기준 (X, Y, Z)를 한 줄에서 직접 지정한다.
 FOR_TEST_VICTIM_SPAWN_ENABLED = True
-FOR_TEST_VICTIM_WORLD_XYZ = (21.0, 18.0, 20.0)
+FOR_TEST_VICTIM_WORLD_XYZ = VICTIM_SPAWN_POSITIONS[0]
 
 # True이면 X·Y만 그대로 사용하고 Z는 실제 Terrain 표면으로 자동 보정한다.
 # 사람이 경사면 위에서 뜨거나 묻히지 않게 하는 기본 시험 모드다.
