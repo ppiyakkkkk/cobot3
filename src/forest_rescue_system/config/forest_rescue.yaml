@@ -116,9 +116,17 @@ rescuer_route_planner_node:
     selected_bridge_topic: /rescue/rescuer/selected_bridge
     route_marker_topic: /rescue/rescuer_route_markers
     # 구조자 경로계획 기준. Python 기본값과 YAML 실행값을 동일하게 유지한다.
-    max_slope_deg: 42.0
-    # 인접 격자 사이 높이차가 이 값을 넘으면 절벽성 구간으로 차단한다.
-    max_step_height_m: 1.0
+    max_slope_deg: 45.0
+    # 실제로 연결된 산길이 격자 오차로 끊기지 않도록 약간 완화한다.
+    # 회색 판의 큰 낙차는 이 값보다 크므로 계속 차단된다.
+    max_step_height_m: 1.25
+    # 실제 다리 상판과 양 끝의 짧은 접속부에만 적용되는 국소 완화값이다.
+    # 일반 절벽이나 강 전체에는 적용되지 않는다.
+    bridge_max_slope_deg: 60.0
+    bridge_max_step_height_m: 1.5
+    # 다리 주축 양 끝에서만 일반 보행 지면까지 연결로를 탐색한다.
+    bridge_connector_max_length_m: 15.0
+    bridge_connector_half_width_m: 4.5
     river_clearance_m: 0.75
     bridge_expansion_m: 1.5
     obstacle_clearance_m: 0.8

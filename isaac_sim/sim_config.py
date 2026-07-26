@@ -170,7 +170,7 @@ configure_operation_mode(DEFAULT_OPERATION_MODE)
 # 현재 PeopleManager는 일반 랜덤 스폰 시 X·Y를 사용하고,
 # 실제 Z는 Terrain 높이 + PERSON_GROUND_CLEARANCE_M으로 다시 계산한다.
 VICTIM_SPAWN_POSITIONS = [
-    [-1.0, 36.0, 0.0],    # 후보 2: 중거리 육상 이동 시험
+    [-2.0, 35.0, 0.0],    # 후보 2: 중거리 육상 이동 시험
     [33.0, 29.0, 0.0],   # 후보 3: 다리 횡단 여부 확인용
     [29.0, -20.0, 0.0],  # 후보 4: 장거리·다리 횡단 종합 시험
 ]
@@ -178,7 +178,7 @@ VICTIM_SPAWN_POSITIONS = [
 # 착륙 복귀 시험용 조난자 위치다.
 # World ENU 기준 (X, Y, Z)를 한 줄에서 직접 지정한다.
 FOR_TEST_VICTIM_SPAWN_ENABLED = True
-FOR_TEST_VICTIM_WORLD_XYZ = (-2.0, 35.0, 20.0)
+FOR_TEST_VICTIM_WORLD_XYZ = (33.0, 29.0, 20.0)
 
 # True이면 X·Y만 그대로 사용하고 Z는 실제 Terrain 표면으로 자동 보정한다.
 # 사람이 경사면 위에서 뜨거나 묻히지 않게 하는 기본 시험 모드다.
@@ -286,6 +286,23 @@ NAVIGATION_STRUCTURE_ALIASES = (
 )
 NAVIGATION_STRUCTURE_XY_MARGIN_M = 1.5
 
+# 다리 Mesh 전체의 최고 Z를 사용하면 난간·기둥 높이가 상판으로 오인된다.
+# 아래 값들은 위를 향하는 실제 상판 삼각형을 자동 분리해 보행 표면을
+# 만들기 위한 기준이다.
+NAVIGATION_BRIDGE_DECK_NORMAL_Z_MIN = 0.65
+NAVIGATION_BRIDGE_LOCAL_STEP_M = 1.25
+NAVIGATION_BRIDGE_CORE_EXPANSION_M = 1.0
+NAVIGATION_BRIDGE_ACCESS_LENGTH_M = 3.0
+NAVIGATION_BRIDGE_ACCESS_HALF_WIDTH_M = 1.5
+NAVIGATION_BRIDGE_MIN_COMPONENT_CELLS = 3
+
+# 일반 산길은 45도/1.25m까지 허용한다. 기존 42도/1.0m에서는 실제로
+# 이어진 산길 일부가 격자화 오차 때문에 분리되었다. 다리 상판과 양 끝의
+# 짧은 접속 구간에만 아래의 국소 완화값을 적용하며, 강 전체나 회색 판의
+# 큰 절벽에는 적용하지 않는다.
+RESCUER_BRIDGE_MAX_SLOPE_DEG = 60.0
+RESCUER_BRIDGE_MAX_STEP_HEIGHT_M = 1.5
+
 # 이름이 일반적인 Cube인 회색 스폰 판은 정확한 Prim 경로로만 등록한다.
 # "cube"를 별칭에 넣으면 환경의 다른 Cube까지 보행 지면으로 오인할 수 있다.
 NAVIGATION_STRUCTURE_EXPLICIT_PRIM_PATHS = (
@@ -300,7 +317,9 @@ NAVIGATION_STRUCTURE_EXPLICIT_XY_MARGIN_M = 0.0
 # Isaac 구조자의 실시간 ground follower도 ROS 2 구조자 A*와 같은 최대 단차
 # 기준을 사용한다. forest_rescue.yaml의 max_step_height_m 값과 동일하게
 # 유지해야 판·다리에서 Terrain으로 전환할 때 계획과 실행 판단이 어긋나지 않는다.
-RESCUER_GROUND_MAX_STEP_HEIGHT_M = 1.0
+RESCUER_GROUND_MAX_STEP_HEIGHT_M = 1.25
+# 실제 PhysX 지면 전환도 다리 또는 다리 접속부에서만 별도 단차 제한을 쓴다.
+RESCUER_GROUND_BRIDGE_MAX_STEP_HEIGHT_M = RESCUER_BRIDGE_MAX_STEP_HEIGHT_M
 
 # 복귀 고도는 더 이상 지도 전체 최고점으로 고정하지 않는다. ROS 2
 # 컨트롤러가 RETURN_HOME 수신 시점의 실제 위치부터 홈까지 지형만 검사하고,

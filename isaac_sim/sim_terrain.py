@@ -12,9 +12,16 @@ from pathlib import Path
 import carb
 import numpy as np
 from pxr import Gf, Usd, UsdGeom, UsdPhysics, UsdShade
+from scipy import ndimage
 from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
 
 from sim_config import (
+    NAVIGATION_BRIDGE_ACCESS_HALF_WIDTH_M,
+    NAVIGATION_BRIDGE_ACCESS_LENGTH_M,
+    NAVIGATION_BRIDGE_CORE_EXPANSION_M,
+    NAVIGATION_BRIDGE_DECK_NORMAL_Z_MIN,
+    NAVIGATION_BRIDGE_LOCAL_STEP_M,
+    NAVIGATION_BRIDGE_MIN_COMPONENT_CELLS,
     NAVIGATION_STRUCTURE_ALIASES,
     NAVIGATION_STRUCTURE_EXPLICIT_PRIM_PATHS,
     NAVIGATION_STRUCTURE_EXPLICIT_XY_MARGIN_M,
@@ -38,6 +45,12 @@ class TerrainHeightField:
         self._terrain_prim = self._find_terrain_mesh()
         self._build_interpolator()
         self._navigation_structures = []
+        self._bridge_grid_x_values = None
+        self._bridge_grid_y_values = None
+        self._bridge_core_mask = None
+        self._bridge_access_mask = None
+        self._bridge_label_grid = None
+        self._bridge_surface_z_grid = None
         self._build_navigation_structures()
 
     def _find_terrain_mesh(self):
@@ -190,13 +203,45 @@ class TerrainHeightField:
             current = parent
         return False
 
-    def _build_navigation_structures(self):
-        """다리와 명시적 스폰 판의 World AABB 및 상단 높이를 수집한다.
 
-        다리는 기존처럼 이름 별칭으로 찾는다. 이름이 일반적인 회색 Cube는
-        정확한 Prim 경로로만 등록해 다른 Cube가 보행 지면으로 오인되지 않게
-        한다. 구조물마다 별도의 XY margin을 저장하므로 다리 접근부와 높은
-        플랫폼 가장자리를 서로 다르게 처리할 수 있다.
+    @staticmethod
+    def _triangulate_mesh_indices(mesh):
+        """USD polygon face를 삼각형 인덱스로 바꾼다."""
+        counts = mesh.GetFaceVertexCountsAttr().Get()
+        indices = mesh.GetFaceVertexIndicesAttr().Get()
+        if counts is None or indices is None:
+            return np.empty((0, 3), dtype=np.int64)
+
+        counts = [int(value) for value in counts]
+        indices = [int(value) for value in indices]
+        triangles = []
+        offset = 0
+        left_handed = (
+            mesh.GetOrientationAttr().Get() == UsdGeom.Tokens.leftHanded
+        )
+        for vertex_count in counts:
+            face = indices[offset : offset + vertex_count]
+            offset += vertex_count
+            if vertex_count < 3 or len(face) != vertex_count:
+                continue
+            first = face[0]
+            for index in range(1, vertex_count - 1):
+                second = face[index]
+                third = face[index + 1]
+                if left_handed:
+                    second, third = third, second
+                triangles.append((first, second, third))
+        if not triangles:
+            return np.empty((0, 3), dtype=np.int64)
+        return np.asarray(triangles, dtype=np.int64)
+
+    def _build_navigation_structures(self):
+        """다리와 명시적 스폰 판의 World 형상을 수집한다.
+
+        명시적 스폰 판은 정확한 Prim 경로와 AABB 상단을 사용한다. 다리는
+        AABB 최고 Z를 보행 높이로 쓰지 않고, 실제 Mesh의 위쪽 삼각형을
+        ``write_navigation_surface``에서 다시 분석할 수 있도록 World 정점과
+        삼각형을 보존한다.
         """
         aliases = tuple(
             self._normalize_name(value)
@@ -269,8 +314,8 @@ class TerrainHeightField:
                 dtype=np.float64,
             )
             finite = np.all(np.isfinite(world_points), axis=1)
-            world_points = world_points[finite]
-            if len(world_points) < 3:
+            finite_points = world_points[finite]
+            if len(finite_points) < 3:
                 continue
 
             source_type = (
@@ -293,12 +338,32 @@ class TerrainHeightField:
                 "source_type": source_type,
                 "xy_margin_m": max(0.0, xy_margin_m),
                 "has_collision_api": self._has_collision_api_on_path(prim),
-                "x_min": float(np.min(world_points[:, 0])),
-                "x_max": float(np.max(world_points[:, 0])),
-                "y_min": float(np.min(world_points[:, 1])),
-                "y_max": float(np.max(world_points[:, 1])),
-                "z_max": float(np.max(world_points[:, 2])),
+                "x_min": float(np.min(finite_points[:, 0])),
+                "x_max": float(np.max(finite_points[:, 0])),
+                "y_min": float(np.min(finite_points[:, 1])),
+                "y_max": float(np.max(finite_points[:, 1])),
+                "z_min": float(np.min(finite_points[:, 2])),
+                "z_max": float(np.max(finite_points[:, 2])),
+                "bridge_label": 0,
             }
+
+            if source_type == "alias":
+                triangles = self._triangulate_mesh_indices(mesh)
+                if (
+                    triangles.size
+                    and np.max(triangles) < len(world_points)
+                    and np.min(triangles) >= 0
+                    and np.all(finite)
+                ):
+                    structure["bridge_triangles_xyz"] = world_points[
+                        triangles
+                    ]
+                else:
+                    structure["bridge_triangles_xyz"] = np.empty(
+                        (0, 3, 3),
+                        dtype=np.float64,
+                    )
+
             self._navigation_structures.append(structure)
 
             if matched_explicit_path is not None:
@@ -310,7 +375,7 @@ class TerrainHeightField:
                 f"configured={structure['configured_path'] or 'ALIAS'}, "
                 f"XY=({structure['x_min']:.2f}, {structure['x_max']:.2f}, "
                 f"{structure['y_min']:.2f}, {structure['y_max']:.2f}), "
-                f"top_Z={structure['z_max']:.2f}, "
+                f"Z=({structure['z_min']:.2f}, {structure['z_max']:.2f}), "
                 f"margin={structure['xy_margin_m']:.2f}m, "
                 f"collision_api={structure['has_collision_api']}"
             )
@@ -355,56 +420,534 @@ class TerrainHeightField:
                 f"큰 Mesh 후보: {candidate_text}"
             )
 
-    def navigation_height(self, x, y):
-        """현재 XY에서 실제로 걸어야 할 navigation surface 높이를 반환한다.
+    @staticmethod
+    def _rasterize_triangle_footprint(
+        x_values,
+        y_values,
+        triangles_xyz,
+    ):
+        """삼각형 XY 투영이 덮는 규칙 격자 셀을 반환한다."""
+        mask = np.zeros((len(y_values), len(x_values)), dtype=bool)
+        triangles_xyz = np.asarray(triangles_xyz, dtype=np.float64)
+        if triangles_xyz.size == 0:
+            return mask
 
-        다리는 Terrain과 일부 겹칠 수 있으므로 기존처럼 더 높은 표면을
-        사용한다. 정확한 Prim 경로로 등록한 스폰 플랫폼은 그 자체가 실제
-        보행 바닥이므로, 플랫폼 AABB 안에서는 아래 Terrain 보간값보다
-        플랫폼의 PhysX 상단 높이를 우선한다.
-        """
+        for triangle in triangles_xyz:
+            points = triangle[:, :2]
+            if not np.all(np.isfinite(points)):
+                continue
+            x_min, y_min = np.min(points, axis=0)
+            x_max, y_max = np.max(points, axis=0)
+            column_min = max(
+                0,
+                int(np.searchsorted(x_values, x_min, side="left")) - 1,
+            )
+            column_max = min(
+                len(x_values) - 1,
+                int(np.searchsorted(x_values, x_max, side="right")),
+            )
+            row_min = max(
+                0,
+                int(np.searchsorted(y_values, y_min, side="left")) - 1,
+            )
+            row_max = min(
+                len(y_values) - 1,
+                int(np.searchsorted(y_values, y_max, side="right")),
+            )
+            if column_min > column_max or row_min > row_max:
+                continue
+
+            a, b, c = points
+            v0 = c - a
+            v1 = b - a
+            denominator = v0[0] * v1[1] - v1[0] * v0[1]
+            if abs(float(denominator)) < 1.0e-10:
+                continue
+
+            local_x = x_values[column_min : column_max + 1]
+            local_y = y_values[row_min : row_max + 1]
+            grid_x, grid_y = np.meshgrid(local_x, local_y)
+            v2x = grid_x - a[0]
+            v2y = grid_y - a[1]
+            u = (v2x * v1[1] - v1[0] * v2y) / denominator
+            v = (v0[0] * v2y - v2x * v0[1]) / denominator
+            inside = (
+                (u >= -1.0e-7)
+                & (v >= -1.0e-7)
+                & (u + v <= 1.0 + 1.0e-7)
+            )
+            mask[
+                row_min : row_max + 1,
+                column_min : column_max + 1,
+            ] |= inside
+        return mask
+
+    @staticmethod
+    def _bridge_surface_candidates(
+        x_values,
+        y_values,
+        triangles_xyz,
+    ):
+        """위쪽을 향하는 삼각형의 셀별 Z 후보를 수집한다."""
+        candidates = {}
+        triangles_xyz = np.asarray(triangles_xyz, dtype=np.float64)
+        if triangles_xyz.size == 0:
+            return candidates
+
+        edge1 = triangles_xyz[:, 1] - triangles_xyz[:, 0]
+        edge2 = triangles_xyz[:, 2] - triangles_xyz[:, 0]
+        normals = np.cross(edge1, edge2)
+        normal_length = np.linalg.norm(normals, axis=1)
+        valid = normal_length > 1.0e-9
+        normal_z = np.zeros(len(triangles_xyz), dtype=np.float64)
+        normal_z[valid] = np.abs(
+            normals[valid, 2] / normal_length[valid]
+        )
+        selected_triangles = triangles_xyz[
+            valid
+            & (
+                normal_z
+                >= float(NAVIGATION_BRIDGE_DECK_NORMAL_Z_MIN)
+            )
+        ]
+
+        for triangle in selected_triangles:
+            points = triangle[:, :2]
+            x_min, y_min = np.min(points, axis=0)
+            x_max, y_max = np.max(points, axis=0)
+            column_min = max(
+                0,
+                int(np.searchsorted(x_values, x_min, side="left")) - 1,
+            )
+            column_max = min(
+                len(x_values) - 1,
+                int(np.searchsorted(x_values, x_max, side="right")),
+            )
+            row_min = max(
+                0,
+                int(np.searchsorted(y_values, y_min, side="left")) - 1,
+            )
+            row_max = min(
+                len(y_values) - 1,
+                int(np.searchsorted(y_values, y_max, side="right")),
+            )
+            if column_min > column_max or row_min > row_max:
+                continue
+
+            a, b, c = points
+            v0 = c - a
+            v1 = b - a
+            denominator = v0[0] * v1[1] - v1[0] * v0[1]
+            if abs(float(denominator)) < 1.0e-10:
+                continue
+
+            local_x = x_values[column_min : column_max + 1]
+            local_y = y_values[row_min : row_max + 1]
+            grid_x, grid_y = np.meshgrid(local_x, local_y)
+            v2x = grid_x - a[0]
+            v2y = grid_y - a[1]
+            u = (v2x * v1[1] - v1[0] * v2y) / denominator
+            v = (v0[0] * v2y - v2x * v0[1]) / denominator
+            inside = (
+                (u >= -1.0e-7)
+                & (v >= -1.0e-7)
+                & (u + v <= 1.0 + 1.0e-7)
+            )
+            local_rows, local_columns = np.where(inside)
+            for local_row, local_column in zip(
+                local_rows,
+                local_columns,
+            ):
+                row = row_min + int(local_row)
+                column = column_min + int(local_column)
+                local_u = float(u[local_row, local_column])
+                local_v = float(v[local_row, local_column])
+                z = (
+                    float(triangle[0, 2])
+                    + local_u
+                    * float(triangle[2, 2] - triangle[0, 2])
+                    + local_v
+                    * float(triangle[1, 2] - triangle[0, 2])
+                )
+                if math.isfinite(z):
+                    candidates.setdefault((row, column), []).append(z)
+
+        # 같은 판자의 앞·뒤 면처럼 거의 같은 높이는 하나로 합친다.
+        for cell, values in tuple(candidates.items()):
+            unique = []
+            for value in sorted(float(item) for item in values):
+                if not unique or abs(value - unique[-1]) > 0.04:
+                    unique.append(value)
+            candidates[cell] = unique
+        return candidates
+
+    @staticmethod
+    def _select_bridge_deck_component(candidates):
+        """난간·기둥이 아닌 가장 긴 매끄러운 상판 성분을 고른다."""
+        nodes = []
+        cell_nodes = {}
+        for cell, values in candidates.items():
+            for value in values:
+                node_index = len(nodes)
+                nodes.append((cell, float(value)))
+                cell_nodes.setdefault(cell, []).append(node_index)
+
+        if not nodes:
+            return {}
+
+        adjacency = [[] for _ in nodes]
+        for cell, indices in cell_nodes.items():
+            # 같은 XY의 얇은 판자 위·아래 면은 같은 구조로 묶는다.
+            for first_pos, first in enumerate(indices):
+                for second in indices[first_pos + 1 :]:
+                    if abs(nodes[first][1] - nodes[second][1]) <= 0.35:
+                        adjacency[first].append(second)
+                        adjacency[second].append(first)
+
+            row, column = cell
+            for row_offset in (-1, 0, 1):
+                for column_offset in (-1, 0, 1):
+                    if row_offset == 0 and column_offset == 0:
+                        continue
+                    neighbor = (
+                        row + row_offset,
+                        column + column_offset,
+                    )
+                    for first in indices:
+                        for second in cell_nodes.get(neighbor, ()):
+                            if (
+                                abs(nodes[first][1] - nodes[second][1])
+                                <= float(NAVIGATION_BRIDGE_LOCAL_STEP_M)
+                            ):
+                                adjacency[first].append(second)
+
+        visited = set()
+        components = []
+        for start_index in range(len(nodes)):
+            if start_index in visited:
+                continue
+            stack = [start_index]
+            visited.add(start_index)
+            component = []
+            while stack:
+                current = stack.pop()
+                component.append(current)
+                for neighbor in adjacency[current]:
+                    if neighbor in visited:
+                        continue
+                    visited.add(neighbor)
+                    stack.append(neighbor)
+
+            unique_cells = {nodes[index][0] for index in component}
+            if not unique_cells:
+                continue
+            rows = [cell[0] for cell in unique_cells]
+            columns = [cell[1] for cell in unique_cells]
+            span = math.hypot(
+                max(rows) - min(rows),
+                max(columns) - min(columns),
+            )
+            median_z = float(
+                np.median([nodes[index][1] for index in component])
+            )
+            components.append(
+                (
+                    len(unique_cells),
+                    span,
+                    len(component),
+                    median_z,
+                    component,
+                )
+            )
+
+        if not components:
+            return {}
+
+        # 먼저 가장 넓고 긴 성분을 고르고, 규모가 같을 때는 교각 아래면보다
+        # 위쪽의 실제 상판을 선택하도록 median Z를 마지막 tie-break로 쓴다.
+        components.sort(
+            key=lambda item: (item[0], item[1], item[2], item[3]),
+            reverse=True,
+        )
+        (
+            unique_cell_count,
+            _span,
+            _node_count,
+            _median_z,
+            selected,
+        ) = components[0]
+        if unique_cell_count < int(NAVIGATION_BRIDGE_MIN_COMPONENT_CELLS):
+            return {}
+
+        deck = {}
+        for node_index in selected:
+            cell, value = nodes[node_index]
+            # 같은 XY에서는 실제 보행 상단인 더 높은 면을 사용한다.
+            deck[cell] = max(value, deck.get(cell, -math.inf))
+        return deck
+
+    @staticmethod
+    def _bridge_endpoint_access_mask(
+        core_mask,
+        x_values,
+        y_values,
+    ):
+        """상판 주축의 양 끝에만 짧은 접속 영역을 만든다."""
+        access = np.zeros_like(core_mask, dtype=bool)
+        rows, columns = np.where(core_mask)
+        if len(rows) < 2:
+            return access
+
+        points = np.column_stack(
+            (x_values[columns], y_values[rows])
+        ).astype(np.float64)
+        center = np.mean(points, axis=0)
+        centered = points - center
+        _u, _s, vh = np.linalg.svd(centered, full_matrices=False)
+        axis = vh[0]
+        axis_length = float(np.linalg.norm(axis))
+        if axis_length <= 1.0e-9:
+            return access
+        axis = axis / axis_length
+
+        projections = centered @ axis
+        minimum = float(np.min(projections))
+        maximum = float(np.max(projections))
+        endpoint_band = max(
+            0.75,
+            0.15 * max(maximum - minimum, 1.0),
+        )
+        low_points = points[
+            projections <= minimum + endpoint_band
+        ]
+        high_points = points[
+            projections >= maximum - endpoint_band
+        ]
+        low_center = np.mean(low_points, axis=0)
+        high_center = np.mean(high_points, axis=0)
+
+        grid_x, grid_y = np.meshgrid(x_values, y_values)
+        for endpoint, direction in (
+            (low_center, -axis),
+            (high_center, axis),
+        ):
+            delta_x = grid_x - float(endpoint[0])
+            delta_y = grid_y - float(endpoint[1])
+            along = delta_x * direction[0] + delta_y * direction[1]
+            lateral = np.abs(
+                -delta_x * direction[1]
+                + delta_y * direction[0]
+            )
+            access |= (
+                (along >= -0.25)
+                & (
+                    along
+                    <= float(NAVIGATION_BRIDGE_ACCESS_LENGTH_M)
+                )
+                & (
+                    lateral
+                    <= float(NAVIGATION_BRIDGE_ACCESS_HALF_WIDTH_M)
+                )
+            )
+        return access
+
+    def _build_bridge_navigation_layers(
+        self,
+        x_values,
+        y_values,
+        base_z_grid,
+    ):
+        """각 다리를 상판·접속부로 분리해 격자 보행 레이어를 만든다."""
+        shape = base_z_grid.shape
+        core_mask = np.zeros(shape, dtype=bool)
+        access_mask = np.zeros(shape, dtype=bool)
+        label_grid = np.zeros(shape, dtype=np.int32)
+        surface_z_grid = np.full(shape, np.nan, dtype=np.float64)
+
+        spacing_x = float(np.median(np.diff(x_values)))
+        spacing_y = float(np.median(np.diff(y_values)))
+        mean_spacing = max(1.0e-6, 0.5 * (spacing_x + spacing_y))
+        expansion_iterations = max(
+            1,
+            int(
+                round(
+                    float(NAVIGATION_BRIDGE_CORE_EXPANSION_M)
+                    / mean_spacing
+                )
+            ),
+        )
+
+        bridge_label = 0
+        for structure in self._navigation_structures:
+            if structure.get("source_type") != "alias":
+                continue
+            triangles_xyz = np.asarray(
+                structure.get(
+                    "bridge_triangles_xyz",
+                    np.empty((0, 3, 3)),
+                ),
+                dtype=np.float64,
+            )
+            candidates = self._bridge_surface_candidates(
+                x_values,
+                y_values,
+                triangles_xyz,
+            )
+            deck_cells = self._select_bridge_deck_component(candidates)
+            if not deck_cells:
+                carb.log_warn(
+                    "[BRIDGE DECK] 실제 상판 성분을 찾지 못했습니다: "
+                    f"{structure['path']}"
+                )
+                continue
+
+            bridge_label += 1
+            raw_mask = np.zeros(shape, dtype=bool)
+            raw_z = np.full(shape, np.nan, dtype=np.float64)
+            for (row, column), z in deck_cells.items():
+                raw_mask[row, column] = True
+                raw_z[row, column] = float(z)
+
+            footprint = self._rasterize_triangle_footprint(
+                x_values,
+                y_values,
+                triangles_xyz,
+            )
+            footprint = ndimage.binary_dilation(
+                footprint,
+                iterations=1,
+            )
+            local_core = ndimage.binary_dilation(
+                raw_mask,
+                iterations=expansion_iterations,
+            )
+            local_core &= footprint
+
+            # 확장된 셀은 가장 가까운 실제 상판 샘플 높이를 사용한다.
+            _distance, nearest = ndimage.distance_transform_edt(
+                ~raw_mask,
+                return_indices=True,
+            )
+            nearest_z = raw_z[nearest[0], nearest[1]]
+            local_surface_z = np.where(
+                local_core,
+                nearest_z,
+                np.nan,
+            )
+
+            local_access = local_core | self._bridge_endpoint_access_mask(
+                local_core,
+                x_values,
+                y_values,
+            )
+
+            # 다른 다리와 겹칠 가능성은 낮지만 먼저 등록된 상판을 유지한다.
+            write_core = local_core & ~core_mask
+            core_mask |= local_core
+            access_mask |= local_access
+            surface_z_grid[write_core] = local_surface_z[write_core]
+            label_grid[local_access & (label_grid == 0)] = bridge_label
+
+            structure["bridge_label"] = bridge_label
+            structure["deck_cell_count"] = int(np.count_nonzero(raw_mask))
+            structure["core_cell_count"] = int(np.count_nonzero(local_core))
+            structure["access_cell_count"] = int(
+                np.count_nonzero(local_access)
+            )
+            structure["deck_z_min"] = float(
+                np.nanmin(local_surface_z[local_core])
+            )
+            structure["deck_z_max"] = float(
+                np.nanmax(local_surface_z[local_core])
+            )
+            structure["deck_z_median"] = float(
+                np.nanmedian(local_surface_z[local_core])
+            )
+
+            print(
+                "[BRIDGE DECK] "
+                f"label={bridge_label}, path={structure['path']}, "
+                f"raw_cells={structure['deck_cell_count']}, "
+                f"core_cells={structure['core_cell_count']}, "
+                f"access_cells={structure['access_cell_count']}, "
+                f"deck_Z=({structure['deck_z_min']:.3f}, "
+                f"{structure['deck_z_max']:.3f}), "
+                f"mesh_top_Z={float(structure['z_max']):.3f}"
+            )
+
+        return core_mask, access_mask, label_grid, surface_z_grid
+
+    def navigation_structure_at(self, x, y):
+        """현재 XY가 실제 플랫폼 또는 다리 상판 안인지 반환한다."""
+        x = float(x)
+        y = float(y)
+
+        for structure in self._navigation_structures:
+            if structure.get("source_type") != "explicit":
+                continue
+            if (
+                float(structure["x_min"]) <= x <= float(structure["x_max"])
+                and float(structure["y_min"]) <= y <= float(structure["y_max"])
+            ):
+                return structure
+
+        if (
+            self._bridge_grid_x_values is None
+            or self._bridge_grid_y_values is None
+            or self._bridge_core_mask is None
+            or self._bridge_label_grid is None
+        ):
+            return None
+
+        column = int(
+            np.argmin(np.abs(self._bridge_grid_x_values - x))
+        )
+        row = int(
+            np.argmin(np.abs(self._bridge_grid_y_values - y))
+        )
+        if not self._bridge_core_mask[row, column]:
+            return None
+
+        label = int(self._bridge_label_grid[row, column])
+        for structure in self._navigation_structures:
+            if int(structure.get("bridge_label", 0)) == label:
+                return structure
+        return None
+
+    def navigation_height(self, x, y):
+        """현재 XY의 실제 보행 표면 높이를 반환한다."""
         x = float(x)
         y = float(y)
         terrain_z = float(self.height(x, y))
 
-        explicit_heights = []
-        alias_heights = []
+        # 스폰 플랫폼은 아래 Terrain보다 실제 판 상단을 우선한다.
         for structure in self._navigation_structures:
-            margin = max(
-                0.0,
-                float(
-                    structure.get(
-                        "xy_margin_m",
-                        NAVIGATION_STRUCTURE_XY_MARGIN_M,
-                    )
-                ),
-            )
-            if not (
-                float(structure["x_min"]) - margin
-                <= x
-                <= float(structure["x_max"]) + margin
-                and float(structure["y_min"]) - margin
-                <= y
-                <= float(structure["y_max"]) + margin
-            ):
+            if structure.get("source_type") != "explicit":
                 continue
+            if (
+                float(structure["x_min"]) <= x <= float(structure["x_max"])
+                and float(structure["y_min"]) <= y <= float(structure["y_max"])
+            ):
+                return float(structure["z_max"])
 
-            structure_z = float(structure["z_max"])
-            if structure.get("source_type") == "explicit":
-                explicit_heights.append(structure_z)
-            else:
-                alias_heights.append(structure_z)
+        if (
+            self._bridge_grid_x_values is not None
+            and self._bridge_grid_y_values is not None
+            and self._bridge_core_mask is not None
+            and self._bridge_surface_z_grid is not None
+        ):
+            column = int(
+                np.argmin(np.abs(self._bridge_grid_x_values - x))
+            )
+            row = int(
+                np.argmin(np.abs(self._bridge_grid_y_values - y))
+            )
+            if self._bridge_core_mask[row, column]:
+                bridge_z = float(self._bridge_surface_z_grid[row, column])
+                if math.isfinite(bridge_z):
+                    return bridge_z
+        return terrain_z
 
-        # 명시적 플랫폼이 겹치는 영역에서는 Terrain과 max()를 취하지 않는다.
-        # 로그에서 판 PhysX 상단은 30.500m인데 Terrain 보간이 약 31.0m로
-        # 더 높게 계산되어 경로 Z가 실제 판보다 0.5m 높아졌던 문제를 막는다.
-        if explicit_heights:
-            return max(explicit_heights)
-
-        result = terrain_z
-        if alias_heights:
-            result = max(result, max(alias_heights))
-        return result
 
     def _log_navigation_structure_edges(
         self,
@@ -412,21 +955,38 @@ class TerrainHeightField:
         y_values,
         z_grid,
     ):
-        """구조물 상단과 바깥 셀 사이의 최소·최대 높이차를 출력한다."""
+        """플랫폼과 다리 접속부의 실제 격자 높이차를 출력한다."""
         grid_x, grid_y = np.meshgrid(x_values, y_values)
         row_count, column_count = z_grid.shape
         neighbor_offsets = ((-1, 0), (1, 0), (0, -1), (0, 1))
 
         for structure in self._navigation_structures:
-            inside = (
-                (grid_x >= float(structure["x_min"]))
-                & (grid_x <= float(structure["x_max"]))
-                & (grid_y >= float(structure["y_min"]))
-                & (grid_y <= float(structure["y_max"]))
-            )
+            if (
+                structure.get("source_type") == "alias"
+                and self._bridge_label_grid is not None
+                and int(structure.get("bridge_label", 0)) > 0
+            ):
+                inside = (
+                    self._bridge_label_grid
+                    == int(structure["bridge_label"])
+                )
+                display_z = float(
+                    structure.get(
+                        "deck_z_median",
+                        structure.get("z_max", float("nan")),
+                    )
+                )
+            else:
+                inside = (
+                    (grid_x >= float(structure["x_min"]))
+                    & (grid_x <= float(structure["x_max"]))
+                    & (grid_y >= float(structure["y_min"]))
+                    & (grid_y <= float(structure["y_max"]))
+                )
+                display_z = float(structure["z_max"])
+
             rows, columns = np.where(inside)
             edge_height_changes = []
-
             for row, column in zip(rows, columns):
                 for row_offset, column_offset in neighbor_offsets:
                     neighbor_row = int(row + row_offset)
@@ -456,16 +1016,14 @@ class TerrainHeightField:
                 "[NAV STRUCTURE EDGE] "
                 f"type={structure.get('source_type', 'alias')}, "
                 f"path={structure['path']}, "
-                f"top_Z={float(structure['z_max']):.3f}, "
+                f"surface_Z={display_z:.3f}, "
                 f"samples={len(edge_height_changes)}, "
                 f"min_step={min(edge_height_changes):.3f}m, "
-                f"max_step={max(edge_height_changes):.3f}m. "
-                "ROS 구조자 경로의 max_step_height_m보다 큰 연결은 "
-                "통행 불가로 처리됩니다."
+                f"max_step={max(edge_height_changes):.3f}m"
             )
 
     def write_navigation_surface(self, output_path, sample_spacing_m):
-        """Terrain과 구조물 상단을 합친 경로계획 전용 규칙 격자를 저장한다."""
+        """Terrain·스폰 판·실제 다리 상판을 합친 규칙 격자를 저장한다."""
         spacing = max(0.25, float(sample_spacing_m))
         x_count = max(
             2,
@@ -478,18 +1036,70 @@ class TerrainHeightField:
         x_values = np.linspace(self.x_min, self.x_max, x_count)
         y_values = np.linspace(self.y_min, self.y_max, y_count)
 
+        # 먼저 Terrain과 명시적 스폰 플랫폼만 만든다. 다리는 AABB 최고 Z가
+        # 아니라 아래의 실제 상판 추출 결과로 별도 덮어쓴다.
+        z_grid = np.empty((y_count, x_count), dtype=np.float64)
+        for row, world_y in enumerate(y_values):
+            for column, world_x in enumerate(x_values):
+                terrain_z = float(self.height(world_x, world_y))
+                value = terrain_z
+                for structure in self._navigation_structures:
+                    if structure.get("source_type") != "explicit":
+                        continue
+                    if (
+                        float(structure["x_min"])
+                        <= float(world_x)
+                        <= float(structure["x_max"])
+                        and float(structure["y_min"])
+                        <= float(world_y)
+                        <= float(structure["y_max"])
+                    ):
+                        value = float(structure["z_max"])
+                        break
+                z_grid[row, column] = value
+
+        (
+            bridge_core_mask,
+            bridge_access_mask,
+            bridge_label_grid,
+            bridge_surface_z_grid,
+        ) = self._build_bridge_navigation_layers(
+            x_values,
+            y_values,
+            z_grid,
+        )
+        bridge_surface_valid = (
+            bridge_core_mask
+            & np.isfinite(bridge_surface_z_grid)
+        )
+        z_grid[bridge_surface_valid] = bridge_surface_z_grid[
+            bridge_surface_valid
+        ]
+
+        self._bridge_grid_x_values = np.asarray(
+            x_values,
+            dtype=np.float64,
+        )
+        self._bridge_grid_y_values = np.asarray(
+            y_values,
+            dtype=np.float64,
+        )
+        self._bridge_core_mask = bridge_core_mask
+        self._bridge_access_mask = bridge_access_mask
+        self._bridge_label_grid = bridge_label_grid
+        self._bridge_surface_z_grid = bridge_surface_z_grid
+
         vertices = np.empty((x_count * y_count, 3), dtype=np.float32)
         vertex_index = 0
-        for world_y in y_values:
-            for world_x in x_values:
+        for row, world_y in enumerate(y_values):
+            for column, world_x in enumerate(x_values):
                 vertices[vertex_index] = (
                     float(world_x),
                     float(world_y),
-                    float(self.navigation_height(world_x, world_y)),
+                    float(z_grid[row, column]),
                 )
                 vertex_index += 1
 
-        z_grid = vertices[:, 2].reshape(y_count, x_count)
         self._log_navigation_structure_edges(
             x_values,
             y_values,
@@ -532,7 +1142,11 @@ class TerrainHeightField:
         ).reshape(-1, 4)
         structure_top_z = np.asarray(
             [
-                structure["z_max"]
+                (
+                    structure.get("deck_z_median", structure["z_max"])
+                    if structure.get("source_type") == "alias"
+                    else structure["z_max"]
+                )
                 for structure in self._navigation_structures
             ],
             dtype=np.float32,
@@ -590,12 +1204,28 @@ class TerrainHeightField:
                     ],
                     dtype=np.bool_,
                 ),
+                bridge_core_mask=bridge_core_mask.astype(np.bool_),
+                bridge_access_mask=bridge_access_mask.astype(np.bool_),
+                bridge_label_grid=bridge_label_grid.astype(np.int32),
+                bridge_surface_z_grid=bridge_surface_z_grid.astype(
+                    np.float32
+                ),
+                bridge_structure_paths=np.asarray(
+                    [
+                        structure["path"]
+                        for structure in self._navigation_structures
+                        if int(structure.get("bridge_label", 0)) > 0
+                    ],
+                    dtype=str,
+                ),
             )
         temporary_path.replace(output_path)
         print(
             "[INFO] 경로계획 Navigation Surface 저장: "
             f"{output_path}, vertices={len(vertices)}, "
             f"structures={len(self._navigation_structures)}, "
+            f"bridge_core={int(np.count_nonzero(bridge_core_mask))}, "
+            f"bridge_access={int(np.count_nonzero(bridge_access_mask))}, "
             f"spacing={spacing:.2f}m"
         )
 

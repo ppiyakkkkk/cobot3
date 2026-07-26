@@ -38,6 +38,7 @@ from sim_config import (
     FOR_TEST_VICTIM_SPAWN_ENABLED,
     FOR_TEST_VICTIM_WORLD_XYZ,
     NAVIGATION_STRUCTURE_ALIASES,
+    RESCUER_GROUND_BRIDGE_MAX_STEP_HEIGHT_M,
     RESCUER_GROUND_MAX_STEP_HEIGHT_M,
     PERSON_COLLIDER_CYLINDER_HEIGHT_M,
     PERSON_COLLIDER_RADIUS_M,
@@ -899,21 +900,36 @@ class PeopleManager:
                 return float("nan")
         return value if math.isfinite(value) else float("nan")
 
-    def _navigation_structure_at(self, x, y, alias_margin_m=0.10):
-        """현재 XY가 실제 구조물 AABB 안에 있는지 확인한다.
 
-        다리 계열은 collision 경계의 작은 수치 오차를 흡수하도록 기존
-        0.10m 여유를 유지한다. 반면 명시적 스폰 플랫폼은 가장자리 밖을
-        플랫폼 내부로 오인하면 Terrain 전환 순간 structure hit가 사라져
-        GROUND_LOST가 되므로 margin을 적용하지 않는다.
+    def _navigation_structure_at(self, x, y, alias_margin_m=0.10):
+        """현재 XY가 실제 플랫폼 또는 다리 상판 안인지 확인한다.
+
+        새 TerrainHeightField는 다리를 AABB 전체가 아니라 추출된 상판 core로
+        판정한다. 이 경로를 우선 사용하면 난간·교각과 다리 주변 빈 공간을
+        구조물 내부로 오인하지 않는다. 구형 TerrainHeightField를 위한 AABB
+        fallback은 그대로 남긴다.
         """
         x = float(x)
         y = float(y)
-        alias_margin = max(0.0, float(alias_margin_m))
 
+        try:
+            structure = self.terrain.navigation_structure_at(x, y)
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            structure = None
+        if structure is not None:
+            return structure
+
+        alias_margin = max(0.0, float(alias_margin_m))
         matches = []
         for structure in self._navigation_structures:
             source_type = str(structure.get("source_type", "alias"))
+            # 새 다리 데이터가 있는데 core 밖이면 AABB fallback을 사용하지
+            # 않는다. 접근부에서는 Terrain과 다리 PhysX hit를 모두 허용한다.
+            if (
+                source_type == "alias"
+                and getattr(self.terrain, "_bridge_core_mask", None) is not None
+            ):
+                continue
             margin = 0.0 if source_type == "explicit" else alias_margin
             if (
                 float(structure["x_min"]) - margin
@@ -927,11 +943,19 @@ class PeopleManager:
 
         if not matches:
             return None
-
-        # 여러 구조물이 겹치면 실제 상단이 가장 높은 구조물을 우선한다.
         return max(
             matches,
-            key=lambda structure: float(structure.get("z_max", -math.inf)),
+            key=lambda item: float(item.get("z_max", -math.inf)),
+        )
+
+    def _is_bridge_surface(self, prim_path, surface_type):
+        """등록된 다리 Prim 또는 bridge/deck 별칭인지 확인한다."""
+        if not str(surface_type).startswith("navigation_structure"):
+            return False
+        normalized = self._normalize_token(prim_path)
+        return any(
+            alias and alias in normalized
+            for alias in self._navigation_structure_aliases
         )
 
     def _query_walkable_ground(
@@ -1055,11 +1079,22 @@ class PeopleManager:
                 or selected_surface_type != previous_hit.surface_type
             )
             step_height = abs(float(selected[0]) - float(previous_hit.z))
-            if (
-                changed_surface
-                and step_height
-                > float(RESCUER_GROUND_MAX_STEP_HEIGHT_M)
-            ):
+            bridge_transition = (
+                self._is_bridge_surface(
+                    previous_hit.prim_path,
+                    previous_hit.surface_type,
+                )
+                or self._is_bridge_surface(
+                    selected_prim_path,
+                    selected_surface_type,
+                )
+            )
+            step_limit = (
+                float(RESCUER_GROUND_BRIDGE_MAX_STEP_HEIGHT_M)
+                if bridge_transition
+                else float(RESCUER_GROUND_MAX_STEP_HEIGHT_M)
+            )
+            if changed_surface and step_height > step_limit:
                 now = time.monotonic()
                 if now - self._last_ground_transition_log_at >= 1.0:
                     carb.log_error(
@@ -1068,7 +1103,8 @@ class PeopleManager:
                         f"({previous_hit.z:.3f}m), "
                         f"to={selected_prim_path}({float(selected[0]):.3f}m), "
                         f"step={step_height:.3f}m > "
-                        f"limit={float(RESCUER_GROUND_MAX_STEP_HEIGHT_M):.3f}m"
+                        f"limit={step_limit:.3f}m, "
+                        f"bridge_transition={bridge_transition}"
                     )
                     self._last_ground_transition_log_at = now
                 return None

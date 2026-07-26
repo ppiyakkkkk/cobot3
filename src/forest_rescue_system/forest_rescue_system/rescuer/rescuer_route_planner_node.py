@@ -57,8 +57,12 @@ class RescuerRoutePlannerNode(TimestampedNode):
         self.declare_parameter(
             "route_marker_topic", "/rescue/rescuer_route_markers"
         )
-        self.declare_parameter("max_slope_deg", 42.0)
-        self.declare_parameter("max_step_height_m", 1.0)
+        self.declare_parameter("max_slope_deg", 45.0)
+        self.declare_parameter("max_step_height_m", 1.25)
+        self.declare_parameter("bridge_max_slope_deg", 60.0)
+        self.declare_parameter("bridge_max_step_height_m", 1.5)
+        self.declare_parameter("bridge_connector_max_length_m", 15.0)
+        self.declare_parameter("bridge_connector_half_width_m", 4.5)
         self.declare_parameter("river_clearance_m", 0.75)
         self.declare_parameter("bridge_expansion_m", 1.5)
         self.declare_parameter("obstacle_clearance_m", 0.8)
@@ -167,6 +171,22 @@ class RescuerRoutePlannerNode(TimestampedNode):
                 max_step_height_m=float(
                     self.get_parameter("max_step_height_m").value
                 ),
+                bridge_max_slope_deg=float(
+                    self.get_parameter("bridge_max_slope_deg").value
+                ),
+                bridge_max_step_height_m=float(
+                    self.get_parameter("bridge_max_step_height_m").value
+                ),
+                bridge_connector_max_length_m=float(
+                    self.get_parameter(
+                        "bridge_connector_max_length_m"
+                    ).value
+                ),
+                bridge_connector_half_width_m=float(
+                    self.get_parameter(
+                        "bridge_connector_half_width_m"
+                    ).value
+                ),
                 river_clearance_m=float(
                     self.get_parameter("river_clearance_m").value
                 ),
@@ -190,13 +210,27 @@ class RescuerRoutePlannerNode(TimestampedNode):
         walkable_count = int(np.count_nonzero(self.grid_map.walkable))
         river_count = int(np.count_nonzero(self.grid_map.river_mask))
         bridge_count = int(np.count_nonzero(self.grid_map.bridge_mask))
+        bridge_core_count = int(
+            np.count_nonzero(self.grid_map.bridge_core_mask)
+        )
+        bridge_access_count = int(
+            np.count_nonzero(self.grid_map.bridge_access_mask)
+        )
+        bridge_connector_count = int(
+            np.count_nonzero(self.grid_map.bridge_connector_mask)
+        )
         self._publish_route_status("MAP_READY")
         self.get_logger().info(
             "구조자 보행 지도 준비 완료: "
             f"shape={self.grid_map.shape}, walkable={walkable_count}, "
             f"river={river_count}, bridge={bridge_count}, "
+            f"bridge_core={bridge_core_count}, "
+            f"bridge_access={bridge_access_count}, "
+            f"bridge_connector={bridge_connector_count}, "
             f"max_slope={float(self.get_parameter('max_slope_deg').value):.1f}deg, "
-            f"max_step={self.grid_map.max_step_height_m:.2f}m"
+            f"max_step={self.grid_map.max_step_height_m:.2f}m, "
+            f"bridge_max_step="
+            f"{self.grid_map.bridge_max_step_height_m:.2f}m"
         )
         self._try_plan()
 
@@ -261,7 +295,14 @@ class RescuerRoutePlannerNode(TimestampedNode):
                 start_position[0], start_position[1]
             )
             start_cell = nearest_walkable_cell(
-                self.grid_map, requested_start, max_radius_cells=20
+                self.grid_map,
+                requested_start,
+                max_radius_cells=20,
+                requested_z=float(start_position[2]),
+                max_height_difference_m=max(
+                    0.35,
+                    float(self.grid_map.bridge_max_step_height_m),
+                ),
             )
             min_standoff = float(
                 self.get_parameter("goal_min_standoff_m").value
