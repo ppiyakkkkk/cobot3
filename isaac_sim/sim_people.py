@@ -43,6 +43,14 @@ from sim_config import (
     NAVIGATION_STRUCTURE_ALIASES,
     RESCUER_GROUND_BRIDGE_MAX_STEP_HEIGHT_M,
     RESCUER_GROUND_MAX_STEP_HEIGHT_M,
+    RESCUER_FIXED_BRIDGE_CORRIDOR_HALF_WIDTH_M,
+    RESCUER_FIXED_BRIDGE_CROSSING_ENABLED,
+    RESCUER_FIXED_BRIDGE_ENDPOINT_PADDING_M,
+    RESCUER_FIXED_BRIDGE_NAME,
+    RESCUER_FIXED_BRIDGE_PATH_MATCH_RADIUS_M,
+    RESCUER_FIXED_BRIDGE_WAYPOINTS,
+    RESCUER_VIRTUAL_BRIDGE_GROUND_ENABLED,
+    RESCUER_VIRTUAL_BRIDGE_PRIM_SUFFIX,
     PERSON_COLLIDER_CYLINDER_HEIGHT_M,
     PERSON_COLLIDER_RADIUS_M,
     PERSON_COLLIDER_TOTAL_HEIGHT_M,
@@ -57,6 +65,7 @@ from sim_config import (
     RESCUER_BRIDGE_MAX_SLOPE_DEG,
     RESCUER_BRIDGE_MAX_STEP_HEIGHT_M,
     RESCUER_MOVE_SPEED_M_S,
+    RESCUER_FINAL_VICTIM_DISTANCE_TOLERANCE_M,
     RESCUER_MAX_SLOPE_DEG,
     RESCUER_MAX_STEP_HEIGHT_M,
     RESCUER_OBSTACLE_CLEARANCE_M,
@@ -64,6 +73,7 @@ from sim_config import (
     RESCUER_POSE_PUBLISH_PERIOD_SEC,
     RESCUER_POSITION_TOPIC,
     RESCUER_STATUS_TOPIC,
+    RESCUER_VICTIM_GOAL_TOPIC,
     RESCUER_PLATFORM_CLEARANCE_M,
     RESCUER_RIVER_CLEARANCE_M,
     RESCUER_SPAWN_CLEARANCE_M,
@@ -192,6 +202,13 @@ class PeopleManager:
         self._last_waypoint_surface_z = None
         self._last_waypoint_raycast_z = None
         self._last_waypoint_ground_prim = "NONE"
+        self._fixed_bridge_mode_active = False
+        self._fixed_bridge_route_expected = False
+        self._latest_victim_goal = None
+        self._fixed_bridge_waypoints = [
+            np.asarray(point, dtype=np.float64)
+            for point in RESCUER_FIXED_BRIDGE_WAYPOINTS
+        ]
 
         self._navigation_structures = tuple(
             dict(structure)
@@ -886,6 +903,12 @@ class PeopleManager:
             self._rescuer_path_callback,
             transient_qos,
         )
+        self._victim_goal_subscription = self._ros_node.create_subscription(
+            PointStamped,
+            RESCUER_VICTIM_GOAL_TOPIC,
+            self._victim_goal_callback,
+            transient_qos,
+        )
         self._pose_publisher = self._ros_node.create_publisher(
             PointStamped,
             RESCUER_POSITION_TOPIC,
@@ -900,12 +923,24 @@ class PeopleManager:
         print(
             "[OK] Isaac 구조자 ROS bridge 준비: "
             f"path={RESCUER_PATH_TOPIC}, pose={RESCUER_POSITION_TOPIC}, "
-            f"status={RESCUER_STATUS_TOPIC}"
+            f"status={RESCUER_STATUS_TOPIC}, "
+            f"victim_goal={RESCUER_VICTIM_GOAL_TOPIC}"
         )
 
     # ------------------------------------------------------------------
     # 경로 수신 및 XY 추종
     # ------------------------------------------------------------------
+    def _victim_goal_callback(self, message):
+        """최종 ARRIVED 검증에 사용할 확정 조난자 좌표를 보관한다."""
+        if message.header.frame_id and message.header.frame_id != "map":
+            return
+        goal = np.asarray(
+            [message.point.x, message.point.y, message.point.z],
+            dtype=np.float64,
+        )
+        if goal.shape == (3,) and np.all(np.isfinite(goal)):
+            self._latest_victim_goal = goal
+
     def _rescuer_path_callback(self, message):
         if self.rescuer is None:
             return
@@ -942,6 +977,8 @@ class PeopleManager:
             self._set_rescuer_status("PATH_REJECTED_EMPTY")
             return
 
+        self._fixed_bridge_route_expected = False
+        waypoints = self._inject_fixed_bridge_crossing(waypoints)
         self._rescuer_path = waypoints
         self._rescuer_waypoint_index = 0
         self._set_rescuer_status("PATH_RECEIVED")
@@ -952,6 +989,105 @@ class PeopleManager:
             f"waypoints={len(self._rescuer_path)}, "
             f"speed={RESCUER_MOVE_SPEED_M_S:.1f}m/s"
         )
+
+    def _inject_fixed_bridge_crossing(self, waypoints):
+        """A*의 다리 구간을 고정 입구-중앙-출구 웨이포인트로 교체한다."""
+        if not bool(RESCUER_FIXED_BRIDGE_CROSSING_ENABLED):
+            return waypoints
+
+        bridge_points = [point.copy() for point in self._fixed_bridge_waypoints]
+        if len(bridge_points) < 2 or not waypoints:
+            return waypoints
+
+        entry = bridge_points[0]
+        exit_point = bridge_points[-1]
+        entry_index = min(
+            range(len(waypoints)),
+            key=lambda index: float(
+                np.linalg.norm(waypoints[index][:2] - entry[:2])
+            ),
+        )
+        exit_index = min(
+            range(len(waypoints)),
+            key=lambda index: float(
+                np.linalg.norm(waypoints[index][:2] - exit_point[:2])
+            ),
+        )
+        entry_distance = float(
+            np.linalg.norm(waypoints[entry_index][:2] - entry[:2])
+        )
+        exit_distance = float(
+            np.linalg.norm(waypoints[exit_index][:2] - exit_point[:2])
+        )
+        match_radius = float(RESCUER_FIXED_BRIDGE_PATH_MATCH_RADIUS_M)
+        if entry_distance > match_radius or exit_distance > match_radius:
+            print(
+                "[BRIDGE] 고정 통로 미삽입: A* 경로가 다리 입구/출구를 "
+                "통과하지 않음 "
+                f"(entry_error={entry_distance:.2f}m, "
+                f"exit_error={exit_distance:.2f}m)"
+            )
+            return waypoints
+
+        # ROS 경로계획기가 navigation surface에서 조회한 최신 입·출구 Z를
+        # 사용한다. sim_config의 Z는 ROS 경로가 아직 없을 때만 쓰는 예비값이다.
+        entry_z = float(waypoints[entry_index][2])
+        exit_z = float(waypoints[exit_index][2])
+        for index, point in enumerate(bridge_points):
+            ratio = index / float(len(bridge_points) - 1)
+            point[2] = entry_z * (1.0 - ratio) + exit_z * ratio
+        self._fixed_bridge_waypoints = [
+            point.copy() for point in bridge_points
+        ]
+        self._fixed_bridge_route_expected = True
+
+        # 최신 ROS 경로계획기는 고정 다리 구간과 출구 바깥 복귀점까지 이미
+        # 올바른 순서로 보낸다. 이 경로를 다시 교체하면 출구 이후 A* 점이
+        # 잘리거나 순서가 뒤집힐 수 있으므로 원본 순서를 그대로 사용한다.
+        exact_endpoint_tolerance = 0.5
+        if (
+            entry_index < exit_index
+            and entry_distance <= exact_endpoint_tolerance
+            and exit_distance <= exact_endpoint_tolerance
+        ):
+            print(
+                f"[BRIDGE] {RESCUER_FIXED_BRIDGE_NAME} 완성 경로 사용: "
+                "ROS 입구-출구-복귀점 순서를 유지합니다."
+            )
+            return waypoints
+
+        if entry_index <= exit_index:
+            first_index, last_index = entry_index, exit_index
+            crossing_points = bridge_points
+            direction = "입구→출구"
+        else:
+            first_index, last_index = exit_index, entry_index
+            crossing_points = list(reversed(bridge_points))
+            direction = "출구→입구"
+
+        replacement = list(waypoints[:first_index])
+        for point in crossing_points:
+            if (
+                not replacement
+                or float(np.linalg.norm(point - replacement[-1])) >= 0.05
+            ):
+                replacement.append(point.copy())
+        for point in waypoints[last_index + 1:]:
+            if (
+                not replacement
+                or float(np.linalg.norm(point - replacement[-1])) >= 0.05
+            ):
+                replacement.append(point)
+
+        formatted = " -> ".join(
+            f"({point[0]:.3f},{point[1]:.3f},{point[2]:.3f})"
+            for point in crossing_points
+        )
+        print(
+            f"[BRIDGE] {RESCUER_FIXED_BRIDGE_NAME} 고정 통로 삽입: "
+            f"direction={direction}, waypoints={formatted}"
+        )
+        return replacement
 
     def _ensure_character_graph(self):
         """Play 상태의 Animation Graph Character handle을 반환한다."""
@@ -1096,6 +1232,30 @@ class PeopleManager:
 
         if self._rescuer_waypoint_index >= len(self._rescuer_path):
             current_position = self._current_rescuer_position()
+            if (
+                current_position is not None
+                and self._latest_victim_goal is not None
+            ):
+                victim_distance = float(
+                    np.linalg.norm(
+                        current_position[:2] - self._latest_victim_goal[:2]
+                    )
+                )
+                tolerance = float(
+                    RESCUER_FINAL_VICTIM_DISTANCE_TOLERANCE_M
+                )
+                if victim_distance > tolerance:
+                    self.rescuer.update_target_position(
+                        current_position.tolist(),
+                        walk_speed=0.0,
+                    )
+                    self._set_rescuer_status("PATH_INCOMPLETE")
+                    carb.log_error(
+                        "[RESCUER] 마지막 waypoint에 도달했지만 조난자와 "
+                        f"{victim_distance:.2f}m 떨어져 있어 ARRIVED를 "
+                        f"거부합니다. limit={tolerance:.2f}m"
+                    )
+                    return
             if current_position is not None:
                 self.rescuer.update_target_position(
                     current_position.tolist(),
@@ -1305,12 +1465,139 @@ class PeopleManager:
 
     def _is_bridge_surface(self, prim_path, surface_type):
         """등록된 다리 Prim 또는 bridge/deck 별칭인지 확인한다."""
+        if str(surface_type) == "fixed_bridge_virtual":
+            return True
         if not str(surface_type).startswith("navigation_structure"):
             return False
         normalized = self._normalize_token(prim_path)
         return any(
             alias and alias in normalized
             for alias in self._navigation_structure_aliases
+        )
+
+    def _fixed_bridge_ground_hit(self, x, y):
+        """고정 다리 중심선 통로 안이면 보간된 가상 상판 높이를 반환한다."""
+        if not bool(RESCUER_FIXED_BRIDGE_CROSSING_ENABLED):
+            return None
+        if not self._fixed_bridge_route_expected:
+            return None
+
+        point_xy = np.asarray([float(x), float(y)], dtype=np.float64)
+        points = [point.copy() for point in self._fixed_bridge_waypoints]
+        if len(points) < 2:
+            return None
+
+        best = None
+        padding = max(0.0, float(RESCUER_FIXED_BRIDGE_ENDPOINT_PADDING_M))
+        half_width = max(
+            0.0,
+            float(RESCUER_FIXED_BRIDGE_CORRIDOR_HALF_WIDTH_M),
+        )
+        for index, (start, end) in enumerate(zip(points[:-1], points[1:])):
+            delta_xy = end[:2] - start[:2]
+            length_sq = float(np.dot(delta_xy, delta_xy))
+            if length_sq <= 1e-9:
+                continue
+
+            raw_t = float(
+                np.dot(point_xy - start[:2], delta_xy) / length_sq
+            )
+            segment_length = math.sqrt(length_sq)
+            padding_t = padding / segment_length
+            if raw_t < -padding_t or raw_t > 1.0 + padding_t:
+                continue
+
+            t = float(np.clip(raw_t, 0.0, 1.0))
+            closest_xy = start[:2] + t * delta_xy
+            lateral_error = float(np.linalg.norm(point_xy - closest_xy))
+            if lateral_error > half_width:
+                continue
+
+            virtual_z = float(start[2] + t * (end[2] - start[2]))
+            candidate = (lateral_error, index, t, virtual_z)
+            if best is None or candidate[0] < best[0]:
+                best = candidate
+
+        if best is None:
+            return None
+
+        _error, _segment_index, _segment_t, virtual_z = best
+
+        virtual_prim_path = (
+            f"/World/{RESCUER_FIXED_BRIDGE_NAME}/"
+            f"{RESCUER_VIRTUAL_BRIDGE_PRIM_SUFFIX}"
+        )
+        return WalkableGroundHit(
+            z=virtual_z,
+            prim_path=virtual_prim_path,
+            surface_type="fixed_bridge_virtual",
+            navigation_z=virtual_z,
+            navigation_error_m=0.0,
+        )
+
+    def _virtual_bridge_ground_hit(
+        self,
+        expected_structure,
+        navigation_z,
+        enforce_local_step,
+    ):
+        """다리 상판 core의 끊긴 collision을 navigation surface로 보완한다.
+
+        이 fallback은 ``navigation_structure_at()``이 실제 다리 상판 core라고
+        확인한 위치에서만 사용한다. 따라서 다리 AABB 주변, 강, 난간, 교각을
+        가상 지면으로 넓히지 않는다.
+        """
+        if not bool(RESCUER_VIRTUAL_BRIDGE_GROUND_ENABLED):
+            return None
+        if expected_structure is None:
+            return None
+        if str(expected_structure.get("source_type", "")) != "alias":
+            return None
+        if not math.isfinite(float(navigation_z)):
+            return None
+
+        structure_path = str(expected_structure.get("path", "")).strip()
+        if not structure_path:
+            return None
+
+        virtual_z = float(navigation_z)
+        surface_type = "navigation_structure_virtual"
+        virtual_prim_path = (
+            f"{structure_path}/{RESCUER_VIRTUAL_BRIDGE_PRIM_SUFFIX}"
+        )
+
+        if enforce_local_step and self._last_stable_ground_hit is not None:
+            previous_hit = self._last_stable_ground_hit
+            step_height = abs(virtual_z - float(previous_hit.z))
+            if step_height > float(RESCUER_GROUND_BRIDGE_MAX_STEP_HEIGHT_M):
+                now = time.monotonic()
+                if now - self._last_ground_transition_log_at >= 1.0:
+                    carb.log_error(
+                        "[RESCUER] 가상 다리 지면 전환 차단: "
+                        f"from={previous_hit.prim_path}"
+                        f"({previous_hit.z:.3f}m), "
+                        f"to={virtual_prim_path}({virtual_z:.3f}m), "
+                        f"step={step_height:.3f}m > "
+                        f"limit={float(RESCUER_GROUND_BRIDGE_MAX_STEP_HEIGHT_M):.3f}m"
+                    )
+                    self._last_ground_transition_log_at = now
+                return None
+
+        if (
+            self._last_ground_hit is None
+            or self._last_ground_hit.surface_type != surface_type
+        ):
+            carb.log_warn(
+                "[RESCUER] 다리 collision 공백을 가상 보행 지면으로 보완: "
+                f"prim={structure_path}, navigation_z={virtual_z:.3f}m"
+            )
+
+        return WalkableGroundHit(
+            z=virtual_z,
+            prim_path=virtual_prim_path,
+            surface_type=surface_type,
+            navigation_z=virtual_z,
+            navigation_error_m=0.0,
         )
 
     def _query_walkable_ground(
@@ -1327,6 +1614,13 @@ class PeopleManager:
         전체 경사 누적 높이차를 단차로 오인하지 않도록 이 검사를 사용하지
         않고, 현재 구조자 위치를 갱신할 때만 활성화한다.
         """
+        # 고정 다리 통로 안에서는 PhysX raycast보다 먼저 가상 상판을
+        # 선택한다. 따라서 같은 Prim 아래의 판자·난간·밧줄 collision이
+        # 지면 후보로 섞여도 구조자의 Z에는 영향을 주지 않는다.
+        fixed_bridge_hit = self._fixed_bridge_ground_hit(x, y)
+        if fixed_bridge_hit is not None:
+            return fixed_bridge_hit
+
         current = self._current_rescuer_position()
         current_z = (
             float(current[2])
@@ -1380,10 +1674,14 @@ class PeopleManager:
         else:
             navigation_z = float(navigation_hint_z)
 
-        if not accepted_hits:
-            return None
-
         expected_structure = self._navigation_structure_at(x, y)
+        if not accepted_hits:
+            return self._virtual_bridge_ground_hit(
+                expected_structure,
+                navigation_z,
+                enforce_local_step,
+            )
+
         if expected_structure is not None:
             # 구조물 실제 AABB 안에서는 아래 Terrain을 대신 선택하지 않는다.
             # Collider가 누락된 경우 구조자를 판 아래로 내리지 않고 정지한다.
@@ -1393,7 +1691,11 @@ class PeopleManager:
                 if item[2].startswith("navigation_structure")
             ]
             if not structure_hits:
-                return None
+                return self._virtual_bridge_ground_hit(
+                    expected_structure,
+                    navigation_z,
+                    enforce_local_step,
+                )
             candidate_hits = structure_hits
         else:
             # 명시적 플랫폼은 AABB margin을 0으로 사용한다. 판을 실제로
@@ -1561,6 +1863,23 @@ class PeopleManager:
 
         target = self._rescuer_path[self._rescuer_waypoint_index]
         distance_xy = float(np.linalg.norm(target[:2] - position[:2]))
+
+        fixed_bridge_hit = self._fixed_bridge_ground_hit(
+            float(position[0]),
+            float(position[1]),
+        )
+        inside_fixed_bridge = fixed_bridge_hit is not None
+        if inside_fixed_bridge and not self._fixed_bridge_mode_active:
+            print(
+                f"[BRIDGE] {RESCUER_FIXED_BRIDGE_NAME} 고정 통로 진입: "
+                "다리 collision 무시, 가상 지면 사용"
+            )
+        elif not inside_fixed_bridge and self._fixed_bridge_mode_active:
+            print(
+                f"[BRIDGE] {RESCUER_FIXED_BRIDGE_NAME} 고정 통로 종료: "
+                "기존 Terrain 지면 추종으로 복귀"
+            )
+        self._fixed_bridge_mode_active = inside_fixed_bridge
 
         # 현재 XY의 navigation surface 높이를 hint로 사용한다.
         current_navigation_z = self._navigation_height(

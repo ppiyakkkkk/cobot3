@@ -21,6 +21,7 @@ from forest_rescue_system.rescuer.rescuer_route_utils import (
     astar_to_goal_set,
     astar_via_best_bridge,
     build_rescuer_grid_map,
+    component_id_at,
     goal_cells_around_victim,
     nearest_walkable_cell,
     path_height_statistics,
@@ -28,6 +29,7 @@ from forest_rescue_system.rescuer.rescuer_route_utils import (
     route_requires_bridge,
     simplify_grid_path,
     validate_bridge_usage,
+    walkable_component_labels,
 )
 
 
@@ -68,7 +70,7 @@ class RescuerRoutePlannerNode(TimestampedNode):
         self.declare_parameter("river_clearance_m", 0.75)
         self.declare_parameter("bridge_expansion_m", 1.5)
         self.declare_parameter("obstacle_clearance_m", 0.8)
-        self.declare_parameter("platform_clearance_m", 1.5)
+        self.declare_parameter("platform_clearance_m", 1.0)
         self.declare_parameter("block_rocks", True)
         self.declare_parameter("block_vegetation", False)
         self.declare_parameter("goal_min_standoff_m", 1.2)
@@ -76,6 +78,19 @@ class RescuerRoutePlannerNode(TimestampedNode):
         self.declare_parameter("slope_cost_weight", 1.5)
         self.declare_parameter("map_retry_period_sec", 1.0)
         self.declare_parameter("replan_position_change_m", 1.0)
+        self.declare_parameter("fixed_bridge_enabled", True)
+        self.declare_parameter("fixed_bridge_force_for_demo", False)
+        self.declare_parameter("fixed_bridge_entry_xy", [7.0, 16.0])
+        self.declare_parameter("fixed_bridge_exit_xy", [23.5, 6.5])
+        self.declare_parameter("fixed_bridge_center_count", 3)
+        self.declare_parameter("fixed_bridge_exit_clearance_m", 2.5)
+        self.declare_parameter("fixed_bridge_forbidden_half_width_m", 2.0)
+        self.declare_parameter("fixed_bridge_required_goal_xy", [21.0, 18.0])
+        self.declare_parameter("fixed_bridge_required_radius_m", 4.0)
+        self.declare_parameter("fixed_bridge_bypass_goal_xy", [-2.0, 35.0])
+        self.declare_parameter("fixed_bridge_bypass_radius_m", 3.0)
+        self.declare_parameter("fixed_bridge_terminal_search_radius_m", 15.0)
+        self.declare_parameter("fixed_bridge_terminal_spacing_m", 0.75)
 
         self.operation_mode = str(
             self.get_parameter("operation_mode").value
@@ -328,7 +343,53 @@ class RescuerRoutePlannerNode(TimestampedNode):
             bridge_required = route_requires_bridge(
                 self.grid_map, start_cell, goal_cells
             )
-            if bridge_required:
+            bridge_bypass = self._fixed_bridge_bypass_requested(goal)
+            fixed_bridge_goal = self._fixed_bridge_goal_requested(goal)
+            effective_bridge_required = bool(
+                (bridge_required or fixed_bridge_goal) and not bridge_bypass
+            )
+            use_fixed_bridge = bool(
+                self.get_parameter("fixed_bridge_enabled").value
+            ) and (
+                effective_bridge_required
+                or bool(
+                    self.get_parameter(
+                        "fixed_bridge_force_for_demo"
+                    ).value
+                )
+            ) and not bridge_bypass
+            if not use_fixed_bridge:
+                self.get_logger().info(
+                    "다리가 필요 없는 목표이므로 직접 A* 경로를 생성합니다: "
+                    f"victim=({goal[0]:.2f}, {goal[1]:.2f}), "
+                    f"explicit_bypass={bridge_bypass}, "
+                    f"fixed_bridge_goal={fixed_bridge_goal}"
+                )
+            fixed_world_path = None
+            if use_fixed_bridge:
+                (
+                    raw_path,
+                    fixed_world_path,
+                    maximum_slope,
+                    maximum_step,
+                ) = self._plan_via_fixed_bridge(
+                    start_cell,
+                    goal_cells,
+                    goal,
+                    max_standoff,
+                    slope_cost_weight,
+                )
+                selected_bridge = 0
+                simplified_path = None
+                length_m = float(
+                    np.sum(
+                        np.linalg.norm(
+                            np.diff(np.asarray(fixed_world_path), axis=0),
+                            axis=1,
+                        )
+                    )
+                )
+            elif effective_bridge_required:
                 raw_path, selected_bridge = astar_via_best_bridge(
                     self.grid_map,
                     start_cell,
@@ -338,8 +399,7 @@ class RescuerRoutePlannerNode(TimestampedNode):
                     slope_cost_weight=slope_cost_weight,
                 )
             else:
-                raw_path = astar_to_goal_set(
-                    self.grid_map,
+                raw_path = self._plan_direct_without_bridge(
                     start_cell,
                     goal_cells,
                     goal,
@@ -349,24 +409,32 @@ class RescuerRoutePlannerNode(TimestampedNode):
                 _unused_required, selected_bridge = validate_bridge_usage(
                     self.grid_map, raw_path
                 )
-            simplified_path = simplify_grid_path(self.grid_map, raw_path)
-            length_m = path_length_m(self.grid_map, simplified_path)
-            maximum_slope, maximum_step = path_height_statistics(
-                self.grid_map, raw_path
-            )
+            if fixed_world_path is None:
+                simplified_path = simplify_grid_path(self.grid_map, raw_path)
+                length_m = path_length_m(self.grid_map, simplified_path)
+                maximum_slope, maximum_step = path_height_statistics(
+                    self.grid_map, raw_path
+                )
         except (ValueError, RuntimeError) as error:
             self.get_logger().error(f"구조자 경로 생성 실패: {error}")
             self._publish_route_status(f"PATH_FAILED:{error}")
             return
 
-        path_message = self._build_path_message(simplified_path)
+        path_message = (
+            self._build_world_path_message(fixed_world_path)
+            if fixed_world_path is not None
+            else self._build_path_message(simplified_path)
+        )
         self.path_publisher.publish(path_message)
         selected_message = String()
-        selected_message.data = (
-            f"bridge_component_{selected_bridge}"
-            if selected_bridge > 0
-            else "NONE"
-        )
+        if fixed_world_path is not None:
+            selected_message.data = "fixed_Wooden_bridge2"
+        else:
+            selected_message.data = (
+                f"bridge_component_{selected_bridge}"
+                if selected_bridge > 0
+                else "NONE"
+            )
         self.selected_bridge_publisher.publish(selected_message)
         self.marker_publisher.publish(
             self._build_marker_array(
@@ -379,24 +447,515 @@ class RescuerRoutePlannerNode(TimestampedNode):
         self.last_planned_goal = goal
         status_payload = {
             "state": "PATH_READY",
-            "path_points": len(simplified_path),
+            "path_points": len(path_message.poses),
             "raw_grid_points": len(raw_path),
             "length_m": round(length_m, 3),
             "max_slope_deg": round(maximum_slope, 2),
             "max_step_height_m": round(maximum_step, 3),
             "bridge_required": bool(bridge_required),
+            "fixed_bridge_goal": bool(fixed_bridge_goal),
+            "bridge_bypass": bool(bridge_bypass),
             "selected_bridge": int(selected_bridge),
+            "fixed_bridge_route": bool(fixed_world_path is not None),
         }
         self._publish_route_status(
             "PATH_READY:" + json.dumps(status_payload, ensure_ascii=False)
         )
         self.get_logger().warning(
             "구조자 경로 생성 완료: "
-            f"points={len(simplified_path)}, length={length_m:.1f}m, "
+            f"points={len(path_message.poses)}, length={length_m:.1f}m, "
             f"max_slope={maximum_slope:.1f}deg, "
             f"max_step={maximum_step:.2f}m, "
             f"bridge_required={bridge_required}, "
+            f"fixed_bridge_goal={fixed_bridge_goal}, "
+            f"bridge_bypass={bridge_bypass}, "
             f"selected_bridge={selected_message.data}"
+        )
+
+    def _goal_is_within_configured_radius(
+        self,
+        victim_goal,
+        xy_parameter,
+        radius_parameter,
+    ):
+        """설정된 XY 목표 영역 안에 조난자가 있는지 확인한다."""
+        target_xy = np.asarray(
+            self.get_parameter(xy_parameter).value,
+            dtype=np.float64,
+        )
+        if target_xy.shape != (2,) or not np.all(np.isfinite(target_xy)):
+            return False
+        radius = max(
+            0.0,
+            float(self.get_parameter(radius_parameter).value),
+        )
+        return bool(
+            np.linalg.norm(
+                np.asarray(victim_goal[:2], dtype=np.float64) - target_xy
+            )
+            <= radius
+        )
+
+    def _fixed_bridge_goal_requested(self, victim_goal):
+        """고정 Wooden_bridge2를 사용하기로 지정한 목표 영역인지 확인한다."""
+        return self._goal_is_within_configured_radius(
+            victim_goal,
+            "fixed_bridge_required_goal_xy",
+            "fixed_bridge_required_radius_m",
+        )
+
+    def _fixed_bridge_bypass_requested(self, victim_goal):
+        """다리를 사용하지 않기로 지정한 목표 영역인지 확인한다."""
+        return self._goal_is_within_configured_radius(
+            victim_goal,
+            "fixed_bridge_bypass_goal_xy",
+            "fixed_bridge_bypass_radius_m",
+        )
+
+    def _plan_direct_without_bridge(
+        self,
+        start_cell,
+        goal_cells,
+        victim_goal,
+        *,
+        max_standoff_m,
+        slope_cost_weight,
+    ):
+        """다리가 필요 없는 목표는 다리 셀을 닫고 직접 A*로 계획한다."""
+        direct_goals = {
+            cell
+            for cell in goal_cells
+            if not bool(self.grid_map.bridge_access_mask[cell])
+        }
+        if not direct_goals:
+            raise RuntimeError(
+                "직접 경로 목표 주변에 다리가 아닌 보행 셀이 없습니다."
+            )
+
+        original_walkable = self.grid_map.walkable
+        self.grid_map.walkable = (
+            original_walkable & ~self.grid_map.bridge_access_mask
+        )
+        try:
+            return astar_to_goal_set(
+                self.grid_map,
+                start_cell,
+                direct_goals,
+                victim_goal,
+                max_standoff_m=max_standoff_m,
+                slope_cost_weight=slope_cost_weight,
+            )
+        finally:
+            self.grid_map.walkable = original_walkable
+
+    def _plan_via_fixed_bridge(
+        self,
+        start_cell,
+        goal_cells,
+        victim_goal,
+        max_standoff,
+        slope_cost_weight,
+    ):
+        """입구 전·출구 후 A*를 고정 다리 중심선으로 연결한다."""
+        entry_xy = [
+            float(value)
+            for value in self.get_parameter("fixed_bridge_entry_xy").value
+        ]
+        exit_xy = [
+            float(value)
+            for value in self.get_parameter("fixed_bridge_exit_xy").value
+        ]
+        if len(entry_xy) != 2 or len(exit_xy) != 2:
+            raise ValueError("fixed bridge 입구/출구는 XY 두 값이어야 합니다.")
+
+        entry_cell = nearest_walkable_cell(
+            self.grid_map,
+            self.grid_map.world_to_grid(*entry_xy),
+            max_radius_cells=20,
+        )
+        exit_cell = nearest_walkable_cell(
+            self.grid_map,
+            self.grid_map.world_to_grid(*exit_xy),
+            max_radius_cells=20,
+        )
+        entry_world = self.grid_map.grid_to_world(entry_cell).copy()
+        exit_world = self.grid_map.grid_to_world(exit_cell).copy()
+        # 사용자가 측정한 정확한 중심선 XY를 유지하고 Z만 지도에서 얻는다.
+        entry_world[:2] = entry_xy
+        exit_world[:2] = exit_xy
+
+        approach = astar_to_goal_set(
+            self.grid_map,
+            start_cell,
+            {entry_cell},
+            entry_world,
+            max_standoff_m=0.0,
+            slope_cost_weight=slope_cost_weight,
+        )
+
+        # 출구에서 다리 진행 방향으로 먼저 완전히 빠져나간 뒤 A*를 시작한다.
+        # 출구 셀을 곧바로 A* 시작점으로 쓰면 최근접 보행 셀이 다리 안쪽으로
+        # 스냅되거나, 이후 경로가 다시 다리 중심부를 사용하는 경우가 있었다.
+        bridge_direction = np.asarray(exit_xy, dtype=np.float64) - np.asarray(
+            entry_xy, dtype=np.float64
+        )
+        bridge_length = float(np.linalg.norm(bridge_direction))
+        if bridge_length <= 1.0e-6:
+            raise ValueError("fixed bridge 입구와 출구가 같은 좌표입니다.")
+        bridge_direction /= bridge_length
+        exit_clearance_m = max(
+            0.5,
+            float(
+                self.get_parameter("fixed_bridge_exit_clearance_m").value
+            ),
+        )
+        recovery_xy = (
+            np.asarray(exit_xy, dtype=np.float64)
+            + bridge_direction * exit_clearance_m
+        )
+        forbidden_mask = self._fixed_bridge_forbidden_mask(
+            np.asarray(entry_xy, dtype=np.float64),
+            np.asarray(exit_xy, dtype=np.float64),
+        )
+        recovery_cell = self._nearest_non_bridge_walkable_cell(
+            recovery_xy,
+            max_radius_cells=24,
+            forbidden_mask=forbidden_mask,
+        )
+        recovery_world = self.grid_map.grid_to_world(recovery_cell).copy()
+
+        if forbidden_mask[recovery_cell]:
+            raise RuntimeError(
+                "다리 출구 바깥 안전 복귀점이 금지 구역 안에 있습니다: "
+                f"recovery=({recovery_world[0]:.2f}, "
+                f"{recovery_world[1]:.2f})"
+            )
+
+        original_walkable = self.grid_map.walkable
+        self.grid_map.walkable = original_walkable & ~forbidden_mask
+        try:
+            (
+                departure,
+                terminal_world_points,
+            ) = self._plan_bridge_departure(
+                recovery_cell,
+                goal_cells,
+                victim_goal,
+                max_standoff,
+                slope_cost_weight,
+            )
+        finally:
+            self.grid_map.walkable = original_walkable
+
+        if any(bool(forbidden_mask[cell]) for cell in departure):
+            raise RuntimeError(
+                "출구 이후 경로가 다리 금지 구역으로 되돌아갑니다."
+            )
+        approach_simple = simplify_grid_path(self.grid_map, approach)
+        departure_simple = simplify_grid_path(self.grid_map, departure)
+        world_path = [
+            self.grid_map.grid_to_world(cell).copy()
+            for cell in approach_simple[:-1]
+        ]
+        world_path.append(entry_world)
+
+        center_count = max(
+            1,
+            int(self.get_parameter("fixed_bridge_center_count").value),
+        )
+        for index in range(1, center_count + 1):
+            ratio = index / float(center_count + 1)
+            world_path.append(
+                entry_world * (1.0 - ratio) + exit_world * ratio
+            )
+        world_path.append(exit_world)
+        if float(np.linalg.norm(recovery_world[:2] - exit_world[:2])) >= 0.05:
+            world_path.append(recovery_world)
+        world_path.extend(
+            self.grid_map.grid_to_world(cell).copy()
+            for cell in departure_simple[1:]
+        )
+        for point in terminal_world_points:
+            if (
+                not world_path
+                or float(
+                    np.linalg.norm(point[:2] - world_path[-1][:2])
+                )
+                >= 0.05
+            ):
+                world_path.append(point)
+
+        approach_slope, approach_step = path_height_statistics(
+            self.grid_map, approach
+        )
+        departure_slope, departure_step = path_height_statistics(
+            self.grid_map, departure
+        )
+        self.get_logger().warning(
+            "Wooden_bridge2 고정 경로 연결: "
+            f"entry=({entry_world[0]:.2f}, {entry_world[1]:.2f}, "
+            f"{entry_world[2]:.2f}), "
+            f"exit=({exit_world[0]:.2f}, {exit_world[1]:.2f}, "
+            f"{exit_world[2]:.2f}), "
+            f"recovery=({recovery_world[0]:.2f}, "
+            f"{recovery_world[1]:.2f}, {recovery_world[2]:.2f}), "
+            f"departure_points={len(departure_simple)}, "
+            f"terminal_points={len(terminal_world_points)}, "
+            f"victim=({victim_goal[0]:.2f}, {victim_goal[1]:.2f})"
+        )
+        return (
+            approach + departure[1:],
+            world_path,
+            max(approach_slope, departure_slope),
+            max(approach_step, departure_step),
+        )
+
+    def _plan_bridge_departure(
+        self,
+        recovery_cell,
+        requested_goal_cells,
+        victim_goal,
+        max_standoff,
+        slope_cost_weight,
+    ):
+        """출구에서 안전 A* 후 실제 조난자 좌표까지 마지막 경로를 잇는다."""
+        usable_goals = {
+            cell
+            for cell in requested_goal_cells
+            if (
+                self.grid_map.in_bounds(cell)
+                and bool(self.grid_map.walkable[cell])
+            )
+        }
+        if usable_goals:
+            try:
+                departure = astar_to_goal_set(
+                    self.grid_map,
+                    recovery_cell,
+                    usable_goals,
+                    victim_goal,
+                    max_standoff_m=max_standoff,
+                    slope_cost_weight=slope_cost_weight,
+                )
+                return departure, []
+            except RuntimeError:
+                pass
+
+        # 조난자 주변이 급경사·바위 마스크 등으로 모두 닫혀 있으면, A*로
+        # 도달 가능한 가장 가까운 안전 지점까지 먼저 간다. 기존처럼 멀리
+        # 떨어진 다리 셀을 최종 목표로 오인하지 않는다.
+        search_limit = max(
+            float(max_standoff) + 1.0,
+            float(
+                self.get_parameter(
+                    "fixed_bridge_terminal_search_radius_m"
+                ).value
+            ),
+        )
+        grid_x, grid_y = np.meshgrid(
+            self.grid_map.x_values,
+            self.grid_map.y_values,
+        )
+        victim_distance = np.hypot(
+            grid_x - float(victim_goal[0]),
+            grid_y - float(victim_goal[1]),
+        )
+        component_labels = walkable_component_labels(self.grid_map)
+        recovery_component = component_id_at(
+            component_labels,
+            recovery_cell,
+        )
+        rows, columns = np.where(
+            component_labels == int(recovery_component)
+        )
+        if recovery_component <= 0 or len(rows) == 0:
+            raise RuntimeError(
+                "다리 출구에서 조난자 방향으로 연결되는 안전 A* 접근점을 "
+                "찾지 못했습니다."
+            )
+        staging_candidates = [
+            (
+                float(victim_distance[row, column]),
+                (int(row), int(column)),
+            )
+            for row, column in zip(rows, columns)
+            if (int(row), int(column)) != recovery_cell
+        ]
+        if not staging_candidates:
+            raise RuntimeError(
+                "다리 출구 안전 복귀점에서 이동 가능한 Terrain 셀이 없습니다."
+            )
+        staging_candidates.sort(key=lambda item: item[0])
+        used_radius, staging_cell = staging_candidates[0]
+        if used_radius > search_limit:
+            raise RuntimeError(
+                "안전 A* 접근점과 조난자의 거리가 마지막 Terrain 추종 "
+                f"허용값을 초과합니다: distance={used_radius:.2f}m, "
+                f"limit={search_limit:.2f}m"
+            )
+        departure = astar_to_goal_set(
+            self.grid_map,
+            recovery_cell,
+            {staging_cell},
+            victim_goal,
+            max_standoff_m=used_radius,
+            slope_cost_weight=slope_cost_weight,
+        )
+
+        staging_world = self.grid_map.grid_to_world(departure[-1]).copy()
+        terminal_points = self._sample_terminal_victim_path(
+            staging_world,
+            victim_goal,
+        )
+        self.get_logger().warning(
+            "조난자 주변 엄격 보행 셀이 없어 마지막 Terrain 추종 경로를 "
+            "연결합니다: "
+            f"staging=({staging_world[0]:.2f}, "
+            f"{staging_world[1]:.2f}), "
+            f"search_radius={used_radius:.1f}m, "
+            f"terminal_points={len(terminal_points)}"
+        )
+        return departure, terminal_points
+
+    def _sample_terminal_victim_path(self, start_world, victim_goal):
+        """안전 A* 끝점부터 실제 조난자 XY까지 촘촘한 지형 경로를 만든다."""
+        start_xy = np.asarray(start_world[:2], dtype=np.float64)
+        goal_xy = np.asarray(victim_goal[:2], dtype=np.float64)
+        distance = float(np.linalg.norm(goal_xy - start_xy))
+        spacing = max(
+            0.25,
+            float(
+                self.get_parameter(
+                    "fixed_bridge_terminal_spacing_m"
+                ).value
+            ),
+        )
+        count = max(1, int(math.ceil(distance / spacing)))
+        points = []
+        for index in range(1, count + 1):
+            ratio = index / float(count)
+            xy = start_xy * (1.0 - ratio) + goal_xy * ratio
+            z = self._interpolated_navigation_z(
+                float(xy[0]),
+                float(xy[1]),
+            )
+            points.append(
+                np.asarray([float(xy[0]), float(xy[1]), z])
+            )
+        return points
+
+    def _interpolated_navigation_z(self, x, y):
+        """격자점 사이 높이를 이중선형 보간해 큰 Z 계단을 만들지 않는다."""
+        x_values = self.grid_map.x_values
+        y_values = self.grid_map.y_values
+        column_high = int(np.searchsorted(x_values, float(x), side="right"))
+        row_high = int(np.searchsorted(y_values, float(y), side="right"))
+        column_high = min(max(1, column_high), len(x_values) - 1)
+        row_high = min(max(1, row_high), len(y_values) - 1)
+        column_low = column_high - 1
+        row_low = row_high - 1
+
+        x0 = float(x_values[column_low])
+        x1 = float(x_values[column_high])
+        y0 = float(y_values[row_low])
+        y1 = float(y_values[row_high])
+        tx = 0.0 if x1 == x0 else (float(x) - x0) / (x1 - x0)
+        ty = 0.0 if y1 == y0 else (float(y) - y0) / (y1 - y0)
+        tx = float(np.clip(tx, 0.0, 1.0))
+        ty = float(np.clip(ty, 0.0, 1.0))
+
+        z00 = float(self.grid_map.z_grid[row_low, column_low])
+        z10 = float(self.grid_map.z_grid[row_low, column_high])
+        z01 = float(self.grid_map.z_grid[row_high, column_low])
+        z11 = float(self.grid_map.z_grid[row_high, column_high])
+        return (
+            z00 * (1.0 - tx) * (1.0 - ty)
+            + z10 * tx * (1.0 - ty)
+            + z01 * (1.0 - tx) * ty
+            + z11 * tx * ty
+        )
+
+    def _nearest_non_bridge_walkable_cell(
+        self,
+        requested_xy,
+        *,
+        max_radius_cells,
+        forbidden_mask=None,
+    ):
+        """요청 좌표 주변에서 다리 영역이 아닌 보행 셀을 찾는다."""
+        requested = self.grid_map.world_to_grid(
+            float(requested_xy[0]),
+            float(requested_xy[1]),
+        )
+        row0, column0 = requested
+        for radius in range(0, int(max_radius_cells) + 1):
+            candidates = []
+            for row in range(row0 - radius, row0 + radius + 1):
+                for column in range(
+                    column0 - radius,
+                    column0 + radius + 1,
+                ):
+                    cell = (row, column)
+                    if not self.grid_map.in_bounds(cell):
+                        continue
+                    if not self.grid_map.walkable[cell]:
+                        continue
+                    if self.grid_map.bridge_access_mask[cell]:
+                        continue
+                    if (
+                        forbidden_mask is not None
+                        and bool(forbidden_mask[cell])
+                    ):
+                        continue
+                    world = self.grid_map.grid_to_world(cell)
+                    distance = float(
+                        np.linalg.norm(world[:2] - requested_xy[:2])
+                    )
+                    candidates.append((distance, cell))
+            if candidates:
+                candidates.sort(key=lambda item: item[0])
+                return candidates[0][1]
+        raise RuntimeError(
+            "다리 출구 주변에서 일반 Terrain 안전 복귀점을 찾지 못했습니다: "
+            f"requested=({requested_xy[0]:.2f}, {requested_xy[1]:.2f})"
+        )
+
+    def _fixed_bridge_forbidden_mask(self, entry_xy, exit_xy):
+        """출구 이후 A*가 다리 중심선·접속부로 복귀하지 못하게 막는다."""
+        grid_x, grid_y = np.meshgrid(
+            self.grid_map.x_values,
+            self.grid_map.y_values,
+        )
+        segment = exit_xy - entry_xy
+        length_squared = float(np.dot(segment, segment))
+        if length_squared <= 1.0e-9:
+            return self.grid_map.bridge_access_mask.copy()
+
+        relative_x = grid_x - float(entry_xy[0])
+        relative_y = grid_y - float(entry_xy[1])
+        ratio = np.clip(
+            (
+                relative_x * float(segment[0])
+                + relative_y * float(segment[1])
+            )
+            / length_squared,
+            0.0,
+            1.0,
+        )
+        nearest_x = float(entry_xy[0]) + ratio * float(segment[0])
+        nearest_y = float(entry_xy[1]) + ratio * float(segment[1])
+        distance = np.hypot(grid_x - nearest_x, grid_y - nearest_y)
+        half_width = max(
+            0.5,
+            float(
+                self.get_parameter(
+                    "fixed_bridge_forbidden_half_width_m"
+                ).value
+            ),
+        )
+        return (
+            self.grid_map.bridge_access_mask.copy()
+            | (distance <= half_width)
         )
 
     def _build_path_message(self, cells):
@@ -405,6 +964,20 @@ class RescuerRoutePlannerNode(TimestampedNode):
         message.header.stamp = self.get_clock().now().to_msg()
         for cell in cells:
             world = self.grid_map.grid_to_world(cell)
+            pose = PoseStamped()
+            pose.header = message.header
+            pose.pose.position.x = float(world[0])
+            pose.pose.position.y = float(world[1])
+            pose.pose.position.z = float(world[2])
+            pose.pose.orientation.w = 1.0
+            message.poses.append(pose)
+        return message
+
+    def _build_world_path_message(self, points):
+        message = PathMessage()
+        message.header.frame_id = self.map_frame
+        message.header.stamp = self.get_clock().now().to_msg()
+        for world in points:
             pose = PoseStamped()
             pose.header = message.header
             pose.pose.position.x = float(world[0])

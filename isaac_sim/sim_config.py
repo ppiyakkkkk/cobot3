@@ -241,8 +241,10 @@ RESCUER_MOVE_SPEED_M_S = 3.0
 RESCUER_WAYPOINT_TOLERANCE_M = 0.65
 RESCUER_POSE_PUBLISH_PERIOD_SEC = 0.20
 RESCUER_PATH_TOPIC = "/rescue/rescuer_path"
+RESCUER_VICTIM_GOAL_TOPIC = "/rescue/victim_goal"
 RESCUER_POSITION_TOPIC = "/rescue/rescuer/position"
 RESCUER_STATUS_TOPIC = "/rescue/rescuer/status"
+RESCUER_FINAL_VICTIM_DISTANCE_TOLERANCE_M = 2.5
 
 # 지형 보간 오차로 발이 지면에 묻히지 않도록 아주 조금 띄운다.
 PERSON_GROUND_CLEARANCE_M = 0.08
@@ -330,6 +332,32 @@ NAVIGATION_STRUCTURE_EXPLICIT_XY_MARGIN_M = 0.0
 RESCUER_GROUND_MAX_STEP_HEIGHT_M = 1.25
 # 실제 PhysX 지면 전환도 다리 또는 다리 접속부에서만 별도 단차 제한을 쓴다.
 RESCUER_GROUND_BRIDGE_MAX_STEP_HEIGHT_M = RESCUER_BRIDGE_MAX_STEP_HEIGHT_M
+
+# 다리 상판은 여러 개의 얇은 판자 Mesh로 구성되어 있어 판자 사이 또는
+# Terrain↔다리 경계에서 PhysX raycast가 순간적으로 비는 경우가 있다.
+# USD 맵을 수정하지 않는 대신, 실제로 추출된 다리 상판 core 안에서만
+# navigation surface 높이를 연속된 가상 보행 지면으로 사용할 수 있게 한다.
+# 강 전체나 다리 AABB 전체에는 적용하지 않는다.
+RESCUER_VIRTUAL_BRIDGE_GROUND_ENABLED = True
+RESCUER_VIRTUAL_BRIDGE_PRIM_SUFFIX = "__virtual_walk_surface__"
+
+# Wooden_bridge2는 판자·난간·밧줄 collision이 한 Prim 아래 섞여 있어
+# raycast만으로 실제 상판을 안정적으로 고르기 어렵다. 맵이 고정된 현재
+# 데모에서는 입구-중앙-출구를 고정 통로로 등록하고, 이 구간에서만 아래
+# navigation surface 높이를 사용해 직선으로 건넌다.
+RESCUER_FIXED_BRIDGE_CROSSING_ENABLED = True
+RESCUER_FIXED_BRIDGE_NAME = "Wooden_bridge2"
+RESCUER_FIXED_BRIDGE_WAYPOINTS = (
+    (7.0, 16.0, 38.671),      # 입구: Z는 ROS 경로 수신 시 자동 갱신
+    (15.25, 11.25, 38.940),   # 중앙: 입구와 출구의 XY 중간점
+    (23.5, 6.5, 39.209),      # 출구: Z는 ROS 경로 수신 시 자동 갱신
+)
+# 기존 A* 경로에서 입구·출구와 이 거리 안의 점을 찾아 고정 통로로 교체한다.
+RESCUER_FIXED_BRIDGE_PATH_MATCH_RADIUS_M = 3.0
+# 구조자가 중심선에서 이 거리 안에 있을 때 실제 collision을 완전히 무시한다.
+RESCUER_FIXED_BRIDGE_CORRIDOR_HALF_WIDTH_M = 0.85
+# 입구/출구 경계의 수치 오차 때문에 한 프레임 GROUND_LOST가 나는 것을 막는다.
+RESCUER_FIXED_BRIDGE_ENDPOINT_PADDING_M = 0.35
 
 # ROS 2 A*와 Isaac 스폰 검사가 공유하는 보행 지도 기준이다.
 RESCUER_MAX_SLOPE_DEG = 45.0
