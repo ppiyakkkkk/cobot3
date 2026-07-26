@@ -38,6 +38,7 @@ from sim_config import (
     FOR_TEST_VICTIM_SPAWN_ENABLED,
     FOR_TEST_VICTIM_WORLD_XYZ,
     NAVIGATION_STRUCTURE_ALIASES,
+    RESCUER_GROUND_MAX_STEP_HEIGHT_M,
     PERSON_COLLIDER_CYLINDER_HEIGHT_M,
     PERSON_COLLIDER_RADIUS_M,
     PERSON_COLLIDER_TOTAL_HEIGHT_M,
@@ -126,6 +127,8 @@ class PeopleManager:
         self._last_navigation_log_sim_time = float("-inf")
         self._last_navigation_sim_time = None
         self._last_ground_loss_log_at = float("-inf")
+        self._last_ground_loss_reason = None
+        self._last_ground_transition_log_at = float("-inf")
         self._last_large_ground_error_log_sim_time = float("-inf")
         self._ground_query_error_logged = False
         self._character_transform_error_logged = False
@@ -142,6 +145,10 @@ class PeopleManager:
 
         # 지면 추종 진단 상태
         self._last_ground_hit = None
+        # 진단값을 지워도 마지막으로 실제 적용에 성공한 지면은 유지한다.
+        # 플랫폼 가장자리의 큰 낙차를 한 프레임만 차단한 뒤 다음 프레임에
+        # 허용하는 문제를 막기 위한 안전 기준이다.
+        self._last_stable_ground_hit = None
         self._last_ground_z = None
         self._last_navigation_surface_z = None
         self._last_desired_z = None
@@ -464,8 +471,14 @@ class PeopleManager:
         )
 
         rescuer_x, rescuer_y = RESCUER_XY
+        # 구조자는 회색 스폰 플랫폼 위에서 시작할 수 있으므로 Terrain만
+        # 조회하지 않고 다리·명시적 플랫폼이 포함된 navigation surface를
+        # 사용한다. 이렇게 해야 초기 root Z도 실제 판 상단과 일치한다.
         rescuer_ground_z = float(
-            self.terrain.height(float(rescuer_x), float(rescuer_y))
+            self.terrain.navigation_height(
+                float(rescuer_x),
+                float(rescuer_y),
+            )
         )
         rescuer_position = [
             float(rescuer_x),
@@ -804,6 +817,7 @@ class PeopleManager:
         )
         self._last_move_command_applied = True
         if self._rescuer_status == "GROUND_LOST":
+            self._last_ground_loss_reason = None
             self._set_rescuer_status(
                 f"WALKING:{self._rescuer_waypoint_index + 1}/"
                 f"{len(self._rescuer_path)}"
@@ -885,12 +899,22 @@ class PeopleManager:
                 return float("nan")
         return value if math.isfinite(value) else float("nan")
 
-    def _navigation_structure_at(self, x, y, margin_m=0.10):
-        """확장 margin이 아닌 실제 구조물 AABB 안에 있는지 확인한다."""
+    def _navigation_structure_at(self, x, y, alias_margin_m=0.10):
+        """현재 XY가 실제 구조물 AABB 안에 있는지 확인한다.
+
+        다리 계열은 collision 경계의 작은 수치 오차를 흡수하도록 기존
+        0.10m 여유를 유지한다. 반면 명시적 스폰 플랫폼은 가장자리 밖을
+        플랫폼 내부로 오인하면 Terrain 전환 순간 structure hit가 사라져
+        GROUND_LOST가 되므로 margin을 적용하지 않는다.
+        """
         x = float(x)
         y = float(y)
-        margin = max(0.0, float(margin_m))
+        alias_margin = max(0.0, float(alias_margin_m))
+
+        matches = []
         for structure in self._navigation_structures:
+            source_type = str(structure.get("source_type", "alias"))
+            margin = 0.0 if source_type == "explicit" else alias_margin
             if (
                 float(structure["x_min"]) - margin
                 <= x
@@ -899,11 +923,31 @@ class PeopleManager:
                 <= y
                 <= float(structure["y_max"]) + margin
             ):
-                return structure
-        return None
+                matches.append(structure)
 
-    def _query_walkable_ground(self, x, y, navigation_hint_z=None):
-        """현재 XY의 모든 PhysX hit 중 navigation surface와 맞는 지면을 선택한다."""
+        if not matches:
+            return None
+
+        # 여러 구조물이 겹치면 실제 상단이 가장 높은 구조물을 우선한다.
+        return max(
+            matches,
+            key=lambda structure: float(structure.get("z_max", -math.inf)),
+        )
+
+    def _query_walkable_ground(
+        self,
+        x,
+        y,
+        navigation_hint_z=None,
+        enforce_local_step=False,
+    ):
+        """현재 XY의 PhysX hit 중 navigation surface와 맞는 지면을 선택한다.
+
+        ``enforce_local_step``이 True이면 직전 실제 지면에서 다른 Prim으로
+        넘어갈 때 높이차를 제한한다. 경로의 먼 waypoint를 미리 검증할 때는
+        전체 경사 누적 높이차를 단차로 오인하지 않도록 이 검사를 사용하지
+        않고, 현재 구조자 위치를 갱신할 때만 활성화한다.
+        """
         current = self._current_rescuer_position()
         current_z = (
             float(current[2])
@@ -962,9 +1006,8 @@ class PeopleManager:
 
         expected_structure = self._navigation_structure_at(x, y)
         if expected_structure is not None:
-            # 실제 다리 AABB 안에서는 Terrain hit로 대체하지 않는다.
-            # 다리 collision이 누락된 경우 아래 Terrain으로 내려가 공중/낙하
-            # 현상이 생기므로 안전하게 GROUND_LOST로 전환한다.
+            # 구조물 실제 AABB 안에서는 아래 Terrain을 대신 선택하지 않는다.
+            # Collider가 누락된 경우 구조자를 판 아래로 내리지 않고 정지한다.
             structure_hits = [
                 item
                 for item in accepted_hits
@@ -974,8 +1017,9 @@ class PeopleManager:
                 return None
             candidate_hits = structure_hits
         else:
-            # navigation surface 생성 시 다리 주변에 XY margin을 주므로,
-            # 실제 Mesh 바깥의 접근부에서는 Terrain 위 보행을 허용한다.
+            # 명시적 플랫폼은 AABB margin을 0으로 사용한다. 판을 실제로
+            # 벗어난 순간에는 Terrain hit를 허용하며, 아래 local step 검사로
+            # 안전한 낮은 연결부와 큰 낙차를 구분한다.
             candidate_hits = accepted_hits
 
         # navigation surface와 가장 가까운 물리 표면을 우선한다.
@@ -998,6 +1042,36 @@ class PeopleManager:
         else:
             selected = max(candidate_hits, key=lambda item: float(item[0]))
             navigation_error = float("nan")
+
+        if enforce_local_step and self._last_stable_ground_hit is not None:
+            previous_hit = self._last_stable_ground_hit
+            selected_prim_path = str(selected[1])
+            selected_surface_type = str(selected[2])
+            changed_surface = (
+                not self._paths_overlap(
+                    selected_prim_path,
+                    previous_hit.prim_path,
+                )
+                or selected_surface_type != previous_hit.surface_type
+            )
+            step_height = abs(float(selected[0]) - float(previous_hit.z))
+            if (
+                changed_surface
+                and step_height
+                > float(RESCUER_GROUND_MAX_STEP_HEIGHT_M)
+            ):
+                now = time.monotonic()
+                if now - self._last_ground_transition_log_at >= 1.0:
+                    carb.log_error(
+                        "[RESCUER] 지면 전환 차단: "
+                        f"from={previous_hit.prim_path}"
+                        f"({previous_hit.z:.3f}m), "
+                        f"to={selected_prim_path}({float(selected[0]):.3f}m), "
+                        f"step={step_height:.3f}m > "
+                        f"limit={float(RESCUER_GROUND_MAX_STEP_HEIGHT_M):.3f}m"
+                    )
+                    self._last_ground_transition_log_at = now
+                return None
 
         self._ground_query_error_logged = False
         return WalkableGroundHit(
@@ -1034,6 +1108,7 @@ class PeopleManager:
         applied_ok = self._set_character_world_z(new_z)
 
         self._last_ground_hit = ground_hit
+        self._last_stable_ground_hit = ground_hit
         self._last_ground_z = float(ground_hit.z)
         self._last_navigation_surface_z = float(ground_hit.navigation_z)
         self._last_desired_z = desired_z
@@ -1105,6 +1180,7 @@ class PeopleManager:
             float(position[0]),
             float(position[1]),
             navigation_hint_z=current_navigation_z,
+            enforce_local_step=True,
         )
 
         self._last_move_command_applied = False
@@ -1112,7 +1188,7 @@ class PeopleManager:
             self._clear_ground_diagnostics()
             self._stop_rescuer_for_ground_loss(
                 "현재 구조자 XY 아래에서 navigation surface와 일치하는 "
-                "Terrain/다리 collision을 찾지 못함"
+                "Terrain/등록 구조물 collision을 찾지 못함"
             )
             self._publish_rescuer_pose_if_due()
             return
@@ -1162,11 +1238,19 @@ class PeopleManager:
                 walk_speed=0.0,
             )
         self._last_move_command_applied = False
+
+        reason = str(reason)
+        entering_ground_lost = self._rescuer_status != "GROUND_LOST"
+        reason_changed = reason != self._last_ground_loss_reason
         self._set_rescuer_status("GROUND_LOST")
-        now = time.monotonic()
-        if now - self._last_ground_loss_log_at >= 1.0:
+
+        # 같은 위치에서 매초 동일한 오류를 반복하지 않는다. 상태에 처음
+        # 진입하거나 원인이 달라졌을 때만 기록하고, 지면을 회복하면 다시
+        # 출력할 수 있도록 _refresh_current_xy_target()에서 초기화한다.
+        if entering_ground_lost or reason_changed:
             carb.log_error(f"[RESCUER] 이동 정지: {reason}")
-            self._last_ground_loss_log_at = now
+            self._last_ground_loss_log_at = time.monotonic()
+            self._last_ground_loss_reason = reason
 
     @staticmethod
     def _format_optional(value):

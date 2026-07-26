@@ -286,6 +286,22 @@ NAVIGATION_STRUCTURE_ALIASES = (
 )
 NAVIGATION_STRUCTURE_XY_MARGIN_M = 1.5
 
+# 이름이 일반적인 Cube인 회색 스폰 판은 정확한 Prim 경로로만 등록한다.
+# "cube"를 별칭에 넣으면 환경의 다른 Cube까지 보행 지면으로 오인할 수 있다.
+NAVIGATION_STRUCTURE_EXPLICIT_PRIM_PATHS = (
+    "/World/layout/root/World/Cube_001/Cube_001",
+)
+
+# 다리에는 접근부를 연결하기 위한 margin을 적용하지만, 높은 스폰 판에는
+# margin을 주지 않는다. 판 AABB 밖까지 상단 높이를 확장하면 가장자리 절벽을
+# 실제로 존재하지 않는 완만한 연결면처럼 만들 수 있기 때문이다.
+NAVIGATION_STRUCTURE_EXPLICIT_XY_MARGIN_M = 0.0
+
+# Isaac 구조자의 실시간 ground follower도 ROS 2 구조자 A*와 같은 최대 단차
+# 기준을 사용한다. forest_rescue.yaml의 max_step_height_m 값과 동일하게
+# 유지해야 판·다리에서 Terrain으로 전환할 때 계획과 실행 판단이 어긋나지 않는다.
+RESCUER_GROUND_MAX_STEP_HEIGHT_M = 1.0
+
 # 복귀 고도는 더 이상 지도 전체 최고점으로 고정하지 않는다. ROS 2
 # 컨트롤러가 RETURN_HOME 수신 시점의 실제 위치부터 홈까지 지형만 검사하고,
 # 그 구간의 최고 지형보다 아래 여유 높이만큼 높은 고도를 선택한다.
@@ -303,7 +319,7 @@ FOREST_WORLD_PATH = SCRIPT_DIR / "worlds" / "my_forest.usdc"
 GENERATED_SEARCH_PLAN_PATH = SCRIPT_DIR / "generated_search_plan.json"
 GENERATED_GROUND_TRUTH_PATH = SCRIPT_DIR / "generated_ground_truth.json"
 GENERATED_TERRAIN_MESH_PATH = SCRIPT_DIR / "generated_terrain_mesh.npz"
-# Terrain과 이름으로 확인된 다리 구조물 상단을 합친 경로계획 전용 표면이다.
+# Terrain, 다리 및 명시적으로 등록한 스폰 판의 상단을 합친 경로계획 표면이다.
 GENERATED_NAVIGATION_SURFACE_PATH = (
     SCRIPT_DIR / "generated_navigation_surface.npz"
 )

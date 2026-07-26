@@ -11,11 +11,13 @@ from pathlib import Path
 
 import carb
 import numpy as np
-from pxr import Gf, Usd, UsdGeom, UsdShade
+from pxr import Gf, Usd, UsdGeom, UsdPhysics, UsdShade
 from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
 
 from sim_config import (
     NAVIGATION_STRUCTURE_ALIASES,
+    NAVIGATION_STRUCTURE_EXPLICIT_PRIM_PATHS,
+    NAVIGATION_STRUCTURE_EXPLICIT_XY_MARGIN_M,
     NAVIGATION_STRUCTURE_XY_MARGIN_M,
     RVIZ_ENVIRONMENT_GROUPS,
     RVIZ_ENVIRONMENT_MAX_TRIANGLES_PER_GROUP,
@@ -159,23 +161,60 @@ class TerrainHeightField:
             if character.isalnum()
         )
 
-    def _build_navigation_structures(self):
-        """다리처럼 Terrain과 분리된 구조물의 World AABB를 수집한다.
+    @staticmethod
+    def _paths_overlap(first, second):
+        """두 Prim 경로가 동일하거나 부모·자식 관계인지 확인한다."""
+        first = str(first).rstrip("/")
+        second = str(second).rstrip("/")
+        if not first or not second:
+            return False
+        return (
+            first == second
+            or first.startswith(f"{second}/")
+            or second.startswith(f"{first}/")
+        )
 
-        구조물의 세부 삼각형을 2D 격자에 직접 투영하면 계산량이 커지므로,
-        경로계획에서는 보수적으로 World XY bounding box 안의 최고점을
-        구조물 표면 높이로 사용한다. 구조물 수가 적은 산림 환경에 적합하다.
+    @staticmethod
+    def _has_collision_api_on_path(prim):
+        """현재 Prim 또는 부모 Prim에 Collision API가 있는지 검사한다."""
+        current = prim
+        while current and current.IsValid():
+            try:
+                if current.HasAPI(UsdPhysics.CollisionAPI):
+                    return True
+            except Exception:
+                pass
+            parent = current.GetParent()
+            if not parent or parent == current:
+                break
+            current = parent
+        return False
+
+    def _build_navigation_structures(self):
+        """다리와 명시적 스폰 판의 World AABB 및 상단 높이를 수집한다.
+
+        다리는 기존처럼 이름 별칭으로 찾는다. 이름이 일반적인 회색 Cube는
+        정확한 Prim 경로로만 등록해 다른 Cube가 보행 지면으로 오인되지 않게
+        한다. 구조물마다 별도의 XY margin을 저장하므로 다리 접근부와 높은
+        플랫폼 가장자리를 서로 다르게 처리할 수 있다.
         """
         aliases = tuple(
             self._normalize_name(value)
             for value in NAVIGATION_STRUCTURE_ALIASES
             if str(value).strip()
         )
-        if not aliases:
+        explicit_paths = tuple(
+            str(value).strip().rstrip("/")
+            for value in NAVIGATION_STRUCTURE_EXPLICIT_PRIM_PATHS
+            if str(value).strip()
+        )
+
+        if not aliases and not explicit_paths:
             return
 
         xform_cache = UsdGeom.XformCache(Usd.TimeCode.Default())
         unmatched_large_meshes = []
+        matched_explicit_paths = set()
 
         for prim in self._stage.Traverse():
             if not prim.IsA(UsdGeom.Mesh):
@@ -188,12 +227,21 @@ class TerrainHeightField:
             if local_points is None or len(local_points) < 3:
                 continue
 
-            path_text = self._normalize_name(str(prim.GetPath()))
-            matched = any(alias in path_text for alias in aliases)
-            if not matched:
+            prim_path = str(prim.GetPath())
+            path_text = self._normalize_name(prim_path)
+            matched_explicit_path = next(
+                (
+                    configured_path
+                    for configured_path in explicit_paths
+                    if self._paths_overlap(prim_path, configured_path)
+                ),
+                None,
+            )
+            matched_alias = any(alias in path_text for alias in aliases)
+            if matched_explicit_path is None and not matched_alias:
                 if len(local_points) >= 100:
                     unmatched_large_meshes.append(
-                        (len(local_points), str(prim.GetPath()))
+                        (len(local_points), prim_path)
                     )
                 continue
 
@@ -225,8 +273,26 @@ class TerrainHeightField:
             if len(world_points) < 3:
                 continue
 
+            source_type = (
+                "explicit"
+                if matched_explicit_path is not None
+                else "alias"
+            )
+            xy_margin_m = (
+                float(NAVIGATION_STRUCTURE_EXPLICIT_XY_MARGIN_M)
+                if source_type == "explicit"
+                else float(NAVIGATION_STRUCTURE_XY_MARGIN_M)
+            )
             structure = {
-                "path": str(prim.GetPath()),
+                "path": prim_path,
+                "configured_path": (
+                    str(matched_explicit_path)
+                    if matched_explicit_path is not None
+                    else ""
+                ),
+                "source_type": source_type,
+                "xy_margin_m": max(0.0, xy_margin_m),
+                "has_collision_api": self._has_collision_api_on_path(prim),
                 "x_min": float(np.min(world_points[:, 0])),
                 "x_max": float(np.max(world_points[:, 0])),
                 "y_min": float(np.min(world_points[:, 1])),
@@ -234,12 +300,38 @@ class TerrainHeightField:
                 "z_max": float(np.max(world_points[:, 2])),
             }
             self._navigation_structures.append(structure)
+
+            if matched_explicit_path is not None:
+                matched_explicit_paths.add(str(matched_explicit_path))
+
             print(
                 "[NAV STRUCTURE] "
-                f"{structure['path']}: "
+                f"type={source_type}, path={structure['path']}, "
+                f"configured={structure['configured_path'] or 'ALIAS'}, "
                 f"XY=({structure['x_min']:.2f}, {structure['x_max']:.2f}, "
                 f"{structure['y_min']:.2f}, {structure['y_max']:.2f}), "
-                f"top_Z={structure['z_max']:.2f}"
+                f"top_Z={structure['z_max']:.2f}, "
+                f"margin={structure['xy_margin_m']:.2f}m, "
+                f"collision_api={structure['has_collision_api']}"
+            )
+
+            if source_type == "explicit" and not structure["has_collision_api"]:
+                carb.log_warn(
+                    "명시적으로 등록한 스폰 판에서 Collision API를 확인하지 "
+                    "못했습니다. 실제 Collider가 자식 Prim에 따로 있다면 "
+                    "ground raycast 로그도 함께 확인하세요: "
+                    f"{structure['path']}"
+                )
+
+        missing_explicit_paths = [
+            configured_path
+            for configured_path in explicit_paths
+            if configured_path not in matched_explicit_paths
+        ]
+        if missing_explicit_paths:
+            carb.log_warn(
+                "명시적으로 등록한 navigation structure를 Stage에서 찾지 "
+                f"못했습니다: {missing_explicit_paths}"
             )
 
         if self._navigation_structures:
@@ -249,8 +341,6 @@ class TerrainHeightField:
             )
             return
 
-        # Bridge 이름이 다른 경우 다음 실행 로그만으로 Prim 이름을 찾을 수
-        # 있도록 Terrain 외의 큰 Mesh 후보를 출력한다.
         unmatched_large_meshes.sort(reverse=True)
         if unmatched_large_meshes:
             candidate_text = ", ".join(
@@ -258,29 +348,124 @@ class TerrainHeightField:
                 for count, path in unmatched_large_meshes[:12]
             )
             carb.log_warn(
-                "bridge/deck 이름의 경로계획 구조물을 찾지 못했습니다. "
-                "다리 Prim 이름이 다르면 sim_config.py의 "
-                f"NAVIGATION_STRUCTURE_ALIASES에 추가하세요. 후보: {candidate_text}"
+                "다리 또는 명시적 스폰 판을 찾지 못했습니다. "
+                "Prim 이름이나 경로가 바뀌었다면 sim_config.py의 "
+                "NAVIGATION_STRUCTURE_ALIASES 또는 "
+                "NAVIGATION_STRUCTURE_EXPLICIT_PRIM_PATHS를 수정하세요. "
+                f"큰 Mesh 후보: {candidate_text}"
             )
 
     def navigation_height(self, x, y):
-        """Terrain과 등록된 다리 구조물 중 더 높은 표면을 반환한다."""
-        result = float(self.height(x, y))
-        margin = max(0.0, float(NAVIGATION_STRUCTURE_XY_MARGIN_M))
+        """현재 XY에서 실제로 걸어야 할 navigation surface 높이를 반환한다.
+
+        다리는 Terrain과 일부 겹칠 수 있으므로 기존처럼 더 높은 표면을
+        사용한다. 정확한 Prim 경로로 등록한 스폰 플랫폼은 그 자체가 실제
+        보행 바닥이므로, 플랫폼 AABB 안에서는 아래 Terrain 보간값보다
+        플랫폼의 PhysX 상단 높이를 우선한다.
+        """
+        x = float(x)
+        y = float(y)
+        terrain_z = float(self.height(x, y))
+
+        explicit_heights = []
+        alias_heights = []
         for structure in self._navigation_structures:
-            if (
-                structure["x_min"] - margin
-                <= float(x)
-                <= structure["x_max"] + margin
-                and structure["y_min"] - margin
-                <= float(y)
-                <= structure["y_max"] + margin
+            margin = max(
+                0.0,
+                float(
+                    structure.get(
+                        "xy_margin_m",
+                        NAVIGATION_STRUCTURE_XY_MARGIN_M,
+                    )
+                ),
+            )
+            if not (
+                float(structure["x_min"]) - margin
+                <= x
+                <= float(structure["x_max"]) + margin
+                and float(structure["y_min"]) - margin
+                <= y
+                <= float(structure["y_max"]) + margin
             ):
-                result = max(result, structure["z_max"])
+                continue
+
+            structure_z = float(structure["z_max"])
+            if structure.get("source_type") == "explicit":
+                explicit_heights.append(structure_z)
+            else:
+                alias_heights.append(structure_z)
+
+        # 명시적 플랫폼이 겹치는 영역에서는 Terrain과 max()를 취하지 않는다.
+        # 로그에서 판 PhysX 상단은 30.500m인데 Terrain 보간이 약 31.0m로
+        # 더 높게 계산되어 경로 Z가 실제 판보다 0.5m 높아졌던 문제를 막는다.
+        if explicit_heights:
+            return max(explicit_heights)
+
+        result = terrain_z
+        if alias_heights:
+            result = max(result, max(alias_heights))
         return result
 
+    def _log_navigation_structure_edges(
+        self,
+        x_values,
+        y_values,
+        z_grid,
+    ):
+        """구조물 상단과 바깥 셀 사이의 최소·최대 높이차를 출력한다."""
+        grid_x, grid_y = np.meshgrid(x_values, y_values)
+        row_count, column_count = z_grid.shape
+        neighbor_offsets = ((-1, 0), (1, 0), (0, -1), (0, 1))
+
+        for structure in self._navigation_structures:
+            inside = (
+                (grid_x >= float(structure["x_min"]))
+                & (grid_x <= float(structure["x_max"]))
+                & (grid_y >= float(structure["y_min"]))
+                & (grid_y <= float(structure["y_max"]))
+            )
+            rows, columns = np.where(inside)
+            edge_height_changes = []
+
+            for row, column in zip(rows, columns):
+                for row_offset, column_offset in neighbor_offsets:
+                    neighbor_row = int(row + row_offset)
+                    neighbor_column = int(column + column_offset)
+                    if not (
+                        0 <= neighbor_row < row_count
+                        and 0 <= neighbor_column < column_count
+                    ):
+                        continue
+                    if inside[neighbor_row, neighbor_column]:
+                        continue
+                    edge_height_changes.append(
+                        abs(
+                            float(z_grid[row, column])
+                            - float(z_grid[neighbor_row, neighbor_column])
+                        )
+                    )
+
+            if not edge_height_changes:
+                carb.log_warn(
+                    "[NAV STRUCTURE EDGE] 구조물 경계의 높이차를 계산하지 "
+                    f"못했습니다: path={structure['path']}"
+                )
+                continue
+
+            print(
+                "[NAV STRUCTURE EDGE] "
+                f"type={structure.get('source_type', 'alias')}, "
+                f"path={structure['path']}, "
+                f"top_Z={float(structure['z_max']):.3f}, "
+                f"samples={len(edge_height_changes)}, "
+                f"min_step={min(edge_height_changes):.3f}m, "
+                f"max_step={max(edge_height_changes):.3f}m. "
+                "ROS 구조자 경로의 max_step_height_m보다 큰 연결은 "
+                "통행 불가로 처리됩니다."
+            )
+
     def write_navigation_surface(self, output_path, sample_spacing_m):
-        """Terrain과 다리 상단을 합친 경로계획 전용 규칙 격자를 저장한다."""
+        """Terrain과 구조물 상단을 합친 경로계획 전용 규칙 격자를 저장한다."""
         spacing = max(0.25, float(sample_spacing_m))
         x_count = max(
             2,
@@ -304,6 +489,13 @@ class TerrainHeightField:
                 )
                 vertex_index += 1
 
+        z_grid = vertices[:, 2].reshape(y_count, x_count)
+        self._log_navigation_structure_edges(
+            x_values,
+            y_values,
+            z_grid,
+        )
+
         triangle_count = (x_count - 1) * (y_count - 1) * 2
         triangles = np.empty((triangle_count, 3), dtype=np.int32)
         triangle_index = 0
@@ -326,6 +518,33 @@ class TerrainHeightField:
                 )
                 triangle_index += 1
 
+        structure_bounds = np.asarray(
+            [
+                [
+                    structure["x_min"],
+                    structure["x_max"],
+                    structure["y_min"],
+                    structure["y_max"],
+                ]
+                for structure in self._navigation_structures
+            ],
+            dtype=np.float32,
+        ).reshape(-1, 4)
+        structure_top_z = np.asarray(
+            [
+                structure["z_max"]
+                for structure in self._navigation_structures
+            ],
+            dtype=np.float32,
+        )
+        structure_margins = np.asarray(
+            [
+                structure.get("xy_margin_m", 0.0)
+                for structure in self._navigation_structures
+            ],
+            dtype=np.float32,
+        )
+
         output_path = Path(output_path)
         temporary_path = output_path.with_suffix(".npz.tmp")
         with temporary_path.open("wb") as file_handle:
@@ -346,6 +565,30 @@ class TerrainHeightField:
                         for structure in self._navigation_structures
                     ],
                     dtype=str,
+                ),
+                navigation_structure_configured_paths=np.asarray(
+                    [
+                        structure.get("configured_path", "")
+                        for structure in self._navigation_structures
+                    ],
+                    dtype=str,
+                ),
+                navigation_structure_source_types=np.asarray(
+                    [
+                        structure.get("source_type", "alias")
+                        for structure in self._navigation_structures
+                    ],
+                    dtype=str,
+                ),
+                navigation_structure_bounds_xy=structure_bounds,
+                navigation_structure_top_z=structure_top_z,
+                navigation_structure_xy_margin_m=structure_margins,
+                navigation_structure_collision_api=np.asarray(
+                    [
+                        bool(structure.get("has_collision_api", False))
+                        for structure in self._navigation_structures
+                    ],
+                    dtype=np.bool_,
                 ),
             )
         temporary_path.replace(output_path)
@@ -696,7 +939,6 @@ class EnvironmentMeshExporter:
                             f"{prim_path}"
                         )
                     return category
-
             # 강은 Prim 이름 대신 Material 이름에 Water/River가 들어간
             # 경우가 많으므로 바인딩 Material 경로도 함께 검사한다.
             if category == "river" and self._material_matches_alias(
