@@ -1023,7 +1023,12 @@ class TerrainHeightField:
             )
 
     def write_navigation_surface(self, output_path, sample_spacing_m):
-        """Terrain·스폰 판·실제 다리 상판을 합친 규칙 격자를 저장한다."""
+        """Terrain·실제 다리 상판을 합친 규칙 격자를 저장한다.
+
+        명시적 회색 스폰 플랫폼은 보행 높이에 합치지 않는다. 대신 별도의
+        ``platform_mask``와 bounds 메타데이터로 저장해 구조자 스폰 및 A*가
+        해당 영역을 확실히 제외할 수 있게 한다.
+        """
         spacing = max(0.25, float(sample_spacing_m))
         x_count = max(
             2,
@@ -1036,27 +1041,24 @@ class TerrainHeightField:
         x_values = np.linspace(self.x_min, self.x_max, x_count)
         y_values = np.linspace(self.y_min, self.y_max, y_count)
 
-        # 먼저 Terrain과 명시적 스폰 플랫폼만 만든다. 다리는 AABB 최고 Z가
-        # 아니라 아래의 실제 상판 추출 결과로 별도 덮어쓴다.
+        # 기본 표면은 순수 Terrain이다. 다리만 실제 상판 추출 결과로
+        # 덮어쓰며, 회색 드론 플랫폼은 절대로 보행 높이에 포함하지 않는다.
         z_grid = np.empty((y_count, x_count), dtype=np.float64)
         for row, world_y in enumerate(y_values):
             for column, world_x in enumerate(x_values):
-                terrain_z = float(self.height(world_x, world_y))
-                value = terrain_z
-                for structure in self._navigation_structures:
-                    if structure.get("source_type") != "explicit":
-                        continue
-                    if (
-                        float(structure["x_min"])
-                        <= float(world_x)
-                        <= float(structure["x_max"])
-                        and float(structure["y_min"])
-                        <= float(world_y)
-                        <= float(structure["y_max"])
-                    ):
-                        value = float(structure["z_max"])
-                        break
-                z_grid[row, column] = value
+                z_grid[row, column] = float(self.height(world_x, world_y))
+
+        grid_x, grid_y = np.meshgrid(x_values, y_values)
+        platform_mask = np.zeros_like(z_grid, dtype=bool)
+        for structure in self._navigation_structures:
+            if structure.get("source_type") != "explicit":
+                continue
+            platform_mask |= (
+                (grid_x >= float(structure["x_min"]))
+                & (grid_x <= float(structure["x_max"]))
+                & (grid_y >= float(structure["y_min"]))
+                & (grid_y <= float(structure["y_max"]))
+            )
 
         (
             bridge_core_mask,
@@ -1210,6 +1212,7 @@ class TerrainHeightField:
                 bridge_surface_z_grid=bridge_surface_z_grid.astype(
                     np.float32
                 ),
+                platform_mask=platform_mask.astype(np.bool_),
                 bridge_structure_paths=np.asarray(
                     [
                         structure["path"]
@@ -1226,6 +1229,7 @@ class TerrainHeightField:
             f"structures={len(self._navigation_structures)}, "
             f"bridge_core={int(np.count_nonzero(bridge_core_mask))}, "
             f"bridge_access={int(np.count_nonzero(bridge_access_mask))}, "
+            f"platform_blocked={int(np.count_nonzero(platform_mask))}, "
             f"spacing={spacing:.2f}m"
         )
 

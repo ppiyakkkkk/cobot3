@@ -19,11 +19,13 @@ from visualization_msgs.msg import Marker, MarkerArray
 from forest_rescue_system.common.log_utils import TimestampedNode
 from forest_rescue_system.rescuer.rescuer_route_utils import (
     astar_to_goal_set,
+    astar_via_best_bridge,
     build_rescuer_grid_map,
     goal_cells_around_victim,
     nearest_walkable_cell,
     path_height_statistics,
     path_length_m,
+    route_requires_bridge,
     simplify_grid_path,
     validate_bridge_usage,
 )
@@ -66,6 +68,7 @@ class RescuerRoutePlannerNode(TimestampedNode):
         self.declare_parameter("river_clearance_m", 0.75)
         self.declare_parameter("bridge_expansion_m", 1.5)
         self.declare_parameter("obstacle_clearance_m", 0.8)
+        self.declare_parameter("platform_clearance_m", 1.5)
         self.declare_parameter("block_rocks", True)
         self.declare_parameter("block_vegetation", False)
         self.declare_parameter("goal_min_standoff_m", 1.2)
@@ -196,6 +199,9 @@ class RescuerRoutePlannerNode(TimestampedNode):
                 obstacle_clearance_m=float(
                     self.get_parameter("obstacle_clearance_m").value
                 ),
+                platform_clearance_m=float(
+                    self.get_parameter("platform_clearance_m").value
+                ),
                 block_rocks=bool(self.get_parameter("block_rocks").value),
                 block_vegetation=bool(
                     self.get_parameter("block_vegetation").value
@@ -316,20 +322,34 @@ class RescuerRoutePlannerNode(TimestampedNode):
                 min_standoff,
                 max_standoff,
             )
-            raw_path = astar_to_goal_set(
-                self.grid_map,
-                start_cell,
-                goal_cells,
-                goal,
-                max_standoff_m=max_standoff,
-                slope_cost_weight=float(
-                    self.get_parameter("slope_cost_weight").value
-                ),
+            slope_cost_weight = float(
+                self.get_parameter("slope_cost_weight").value
             )
+            bridge_required = route_requires_bridge(
+                self.grid_map, start_cell, goal_cells
+            )
+            if bridge_required:
+                raw_path, selected_bridge = astar_via_best_bridge(
+                    self.grid_map,
+                    start_cell,
+                    goal_cells,
+                    goal,
+                    max_standoff_m=max_standoff,
+                    slope_cost_weight=slope_cost_weight,
+                )
+            else:
+                raw_path = astar_to_goal_set(
+                    self.grid_map,
+                    start_cell,
+                    goal_cells,
+                    goal,
+                    max_standoff_m=max_standoff,
+                    slope_cost_weight=slope_cost_weight,
+                )
+                _unused_required, selected_bridge = validate_bridge_usage(
+                    self.grid_map, raw_path
+                )
             simplified_path = simplify_grid_path(self.grid_map, raw_path)
-            bridge_required, selected_bridge = validate_bridge_usage(
-                self.grid_map, raw_path
-            )
             length_m = path_length_m(self.grid_map, simplified_path)
             maximum_slope, maximum_step = path_height_statistics(
                 self.grid_map, raw_path

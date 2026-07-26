@@ -35,6 +35,7 @@ class RescuerGridMap:
     bridge_connector_mask: np.ndarray
     bridge_labels: np.ndarray
     obstacle_mask: np.ndarray
+    platform_mask: np.ndarray
     spacing_x: float
     spacing_y: float
     max_step_height_m: float
@@ -526,6 +527,7 @@ def build_rescuer_grid_map(
     river_clearance_m: float = 0.75,
     bridge_expansion_m: float = 1.5,
     obstacle_clearance_m: float = 0.8,
+    platform_clearance_m: float = 1.5,
     block_rocks: bool = True,
     block_vegetation: bool = False,
 ) -> RescuerGridMap:
@@ -541,6 +543,38 @@ def build_rescuer_grid_map(
             navigation,
             z_grid.shape,
         )
+        if "platform_mask" in navigation.files:
+            platform_mask = np.asarray(
+                navigation["platform_mask"], dtype=bool
+            )
+            if platform_mask.shape != z_grid.shape:
+                raise ValueError(
+                    "navigation platform_mask shape 불일치: "
+                    f"{platform_mask.shape} != {z_grid.shape}"
+                )
+        else:
+            platform_mask = np.zeros_like(z_grid, dtype=bool)
+            required = (
+                "navigation_structure_source_types",
+                "navigation_structure_bounds_xy",
+            )
+            if all(key in navigation.files for key in required):
+                source_types = np.asarray(
+                    navigation["navigation_structure_source_types"]
+                ).astype(str)
+                bounds = np.asarray(
+                    navigation["navigation_structure_bounds_xy"],
+                    dtype=np.float64,
+                )
+                grid_x, grid_y = np.meshgrid(x_values, y_values)
+                for source_type, bound in zip(source_types, bounds):
+                    if source_type != "explicit":
+                        continue
+                    x_min, x_max, y_min, y_max = bound
+                    platform_mask |= (
+                        (grid_x >= x_min) & (grid_x <= x_max)
+                        & (grid_y >= y_min) & (grid_y <= y_max)
+                    )
 
     spacing_x = float(np.median(np.diff(x_values)))
     spacing_y = float(np.median(np.diff(y_values)))
@@ -624,6 +658,10 @@ def build_rescuer_grid_map(
         obstacle_clearance_m,
         mean_spacing,
     )
+    platform_iterations = _dilation_iterations(
+        platform_clearance_m,
+        mean_spacing,
+    )
 
     if river_iterations:
         river_mask = ndimage.binary_dilation(
@@ -634,6 +672,11 @@ def build_rescuer_grid_map(
         obstacle_mask = ndimage.binary_dilation(
             obstacle_mask,
             iterations=obstacle_iterations,
+        )
+    if platform_iterations and np.any(platform_mask):
+        platform_mask = ndimage.binary_dilation(
+            platform_mask,
+            iterations=platform_iterations,
         )
 
     if navigation_bridge_layers is not None:
@@ -665,6 +708,7 @@ def build_rescuer_grid_map(
         & (slope_deg <= float(max_slope_deg))
         & ~river_mask
         & ~obstacle_mask
+        & ~platform_mask
     )
     (
         bridge_access_mask,
@@ -700,6 +744,7 @@ def build_rescuer_grid_map(
         bridge_core_mask
         & finite_mask
         & ~obstacle_mask
+        & ~platform_mask
     )
     bridge_approach_walkable = (
         bridge_access_mask
@@ -707,6 +752,7 @@ def build_rescuer_grid_map(
         & finite_mask
         & (slope_deg <= float(bridge_max_slope_deg))
         & ~obstacle_mask
+        & ~platform_mask
     )
     walkable |= bridge_core_walkable
     walkable |= bridge_approach_walkable
@@ -731,6 +777,7 @@ def build_rescuer_grid_map(
         bridge_connector_mask=bridge_connector_mask,
         bridge_labels=bridge_labels,
         obstacle_mask=obstacle_mask,
+        platform_mask=platform_mask,
         spacing_x=spacing_x,
         spacing_y=spacing_y,
         max_step_height_m=float(max_step_height_m),
@@ -739,6 +786,55 @@ def build_rescuer_grid_map(
             float(bridge_max_step_height_m),
         ),
     )
+
+
+def walkable_component_labels(grid_map: RescuerGridMap) -> np.ndarray:
+    """실제 단차 제한까지 반영한 보행 연결 컴포넌트를 계산한다."""
+    labels = np.zeros(grid_map.shape, dtype=np.int32)
+    next_label = 0
+    for row, column in zip(*np.where(grid_map.walkable)):
+        start = (int(row), int(column))
+        if labels[start] != 0:
+            continue
+        next_label += 1
+        labels[start] = next_label
+        stack = [start]
+        while stack:
+            current = stack.pop()
+            current_row, current_column = current
+            for d_row, d_column, _factor in _NEIGHBORS:
+                neighbor = (
+                    current_row + d_row,
+                    current_column + d_column,
+                )
+                if not grid_map.in_bounds(neighbor):
+                    continue
+                if labels[neighbor] != 0:
+                    continue
+                if not transition_is_walkable(grid_map, current, neighbor):
+                    continue
+                if d_row and d_column:
+                    if not transition_is_walkable(
+                        grid_map, current, (current_row + d_row, current_column)
+                    ) or not transition_is_walkable(
+                        grid_map, current, (current_row, current_column + d_column)
+                    ):
+                        continue
+                labels[neighbor] = next_label
+                stack.append(neighbor)
+    return labels
+
+
+def component_id_at(
+    labels: np.ndarray,
+    cell: GridIndex,
+) -> int:
+    if not (
+        0 <= cell[0] < labels.shape[0]
+        and 0 <= cell[1] < labels.shape[1]
+    ):
+        return 0
+    return int(labels[cell])
 
 
 def transition_is_walkable(
@@ -994,6 +1090,116 @@ def astar_to_goal_set(
         f"walkable_goals={walkable_goals}, "
         f"nearest_goal_distance={nearest_text}"
     )
+
+
+def route_requires_bridge(
+    grid_map: RescuerGridMap,
+    start: GridIndex,
+    goals: set[GridIndex],
+) -> bool:
+    """직선 진행축이 강을 가로지르면 안전한 다리 경로를 요구한다.
+
+    지도 바깥으로 크게 우회하면 연결 컴포넌트만으로는 다리가 불필요하다고
+    오판할 수 있으므로, 가장 가까운 목표까지의 직접 진행축도 검사한다.
+    """
+    if not goals:
+        return False
+    start_world = grid_map.grid_to_world(start)
+    goal = min(
+        goals,
+        key=lambda cell: float(
+            np.linalg.norm(grid_map.grid_to_world(cell)[:2] - start_world[:2])
+        ),
+    )
+    return any(
+        bool(grid_map.river_mask[cell] and not grid_map.bridge_mask[cell])
+        for cell in _bresenham_cells(start, goal)
+        if grid_map.in_bounds(cell)
+    )
+
+
+def astar_via_best_bridge(
+    grid_map: RescuerGridMap,
+    start: GridIndex,
+    goals: set[GridIndex],
+    victim_xyz: Sequence[float],
+    *,
+    max_standoff_m: float,
+    slope_cost_weight: float = 1.5,
+) -> tuple[list[GridIndex], int]:
+    """양쪽 상판 끝을 순서대로 통과하는 가장 짧은 다리 경로를 찾는다."""
+    best = None
+    bridge_ids = sorted(
+        int(value)
+        for value in np.unique(grid_map.bridge_labels)
+        if int(value) > 0
+    )
+    for bridge_id in bridge_ids:
+        endpoint_data = _bridge_endpoint_bands(
+            grid_map.bridge_core_mask,
+            grid_map.bridge_labels,
+            bridge_id,
+            grid_map.x_values,
+            grid_map.y_values,
+        )
+        if endpoint_data is None:
+            continue
+        _axis, low_endpoint, high_endpoint = endpoint_data
+        for first_endpoint, second_endpoint in (
+            (low_endpoint, high_endpoint),
+            (high_endpoint, low_endpoint),
+        ):
+            first_cells = set(first_endpoint[0])
+            second_cells = set(second_endpoint[0])
+            if not first_cells or not second_cells:
+                continue
+            first_xyz = (
+                float(first_endpoint[1][0]),
+                float(first_endpoint[1][1]),
+                0.0,
+            )
+            second_xyz = (
+                float(second_endpoint[1][0]),
+                float(second_endpoint[1][1]),
+                0.0,
+            )
+            try:
+                approach = astar_to_goal_set(
+                    grid_map,
+                    start,
+                    first_cells,
+                    first_xyz,
+                    max_standoff_m=0.0,
+                    slope_cost_weight=slope_cost_weight,
+                )
+                crossing = astar_to_goal_set(
+                    grid_map,
+                    approach[-1],
+                    second_cells,
+                    second_xyz,
+                    max_standoff_m=0.0,
+                    slope_cost_weight=slope_cost_weight,
+                )
+                departure = astar_to_goal_set(
+                    grid_map,
+                    crossing[-1],
+                    goals,
+                    victim_xyz,
+                    max_standoff_m=max_standoff_m,
+                    slope_cost_weight=slope_cost_weight,
+                )
+            except RuntimeError:
+                continue
+            path = approach + crossing[1:] + departure[1:]
+            score = path_length_m(grid_map, path)
+            if best is None or score < best[0]:
+                best = (score, path, bridge_id)
+    if best is None:
+        raise RuntimeError(
+            "강 횡단이 필요하지만 양쪽 접근부가 연결된 다리 경로를 "
+            "찾지 못했습니다."
+        )
+    return best[1], int(best[2])
 
 
 def _bresenham_cells(start: GridIndex, end: GridIndex) -> list[GridIndex]:

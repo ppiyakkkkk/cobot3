@@ -23,6 +23,7 @@ import carb
 from geometry_msgs.msg import PointStamped
 from nav_msgs.msg import Path as PathMessage
 import numpy as np
+from scipy import ndimage
 import omni.anim.graph.core as ag
 import omni.physx
 import omni.timeline
@@ -37,6 +38,8 @@ from pegasus.simulator.logic.people.person import Person
 from sim_config import (
     FOR_TEST_VICTIM_SPAWN_ENABLED,
     FOR_TEST_VICTIM_WORLD_XYZ,
+    GENERATED_ENVIRONMENT_MESH_PATH,
+    GENERATED_NAVIGATION_SURFACE_PATH,
     NAVIGATION_STRUCTURE_ALIASES,
     RESCUER_GROUND_BRIDGE_MAX_STEP_HEIGHT_M,
     RESCUER_GROUND_MAX_STEP_HEIGHT_M,
@@ -49,11 +52,27 @@ from sim_config import (
     PERSON_CLOTHING_INCLUDE_KEYWORDS,
     PERSON_ROLE_CLOTHING_COLOR_ENABLED,
     RESCUER_CHARACTER_KEYWORDS,
+    RESCUER_BLOCK_ROCKS,
+    RESCUER_BLOCK_VEGETATION,
+    RESCUER_BRIDGE_MAX_SLOPE_DEG,
+    RESCUER_BRIDGE_MAX_STEP_HEIGHT_M,
     RESCUER_MOVE_SPEED_M_S,
+    RESCUER_MAX_SLOPE_DEG,
+    RESCUER_MAX_STEP_HEIGHT_M,
+    RESCUER_OBSTACLE_CLEARANCE_M,
     RESCUER_PATH_TOPIC,
     RESCUER_POSE_PUBLISH_PERIOD_SEC,
     RESCUER_POSITION_TOPIC,
     RESCUER_STATUS_TOPIC,
+    RESCUER_PLATFORM_CLEARANCE_M,
+    RESCUER_RIVER_CLEARANCE_M,
+    RESCUER_SPAWN_CLEARANCE_M,
+    RESCUER_SPAWN_MAX_LOCAL_STEP_M,
+    RESCUER_SPAWN_PLATFORM_MIN_DISTANCE_M,
+    RESCUER_SPAWN_PLATFORM_PATH,
+    RESCUER_SPAWN_RAYCAST_RETRY_COUNT,
+    RESCUER_SPAWN_REQUIRE_BRIDGE_REACHABLE,
+    RESCUER_SPAWN_SEARCH_MAX_RADIUS_M,
     RESCUER_WAYPOINT_TOLERANCE_M,
     RESCUER_XY,
     RESCUER_CLOTHING_COLOR_RGB,
@@ -62,6 +81,12 @@ from sim_config import (
     VICTIM_SPAWN_POSITIONS,
 )
 from sim_utils import write_ground_truth
+from forest_rescue_system.rescuer.rescuer_route_utils import (
+    build_rescuer_grid_map,
+    component_id_at,
+    nearest_walkable_cell,
+    walkable_component_labels,
+)
 
 
 # 구조자 Z 보정은 경로계획과 독립된 실행 계층이다.
@@ -111,10 +136,17 @@ class WalkableGroundHit:
 class PeopleManager:
     """두 사람과 충돌 프록시, 구조자 ROS Path 추종을 관리한다."""
 
-    def __init__(self, terrain, rng, test_victim_spawn_world_enu=None):
+    def __init__(
+        self,
+        terrain,
+        rng,
+        test_victim_spawn_world_enu=None,
+        physics_update_callback=None,
+    ):
         self.terrain = terrain
         self.rng = rng
         self.test_victim_spawn_world_enu = test_victim_spawn_world_enu
+        self._physics_update_callback = physics_update_callback
         self._person_physics_proxies = {}
         self.victim = None
         self.rescuer = None
@@ -405,6 +437,332 @@ class PeopleManager:
     # ------------------------------------------------------------------
     # 사람 생성 및 ROS bridge
     # ------------------------------------------------------------------
+    @staticmethod
+    def _distance_from_aabb(x, y, bounds):
+        x_min, x_max, y_min, y_max = [float(value) for value in bounds]
+        dx = max(x_min - float(x), 0.0, float(x) - x_max)
+        dy = max(y_min - float(y), 0.0, float(y) - y_max)
+        return math.hypot(dx, dy)
+
+    def _platform_bounds(self):
+        for structure in self._navigation_structures:
+            configured = str(structure.get("configured_path", "")).rstrip("/")
+            path = str(structure.get("path", "")).rstrip("/")
+            expected = str(RESCUER_SPAWN_PLATFORM_PATH).rstrip("/")
+            if configured == expected or self._paths_overlap(path, expected):
+                return (
+                    float(structure["x_min"]),
+                    float(structure["x_max"]),
+                    float(structure["y_min"]),
+                    float(structure["y_max"]),
+                )
+        raise RuntimeError(
+            "[RESCUER SPAWN SEARCH] 회색 플랫폼 AABB를 찾지 못했습니다: "
+            f"platform_path={RESCUER_SPAWN_PLATFORM_PATH}"
+        )
+
+    def _raycast_spawn_terrain_once(self, x, y):
+        """후보 XY에서 Terrain collision을 한 번 조회한다."""
+        ray_top = float(getattr(self.terrain, "z_max", 100.0)) + 30.0
+        ray_bottom = float(getattr(self.terrain, "z_min", -100.0)) - 20.0
+        hits = []
+
+        def collect(hit):
+            position = self._hit_position(hit)
+            if position is None:
+                return True
+            try:
+                z = float(position[2])
+            except (TypeError, ValueError, IndexError):
+                return True
+            if math.isfinite(z):
+                hits.append((z, self._hit_prim_path(hit)))
+            return True
+
+        try:
+            self._scene_query.raycast_all(
+                carb.Float3(float(x), float(y), ray_top),
+                carb.Float3(0.0, 0.0, -1.0),
+                ray_top - ray_bottom,
+                collect,
+            )
+        except Exception:
+            return None, "no_physx_terrain_hit"
+
+        terrain_hits = [
+            item
+            for item in hits
+            if self._paths_overlap(item[1], self._terrain_prim_path)
+        ]
+        if not terrain_hits:
+            return None, "no_physx_terrain_hit"
+        terrain_z = max(float(item[0]) for item in terrain_hits)
+
+        # Terrain보다 위에서 먼저 맞는 collider는 나무·바위·난간 등으로 본다.
+        blocking = [
+            item
+            for item in hits
+            if float(item[0]) > terrain_z + 0.20
+            and not self._paths_overlap(item[1], self._terrain_prim_path)
+        ]
+        if blocking:
+            return None, "obstacle"
+        return terrain_z, None
+
+    def _raycast_spawn_terrain(self, x, y):
+        """PhysX cooking 지연을 고려해 Terrain collision을 제한적으로 재조회한다."""
+        attempts = max(1, int(RESCUER_SPAWN_RAYCAST_RETRY_COUNT))
+        for attempt in range(attempts):
+            terrain_z, error = self._raycast_spawn_terrain_once(x, y)
+            if error != "no_physx_terrain_hit":
+                return terrain_z, error
+            if attempt + 1 >= attempts or self._physics_update_callback is None:
+                break
+            self._physics_update_callback()
+        return None, "no_physx_terrain_hit"
+
+    def _find_safe_rescuer_spawn(self, victim_position):
+        """플랫폼 밖의 가장 가까운 안전 Terrain 셀을 자동 선택한다."""
+        grid_map = build_rescuer_grid_map(
+            GENERATED_NAVIGATION_SURFACE_PATH,
+            GENERATED_ENVIRONMENT_MESH_PATH,
+            max_slope_deg=float(RESCUER_MAX_SLOPE_DEG),
+            max_step_height_m=float(RESCUER_MAX_STEP_HEIGHT_M),
+            bridge_max_slope_deg=float(RESCUER_BRIDGE_MAX_SLOPE_DEG),
+            bridge_max_step_height_m=float(RESCUER_BRIDGE_MAX_STEP_HEIGHT_M),
+            river_clearance_m=float(RESCUER_RIVER_CLEARANCE_M),
+            obstacle_clearance_m=float(RESCUER_OBSTACLE_CLEARANCE_M),
+            platform_clearance_m=float(RESCUER_PLATFORM_CLEARANCE_M),
+            block_rocks=bool(RESCUER_BLOCK_ROCKS),
+            block_vegetation=bool(RESCUER_BLOCK_VEGETATION),
+        )
+        bounds = self._platform_bounds()
+        platform_center = (
+            0.5 * (bounds[0] + bounds[1]),
+            0.5 * (bounds[2] + bounds[3]),
+        )
+        requested_xy = (float(RESCUER_XY[0]), float(RESCUER_XY[1]))
+        # 사용자가 지정한 판 앞쪽 Terrain 위치를 가장 먼저 선택한다.
+        # 플랫폼 중심 기준으로 정렬하면 사진의 요청 위치와 무관한 판
+        # 가장자리 후보가 먼저 선택될 수 있으므로 requested_xy를 기준으로
+        # 가까운 안전 셀부터 검사한다.
+        search_origin = requested_xy
+        labels = walkable_component_labels(grid_map)
+
+        requested_goal = grid_map.world_to_grid(
+            float(victim_position[0]), float(victim_position[1])
+        )
+        victim_cell = nearest_walkable_cell(
+            grid_map, requested_goal, max_radius_cells=30
+        )
+        victim_component = component_id_at(labels, victim_cell)
+        if victim_component <= 0:
+            raise RuntimeError(
+                "[RESCUER SPAWN SEARCH] 조난자 측 보행 컴포넌트를 찾지 못함"
+            )
+
+        bridge_components = {
+            int(labels[cell])
+            for cell in zip(*np.where(grid_map.bridge_core_mask))
+            if int(labels[cell]) > 0
+        }
+        mean_spacing = 0.5 * (
+            float(grid_map.spacing_x) + float(grid_map.spacing_y)
+        )
+        clearance_cells = max(
+            1,
+            int(math.ceil(float(RESCUER_SPAWN_CLEARANCE_M) / mean_spacing)),
+        )
+        free_clearance = ndimage.distance_transform_edt(grid_map.walkable)
+        local_step_limit = min(
+            float(RESCUER_SPAWN_MAX_LOCAL_STEP_M),
+            float(grid_map.max_step_height_m),
+        )
+
+        candidates = []
+        requested_cell = grid_map.world_to_grid(
+            requested_xy[0], requested_xy[1]
+        )
+        requested_row, requested_column = requested_cell
+        requested_in_bounds = (
+            0 <= requested_row < grid_map.walkable.shape[0]
+            and 0 <= requested_column < grid_map.walkable.shape[1]
+        )
+        requested_walkable = bool(
+            requested_in_bounds and grid_map.walkable[requested_cell]
+        )
+        if requested_walkable:
+            # 격자 중심으로 좌표를 바꾸지 않고 사용자가 지정한 정확한 XY를
+            # 첫 후보로 검사한다. 모든 안전 조건과 Terrain raycast를
+            # 통과하면 selected_xy가 requested_xy와 동일하게 유지된다.
+            candidates.append(
+                (
+                    0.0,
+                    requested_cell,
+                    requested_xy[0],
+                    requested_xy[1],
+                )
+            )
+        for row, column in zip(*np.where(grid_map.walkable)):
+            cell = (int(row), int(column))
+            if cell == requested_cell:
+                continue
+            x = float(grid_map.x_values[column])
+            y = float(grid_map.y_values[row])
+            distance_origin = math.hypot(
+                x - search_origin[0], y - search_origin[1]
+            )
+            if distance_origin <= float(RESCUER_SPAWN_SEARCH_MAX_RADIUS_M):
+                candidates.append((distance_origin, cell, x, y))
+        candidates.sort(key=lambda item: item[0])
+        print(
+            "[RESCUER SPAWN SEARCH] "
+            f"requested_cell={requested_cell}, "
+            f"requested_walkable={requested_walkable}"
+        )
+
+        rejected = {}
+        selected = None
+        # 가까운 22 m를 먼저 검사하고, 실패할 때만 설정된 최대 반경까지
+        # 넓힌다. 경사·단차·장애물·연결성 조건은 어느 단계에서도 완화하지
+        # 않는다.
+        initial_radius = min(22.0, float(RESCUER_SPAWN_SEARCH_MAX_RADIUS_M))
+        search_radii = [initial_radius]
+        if float(RESCUER_SPAWN_SEARCH_MAX_RADIUS_M) > initial_radius:
+            search_radii.append(float(RESCUER_SPAWN_SEARCH_MAX_RADIUS_M))
+
+        searched_cells = set()
+        searched_count = 0
+        for active_radius in search_radii:
+            print(
+                "[RESCUER SPAWN SEARCH] "
+                f"active_radius={active_radius:.1f}m"
+            )
+            for distance_origin, cell, x, y in candidates:
+                if distance_origin > active_radius or cell in searched_cells:
+                    continue
+                searched_cells.add(cell)
+                searched_count += 1
+
+                def reject(reason):
+                    rejected[reason] = rejected.get(reason, 0) + 1
+
+                platform_distance = self._distance_from_aabb(x, y, bounds)
+                if platform_distance < float(
+                    RESCUER_SPAWN_PLATFORM_MIN_DISTANCE_M
+                ):
+                    reject("inside_platform")
+                    continue
+                if grid_map.slope_deg[cell] > float(RESCUER_MAX_SLOPE_DEG):
+                    reject("slope_too_high")
+                    continue
+                if grid_map.river_mask[cell]:
+                    reject("river")
+                    continue
+                if grid_map.obstacle_mask[cell] or grid_map.platform_mask[cell]:
+                    reject("obstacle")
+                    continue
+                if free_clearance[cell] < clearance_cells:
+                    reject("obstacle")
+                    continue
+                row, column = cell
+                # A*와 같은 4방향 인접 셀만 검사한다. 기존 3x3 검사는
+                # 대각선(거리 약 2.12m)의 높이 차까지 1.25m 제한과 직접
+                # 비교해, 경사 45도 미만인 (-29, 28)도 잘못 거부했다.
+                neighbor_steps = []
+                for d_row, d_column in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                    n_row = row + d_row
+                    n_column = column + d_column
+                    if (
+                        0 <= n_row < grid_map.z_grid.shape[0]
+                        and 0 <= n_column < grid_map.z_grid.shape[1]
+                    ):
+                        neighbor_steps.append(
+                            abs(
+                                float(grid_map.z_grid[n_row, n_column])
+                                - float(grid_map.z_grid[cell])
+                            )
+                        )
+                if neighbor_steps and max(neighbor_steps) > local_step_limit:
+                    reject("slope_too_high")
+                    continue
+                component = component_id_at(labels, cell)
+                bridge_reachable = component in bridge_components
+                if component != victim_component:
+                    reject("disconnected_walkable_region")
+                    continue
+                if (
+                    bool(RESCUER_SPAWN_REQUIRE_BRIDGE_REACHABLE)
+                    and bridge_components
+                    and not bridge_reachable
+                ):
+                    reject("disconnected_walkable_region")
+                    continue
+                terrain_z, raycast_error = self._raycast_spawn_terrain(x, y)
+                if raycast_error == "no_physx_terrain_hit":
+                    # 초기화 도중 World.reset()을 호출하지 않기 위해 최초
+                    # 스폰 Z는 이미 생성한 Terrain heightfield를 사용한다.
+                    # 모든 Prim 생성 후 단 한 번의 reset으로 PhysX를
+                    # 시작하며, 실행 중 ground follower가 PhysX 표면으로
+                    # 계속 보정한다.
+                    terrain_z = float(grid_map.z_grid[cell])
+                    raycast_error = None
+                    print(
+                        "[RESCUER SPAWN SEARCH] "
+                        f"PhysX pre-reset hit 없음: heightfield Z 사용 "
+                        f"xy=({x:.3f}, {y:.3f}), z={terrain_z:.3f}"
+                    )
+                if raycast_error is not None:
+                    reject(raycast_error)
+                    continue
+                selected = (
+                    x,
+                    y,
+                    float(terrain_z),
+                    float(grid_map.slope_deg[cell]),
+                    platform_distance,
+                    component,
+                    bridge_reachable,
+                )
+                break
+            if selected is not None:
+                break
+
+        print("[RESCUER SPAWN SEARCH]")
+        print(f"platform_path={RESCUER_SPAWN_PLATFORM_PATH}")
+        print(
+            "platform_bounds="
+            f"({bounds[0]:.3f}, {bounds[1]:.3f}, "
+            f"{bounds[2]:.3f}, {bounds[3]:.3f})"
+        )
+        print(f"requested_xy=({requested_xy[0]:.3f}, {requested_xy[1]:.3f})")
+        for reason in (
+            "inside_platform",
+            "slope_too_high",
+            "river",
+            "obstacle",
+            "disconnected_walkable_region",
+            "no_physx_terrain_hit",
+        ):
+            if rejected.get(reason, 0):
+                print(
+                    f"candidate rejected: {reason} "
+                    f"(count={rejected[reason]})"
+                )
+        if selected is None:
+            raise RuntimeError(
+                "[RESCUER SPAWN SEARCH] 안전한 Terrain 스폰 위치를 찾지 "
+                f"못했습니다: searched={searched_count}, rejected={rejected}"
+            )
+        x, y, terrain_z, slope, distance, component, bridge_reachable = selected
+        print(f"selected_xy=({x:.3f}, {y:.3f})")
+        print(f"terrain_z={terrain_z:.3f}")
+        print(f"slope_deg={slope:.3f}")
+        print(f"distance_from_platform={distance:.3f}")
+        print(f"walkable_component={component}")
+        print(f"bridge_reachable={bridge_reachable}")
+        return x, y, terrain_z
+
     def spawn_people(self):
         """rescue_search 모드에서 조난자와 구조자를 생성한다."""
         victim_asset, rescuer_asset = self._select_people_assets(
@@ -471,15 +829,8 @@ class PeopleManager:
             f"{victim_position[2]:.3f})"
         )
 
-        rescuer_x, rescuer_y = RESCUER_XY
-        # 구조자는 회색 스폰 플랫폼 위에서 시작할 수 있으므로 Terrain만
-        # 조회하지 않고 다리·명시적 플랫폼이 포함된 navigation surface를
-        # 사용한다. 이렇게 해야 초기 root Z도 실제 판 상단과 일치한다.
-        rescuer_ground_z = float(
-            self.terrain.navigation_height(
-                float(rescuer_x),
-                float(rescuer_y),
-            )
+        rescuer_x, rescuer_y, rescuer_ground_z = (
+            self._find_safe_rescuer_spawn(victim_position)
         )
         rescuer_position = [
             float(rescuer_x),
@@ -505,7 +856,7 @@ class PeopleManager:
         self._log_rescuer_xform_ops_once()
         self._measure_rescuer_foot_offset()
         print(
-            "[INFO] Spawned rescuer beside drones at "
+            "[INFO] Spawned rescuer on safe Terrain at "
             f"({rescuer_position[0]:.3f}, "
             f"{rescuer_position[1]:.3f}, "
             f"{rescuer_position[2]:.3f})"
@@ -874,7 +1225,11 @@ class PeopleManager:
         if self._paths_overlap(candidate, self._terrain_prim_path):
             return "terrain"
 
-        for structure_path in self._navigation_structure_paths:
+        for structure in self._navigation_structures:
+            # 명시적 회색 플랫폼은 드론 전용이며 구조자 지면으로 허용하지 않는다.
+            if str(structure.get("source_type", "alias")) == "explicit":
+                continue
+            structure_path = str(structure["path"])
             if self._paths_overlap(candidate, structure_path):
                 return "navigation_structure"
 

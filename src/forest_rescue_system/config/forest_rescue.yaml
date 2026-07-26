@@ -130,6 +130,8 @@ rescuer_route_planner_node:
     river_clearance_m: 0.75
     bridge_expansion_m: 1.5
     obstacle_clearance_m: 0.8
+    # 회색 드론 이착륙 플랫폼은 구조자 보행면이 아니며 주변도 비운다.
+    platform_clearance_m: 1.5
     block_rocks: true
     # 숲 전체를 막으면 길이 사라질 수 있으므로 초기 버전에서는 식생은
     # 통과 가능으로 두고 강·급경사·바위만 차단한다.

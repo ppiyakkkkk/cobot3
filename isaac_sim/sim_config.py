@@ -178,16 +178,26 @@ VICTIM_SPAWN_POSITIONS = [
 # 착륙 복귀 시험용 조난자 위치다.
 # World ENU 기준 (X, Y, Z)를 한 줄에서 직접 지정한다.
 FOR_TEST_VICTIM_SPAWN_ENABLED = True
-FOR_TEST_VICTIM_WORLD_XYZ = (33.0, 29.0, 20.0)
+FOR_TEST_VICTIM_WORLD_XYZ = (21.0, 18.0, 20.0)
 
 # True이면 X·Y만 그대로 사용하고 Z는 실제 Terrain 표면으로 자동 보정한다.
 # 사람이 경사면 위에서 뜨거나 묻히지 않게 하는 기본 시험 모드다.
 FOR_TEST_VICTIM_KEEP_ON_GROUND = True
 
-# 구조자 충돌체도 초기 LiDAR 팽창영역에 들어오지 않도록 6 m 떨어뜨린다.
-# 구조자의 발 높이는 첫 번째 드론의 초기 World Z와 동일하게 맞춘다.
-RESCUER_XY = (-34.0, 34.0)
-RESCUER_FOOT_Z = float(_AVAILABLE_DRONE_CONFIGS[0][2][2])
+# 구조자 스폰 탐색을 시작할 기준 XY다. 사진처럼 회색 플랫폼 바로 앞의
+# Terrain 위치를 우선 검사하고, 부적합할 때만 이 좌표 주변으로 탐색을
+# 넓힌다. Z는 고정하지 않고 PhysX Terrain raycast로 결정한다.
+RESCUER_XY = (-29.0, 28.0)
+RESCUER_SPAWN_PLATFORM_PATH = (
+    "/World/layout/root/World/Cube_001/Cube_001"
+)
+RESCUER_SPAWN_PLATFORM_MIN_DISTANCE_M = 3.0
+RESCUER_SPAWN_SEARCH_MAX_RADIUS_M = 36.0
+RESCUER_SPAWN_SEARCH_RADIAL_STEP_M = 1.0
+RESCUER_SPAWN_CLEARANCE_M = 1.5
+RESCUER_SPAWN_MAX_LOCAL_STEP_M = 1.25
+RESCUER_SPAWN_RAYCAST_RETRY_COUNT = 4
+RESCUER_SPAWN_REQUIRE_BRIDGE_REACHABLE = True
 
 # 조난자와 구조자는 rescue_search 모드에서만 생성한다. 두 역할이 화면에서
 # 쉽게 구분되도록 가능한 경우 서로 다른 Character asset을 선택한다.
@@ -306,7 +316,7 @@ RESCUER_BRIDGE_MAX_STEP_HEIGHT_M = 1.5
 # 이름이 일반적인 Cube인 회색 스폰 판은 정확한 Prim 경로로만 등록한다.
 # "cube"를 별칭에 넣으면 환경의 다른 Cube까지 보행 지면으로 오인할 수 있다.
 NAVIGATION_STRUCTURE_EXPLICIT_PRIM_PATHS = (
-    "/World/layout/root/World/Cube_001/Cube_001",
+    RESCUER_SPAWN_PLATFORM_PATH,
 )
 
 # 다리에는 접근부를 연결하기 위한 margin을 적용하지만, 높은 스폰 판에는
@@ -320,6 +330,17 @@ NAVIGATION_STRUCTURE_EXPLICIT_XY_MARGIN_M = 0.0
 RESCUER_GROUND_MAX_STEP_HEIGHT_M = 1.25
 # 실제 PhysX 지면 전환도 다리 또는 다리 접속부에서만 별도 단차 제한을 쓴다.
 RESCUER_GROUND_BRIDGE_MAX_STEP_HEIGHT_M = RESCUER_BRIDGE_MAX_STEP_HEIGHT_M
+
+# ROS 2 A*와 Isaac 스폰 검사가 공유하는 보행 지도 기준이다.
+RESCUER_MAX_SLOPE_DEG = 45.0
+RESCUER_MAX_STEP_HEIGHT_M = RESCUER_GROUND_MAX_STEP_HEIGHT_M
+RESCUER_RIVER_CLEARANCE_M = 0.75
+RESCUER_OBSTACLE_CLEARANCE_M = 0.8
+# 사람 중심뿐 아니라 걷기 애니메이션의 몸·팔도 판과 겹치지 않도록
+# 플랫폼 AABB 바깥에 1.5 m 안전 여유를 둔다.
+RESCUER_PLATFORM_CLEARANCE_M = 1.5
+RESCUER_BLOCK_ROCKS = True
+RESCUER_BLOCK_VEGETATION = False
 
 # 복귀 고도는 더 이상 지도 전체 최고점으로 고정하지 않는다. ROS 2
 # 컨트롤러가 RETURN_HOME 수신 시점의 실제 위치부터 홈까지 지형만 검사하고,

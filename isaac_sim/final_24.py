@@ -42,6 +42,23 @@ import sys
 
 import numpy as np
 
+# Isaac Sim Standalone은 ROS 2 워크스페이스의 소스 패키지 경로를
+# 자동으로 PYTHONPATH에 추가하지 않는다. sim_people.py가 구조자 경로
+# 유틸을 import할 수 있도록 프로젝트 루트를 기준으로 명시 등록한다.
+WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
+FOREST_RESCUE_PACKAGE_ROOT = (
+    WORKSPACE_ROOT / "src" / "forest_rescue_system"
+)
+if not FOREST_RESCUE_PACKAGE_ROOT.is_dir():
+    raise RuntimeError(
+        "forest_rescue_system 패키지 경로를 찾을 수 없습니다: "
+        f"{FOREST_RESCUE_PACKAGE_ROOT}"
+    )
+
+forest_rescue_package_path = str(FOREST_RESCUE_PACKAGE_ROOT)
+if forest_rescue_package_path not in sys.path:
+    sys.path.insert(0, forest_rescue_package_path)
+
 # sim_config.py는 표준 라이브러리만 사용하므로 SimulationApp 전에도 안전하다.
 import sim_config
 
@@ -349,9 +366,13 @@ class ForestRescueSimulation:
         simulation_app.update()
         self.drone_manager.configure_drone_cameras()
 
-        # 모든 Prim과 센서가 준비된 뒤 물리 World를 한 번 초기화한다.
+        # 모든 환경, 사람, 드론 Prim과 센서가 준비된 뒤 물리 World를
+        # 정확히 한 번만 초기화한다. 초기화 중간에 reset한 뒤 드론 Prim을
+        # 추가하면 PhysX의 USD→Fabric 변경 반영과 USDRT population이
+        # 겹쳐 C++ terminate가 발생할 수 있다.
         self.world.reset()
         simulation_app.update()
+        print("[PHYSX] World initialized once after all scene prims were created")
 
         # 센서 stamp, TF, ROS 타이머와 RViz가 모두 같은 Isaac 시간축을
         # 사용하도록 센서가 동작하기 전에 /clock 발행 그래프를 만든다.
