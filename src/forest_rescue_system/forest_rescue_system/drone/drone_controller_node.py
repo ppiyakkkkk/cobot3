@@ -97,7 +97,7 @@ class DroneControllerNode(TimestampedNode):
         self.declare_parameter("avoidance_lateral_offset_m", 5.0)
         self.declare_parameter("avoidance_forward_offset_m", 2.0)
         self.declare_parameter("avoidance_side_clearance_m", 5.0)
-        self.declare_parameter("avoidance_xy_timeout_sec", 5.0)
+        self.declare_parameter("avoidance_xy_timeout_sec", 3.0)
         self.declare_parameter("avoidance_brake_timeout_sec", 2.5)
         self.declare_parameter("avoidance_stopped_speed_m_s", 0.35)
         self.declare_parameter("avoidance_direction_check_sec", 0.30)
@@ -113,8 +113,14 @@ class DroneControllerNode(TimestampedNode):
         self.declare_parameter("horizontal_avoidance_step_floor_m", 0.90)
         self.declare_parameter("horizontal_avoidance_attempts_floor", 3)
         self.declare_parameter("horizontal_avoidance_budget_floor", 3)
-        # 한 번의 수평 회피 안에서 A*/VFH 후보를 최대 3회 검토한다.
-        self.declare_parameter("avoidance_direction_attempts", 3)
+        # 한 번의 수평 회피 안에서 A*와 여러 VFH 각도를 순차 검토한다.
+        self.declare_parameter("avoidance_direction_attempts", 7)
+        # VFH 최고 후보 하나가 후방이거나 사전검사에 실패해도 바로 상승하지
+        # 않고, 정면과 좌우 20/40/60도 대체 방향을 실제 LiDAR로 재검사한다.
+        self.declare_parameter(
+            "avoidance_vfh_candidate_angles_deg",
+            [0.0, 20.0, -20.0, 40.0, -40.0, 60.0, -60.0],
+        )
         # 수평 회피 3회는 즉시 상승하는 종료 조건이 아니라 재계획 주기다.
         # 세 단계를 사용한 뒤 현재 위치와 최신 LiDAR/누적맵으로 A*/VFH를
         # 다시 계산하고, 새 수평 경로가 있을 때는 카운트를 초기화해 계속 간다.
@@ -143,11 +149,12 @@ class DroneControllerNode(TimestampedNode):
             "avoidance_xy_reached_tolerance_m",
             0.25,
         )
-        # 높은 회피 고도에서는 좌우로 다시 빠지기보다 원래 수색점의 XY를
-        # 향하도록 수평 우회를 생략하고 추가 상승을 우선한다.
+        # 높은 회피 고도에서도 먼저 A*/VFH 수평 경로를 다시 검사한다.
+        # 고도가 높다는 이유만으로 좌우 통로를 생략하면 같은 위치에서
+        # 상승·하강을 반복할 수 있으므로 기본값을 False로 둔다.
         self.declare_parameter(
             "search_high_altitude_skip_horizontal_avoidance",
-            True,
+            False,
         )
         self.declare_parameter("search_high_altitude_threshold_m", 1.0)
         # 수색 Waypoint는 XY 방문을 우선한다. 계획 고도보다 이미 높다면
@@ -213,6 +220,17 @@ class DroneControllerNode(TimestampedNode):
         self.declare_parameter("vertical_escape_max_forward_m", 8.0)
         self.declare_parameter("vertical_escape_obstacle_pass_margin_m", 1.5)
         self.declare_parameter("vertical_escape_extra_forward_m", 2.0)
+        # 수색 Waypoint 바로 앞에서 장애물을 만나도 남은 Waypoint 거리로
+        # 통과거리를 자르지 않는다. 계산된 통과거리만큼 가상 통과점까지
+        # 전진하고, 원 Waypoint를 지나쳤으면 해당 수색점을 완료 처리한다.
+        self.declare_parameter(
+            "vertical_escape_allow_waypoint_overrun_for_search",
+            True,
+        )
+        self.declare_parameter(
+            "vertical_escape_waypoint_pass_margin_m",
+            0.30,
+        )
         self.declare_parameter("vertical_escape_clear_hold_sec", 0.6)
         self.declare_parameter("vertical_escape_cross_timeout_sec", 12.0)
         self.declare_parameter("vertical_escape_cross_tolerance_m", 0.8)
@@ -1946,9 +1964,9 @@ class DroneControllerNode(TimestampedNode):
                 )
                 started_new_horizontal_block = False
 
-                # 높은 고도에서는 기존 정책대로 추가 좌우 이동을 생략한다.
-                # 일반 수색 고도에서는 3회가 끝났다고 곧바로 상승하지 않고,
-                # 현재 위치를 새 시작점으로 삼아 A*/VFH를 한 번 더 계산한다.
+                # 높은 고도에서도 기본적으로 수평 경로를 다시 검사한다.
+                # 호환용 파라미터가 명시적으로 True일 때만 예전 동작을 쓰며,
+                # 제공 YAML에서는 False로 설정한다.
                 try_horizontal = not (
                     already_high and skip_horizontal_when_high
                 )
@@ -2019,8 +2037,8 @@ class DroneControllerNode(TimestampedNode):
                 else:
                     avoided_horizontally = False
                     reason = (
-                        "이미 높은 회피 고도"
-                        if already_high
+                        "높은 고도 수평검사 비활성"
+                        if already_high and skip_horizontal_when_high
                         else (
                             "수평 재계획 정체"
                             if budget_exhausted
@@ -2051,6 +2069,7 @@ class DroneControllerNode(TimestampedNode):
                     else:
                         commanded_down_m = float(down_m)
                 else:
+                    self._vertical_escape_completed_waypoint = False
                     vertical_down_m = await self._perform_vertical_avoidance(
                         planned_down_m=down_m,
                         target_north_m=north_m,
@@ -2059,6 +2078,14 @@ class DroneControllerNode(TimestampedNode):
                         resume_status=resume_status,
                         highest_allowed_down=avoidance_ceiling_down_m,
                         maintain_high_for_search=maintain_high_after_escape,
+                        allow_cross_beyond_target=(
+                            xy_priority
+                            and bool(
+                                self.get_parameter(
+                                    "vertical_escape_allow_waypoint_overrun_for_search"
+                                ).value
+                            )
+                        ),
                     )
                     if vertical_down_m is None:
                         if (
@@ -2124,6 +2151,19 @@ class DroneControllerNode(TimestampedNode):
 
                     commanded_down_m = float(vertical_down_m)
                     horizontal_avoidance_successes = horizontal_budget
+                    if bool(
+                        getattr(
+                            self,
+                            "_vertical_escape_completed_waypoint",
+                            False,
+                        )
+                    ):
+                        self.get_logger().info(
+                            "가상 통과점으로 장애물을 충분히 지난 뒤 "
+                            "현재 수색 Waypoint를 통과 완료 처리합니다."
+                        )
+                        self._publish_status(resume_status)
+                        return True
 
                 avoidance_replans = 0
 
@@ -2264,6 +2304,9 @@ class DroneControllerNode(TimestampedNode):
 
         attempted_targets = set()
         ignore_local_detour = False
+        vfh_candidate_angles = None
+        vfh_candidate_index = 0
+        vfh_recommended_angle_deg = None
         attempt_floor = max(
             1,
             int(
@@ -2284,9 +2327,22 @@ class DroneControllerNode(TimestampedNode):
                 ).value
             ),
         )
+        configured_vfh_angles_deg = [
+            float(value)
+            for value in self.get_parameter(
+                "avoidance_vfh_candidate_angles_deg"
+            ).value
+        ]
+        # 로컬 A* 1개와 VFH 대체 각도를 모두 확인할 수 있는 횟수를 확보한다.
+        total_candidate_checks = max(
+            attempt_count,
+            # 로컬 A* 1개 + 표준 VFH 각도 + 별도 추천각 1개까지 검사한다.
+            len(configured_vfh_angles_deg) + 2,
+        )
         self.get_logger().info(
             "수평 회피 시도: "
-            f"최대단계={step_floor:.2f}m, 후보검사={attempt_count}회"
+            f"최대단계={step_floor:.2f}m, "
+            f"후보검사={total_candidate_checks}회"
         )
         minimum_forward_progress = max(
             0.0,
@@ -2316,7 +2372,7 @@ class DroneControllerNode(TimestampedNode):
             ),
         )
 
-        for _ in range(attempt_count):
+        for _ in range(total_candidate_checks):
             detour_age = self._sim_time_sec() - self.local_detour_received_at
             detour_max_age = float(
                 self.get_parameter("local_detour_max_age_sec").value
@@ -2346,11 +2402,71 @@ class DroneControllerNode(TimestampedNode):
                 body_y = float(self.local_detour_body_y_m)
                 path_source = "로컬A*"
             elif vector_fresh:
-                # A*가 없거나 전진성이 부족하면 VFH의 좌우 빈 섹터를
-                # 실제 fallback으로 사용한다.
-                body_angle = float(self.avoidance_direction_body_rad)
-                # VFH 방향은 최소 0.9m 앞까지 검사하되, 실제 이동은
-                # 아래 hint_step에서 최대 0.9m로 다시 제한한다.
+                # VFH가 내놓은 최고 방향 하나만 쓰지 않는다. 최고 방향이
+                # 후방이어도 추천된 좌/우 우선순위를 참고해 정면, ±20/40/60도
+                # 후보를 순차적으로 실제 LiDAR 방향검사에 통과시킨다.
+                if vfh_candidate_angles is None:
+                    recommended_deg = math.degrees(
+                        float(self.avoidance_direction_body_rad)
+                    )
+                    while recommended_deg > 180.0:
+                        recommended_deg -= 360.0
+                    while recommended_deg < -180.0:
+                        recommended_deg += 360.0
+                    vfh_recommended_angle_deg = recommended_deg
+                    preferred_sign = 1.0 if recommended_deg >= 0.0 else -1.0
+
+                    magnitudes = sorted(
+                        {
+                            abs(float(value))
+                            for value in configured_vfh_angles_deg
+                            if abs(float(value)) <= 75.0
+                        }
+                    )
+                    ordered_degrees = []
+                    # 추천 방향이 전진 성분을 가진 경우 첫 후보로 존중한다.
+                    if abs(recommended_deg) <= 70.0:
+                        ordered_degrees.append(recommended_deg)
+                    for magnitude in magnitudes:
+                        if magnitude < 1.0e-6:
+                            ordered_degrees.append(0.0)
+                        else:
+                            ordered_degrees.extend(
+                                [
+                                    preferred_sign * magnitude,
+                                    -preferred_sign * magnitude,
+                                ]
+                            )
+
+                    unique_degrees = []
+                    for candidate_deg in ordered_degrees:
+                        candidate_deg = max(-70.0, min(70.0, candidate_deg))
+                        if not any(
+                            abs(candidate_deg - existing) < 1.0
+                            for existing in unique_degrees
+                        ):
+                            unique_degrees.append(candidate_deg)
+                    vfh_candidate_angles = [
+                        math.radians(value) for value in unique_degrees
+                    ]
+                    self.get_logger().info(
+                        "VFH 대체 각도 생성: "
+                        f"추천={recommended_deg:.0f}°, "
+                        f"검사={','.join(f'{value:.0f}°' for value in unique_degrees)}"
+                    )
+
+                if vfh_candidate_index >= len(vfh_candidate_angles):
+                    self.get_logger().warning(
+                        "VFH 대체 각도를 모두 검사했지만 안전한 수평 통로가 없음"
+                    )
+                    return False
+
+                body_angle = float(
+                    vfh_candidate_angles[vfh_candidate_index]
+                )
+                vfh_candidate_index += 1
+                # 후보 방향은 최소 0.9m 앞까지 검사하되 실제 이동은 아래
+                # hint_step에서 최대 0.9m로 제한한다.
                 probe_distance = max(
                     step_floor,
                     float(
@@ -2470,17 +2586,20 @@ class DroneControllerNode(TimestampedNode):
                     f"진행={forward_progress:.3f}m, "
                     f"필요={required_progress:.3f}m, "
                     f"허용오차={progress_tolerance:.2f}m → "
-                    + ("VFH 재검사" if path_source == "로컬A*" else "상승 회피")
+                    + (
+                        "VFH 재검사"
+                        if path_source == "로컬A*"
+                        else "다음 VFH 대체각 검사"
+                    )
                 )
                 if path_source == "로컬A*":
                     ignore_local_detour = True
-                    self._publish_movement_direction(
-                        target_north_m,
-                        target_east_m,
-                    )
-                    await self._sleep_sim_time(0.1)
-                    continue
-                return False
+                self._publish_movement_direction(
+                    target_north_m,
+                    target_east_m,
+                )
+                await self._sleep_sim_time(0.1)
+                continue
 
             max_lateral = max(
                 0.2,
@@ -2525,18 +2644,17 @@ class DroneControllerNode(TimestampedNode):
                     + (
                         "VFH 재검사"
                         if path_source == "로컬A*"
-                        else "상승 회피"
+                        else "다음 VFH 대체각 검사"
                     )
                 )
                 if path_source == "로컬A*":
                     ignore_local_detour = True
-                    self._publish_movement_direction(
-                        target_north_m,
-                        target_east_m,
-                    )
-                    await self._sleep_sim_time(0.1)
-                    continue
-                return False
+                self._publish_movement_direction(
+                    target_north_m,
+                    target_east_m,
+                )
+                await self._sleep_sim_time(0.1)
+                continue
 
             # 아직 이동하지 않고 분석 중심만 추천 방향으로 바꿔 재검증한다.
             self._publish_movement_direction(detour_north, detour_east)
@@ -2605,8 +2723,13 @@ class DroneControllerNode(TimestampedNode):
                 else "FORWARD"
             )
             self.get_logger().warning(
-                f"{path_source} {side_name} 방향 힌트 승인: body="
-                f"({body_x:.2f}, {body_y:.2f})m, "
+                f"{path_source} {side_name} 방향 힌트 승인"
+                + (
+                    f"(후보각={math.degrees(body_angle):.0f}°): body="
+                    if path_source == "VFH"
+                    else ": body="
+                )
+                + f"({body_x:.2f}, {body_y:.2f})m, "
                 f"원경로={raw_detour_distance:.2f}m, "
                 f"전진성={forward_progress:.2f}m, "
                 f"측면={lateral_progress:.2f}m, "
@@ -2791,6 +2914,7 @@ class DroneControllerNode(TimestampedNode):
         resume_status="SEARCHING",
         highest_allowed_down=None,
         maintain_high_for_search=False,
+        allow_cross_beyond_target=False,
     ):
         """수평 우회 실패 시 충분히 상승해 장애물 위로 통과한다.
 
@@ -3034,8 +3158,36 @@ class DroneControllerNode(TimestampedNode):
             ),
         )
 
-        # 2) 높은 고도에서 원래 Waypoint 방향으로 통과한다. 전진 중 다시
-        # 막히면 추가 상승 후 같은 방향으로 재시도한다.
+        # 2) 높은 고도에서 원래 Waypoint 방향으로 통과한다. 수색 중에는
+        # Waypoint가 장애물 바로 앞에 있어도 계산된 통과거리를 자르지 않고
+        # 같은 방향의 가상 통과점까지 이동한다.
+        crossing_origin_north_m = float(self.latest_north_m)
+        crossing_origin_east_m = float(self.latest_east_m)
+        crossing_target_distance_m = math.hypot(
+            target_north_m - crossing_origin_north_m,
+            target_east_m - crossing_origin_east_m,
+        )
+        if crossing_target_distance_m > 0.20:
+            crossing_direction_north = (
+                target_north_m - crossing_origin_north_m
+            ) / crossing_target_distance_m
+            crossing_direction_east = (
+                target_east_m - crossing_origin_east_m
+            ) / crossing_target_distance_m
+        else:
+            crossing_direction_north = math.cos(math.radians(yaw_deg))
+            crossing_direction_east = math.sin(math.radians(yaw_deg))
+        total_successful_cross_m = 0.0
+        waypoint_passed_during_cross = False
+        waypoint_pass_margin_m = max(
+            0.0,
+            float(
+                self.get_parameter(
+                    "vertical_escape_waypoint_pass_margin_m"
+                ).value
+            ),
+        )
+
         for descent_attempt in range(descent_retries + 1):
             requested_forward = (
                 initial_cross_distance
@@ -3049,21 +3201,41 @@ class DroneControllerNode(TimestampedNode):
                     target_north_m - self.latest_north_m,
                     target_east_m - self.latest_east_m,
                 )
-                if remaining_to_target <= 0.4:
+                if (
+                    remaining_to_target <= 0.4
+                    and not allow_cross_beyond_target
+                ):
                     cross_completed = True
                     break
 
-                cross_distance = min(
-                    remaining_to_target,
-                    requested_forward,
+                cross_distance = (
+                    float(requested_forward)
+                    if allow_cross_beyond_target
+                    else min(remaining_to_target, requested_forward)
                 )
-                if await self._cross_obstacle_at_escape_altitude(
-                    target_north_m=target_north_m,
-                    target_east_m=target_east_m,
-                    escape_down_m=escape_down_m,
-                    yaw_deg=yaw_deg,
-                    cross_distance_m=cross_distance,
-                ):
+                cross_ok, actual_cross_m = (
+                    await self._cross_obstacle_at_escape_altitude(
+                        direction_north=crossing_direction_north,
+                        direction_east=crossing_direction_east,
+                        escape_down_m=escape_down_m,
+                        yaw_deg=yaw_deg,
+                        cross_distance_m=cross_distance,
+                        target_remaining_m=remaining_to_target,
+                    )
+                )
+                if cross_ok:
+                    total_successful_cross_m += actual_cross_m
+                    if (
+                        allow_cross_beyond_target
+                        and total_successful_cross_m
+                        >= crossing_target_distance_m + waypoint_pass_margin_m
+                    ):
+                        waypoint_passed_during_cross = True
+                        self.get_logger().info(
+                            "가상 통과점 도달: "
+                            f"Waypoint까지={crossing_target_distance_m:.2f}m, "
+                            f"총통과={total_successful_cross_m:.2f}m"
+                        )
                     cross_completed = True
                     break
 
@@ -3146,6 +3318,9 @@ class DroneControllerNode(TimestampedNode):
                     f"하강하지 않고 D={escape_down_m:.1f}를 유지한 채 "
                     "원래 Waypoint XY로 이동합니다."
                 )
+                self._vertical_escape_completed_waypoint = bool(
+                    waypoint_passed_during_cross
+                )
                 self._publish_status(resume_status)
                 return float(escape_down_m)
 
@@ -3162,6 +3337,9 @@ class DroneControllerNode(TimestampedNode):
                 self.get_logger().info(
                     f"수직 회피 완료: 장애물 통과 후 계획 고도 "
                     f"D={planned_down_m:.1f} 복귀"
+                )
+                self._vertical_escape_completed_waypoint = bool(
+                    waypoint_passed_during_cross
                 )
                 self._publish_status(resume_status)
                 return float(planned_down_m)
@@ -3214,6 +3392,11 @@ class DroneControllerNode(TimestampedNode):
         # 건너뛰지 않고 높은 회피 고도를 유지한 채 목표 XY까지 간다.
         if keep_high_on_descent_failure:
             if self.latest_down_m > escape_down_m + altitude_tolerance:
+                self.get_logger().warning(
+                    "안전한 하강 지점 없음 → 높은 회피 고도 복귀 시작: "
+                    f"현재D={self.latest_down_m:.1f}, "
+                    f"목표D={escape_down_m:.1f}"
+                )
                 reached = await self._command_vertical_level(
                     self.latest_north_m,
                     self.latest_east_m,
@@ -3232,6 +3415,9 @@ class DroneControllerNode(TimestampedNode):
                 f"높은 회피 고도 D={escape_down_m:.1f}를 유지한 채 "
                 "원래 Waypoint까지 비행합니다."
             )
+            self._vertical_escape_completed_waypoint = bool(
+                waypoint_passed_during_cross
+            )
             self._publish_status(resume_status)
             return float(escape_down_m)
 
@@ -3244,24 +3430,28 @@ class DroneControllerNode(TimestampedNode):
 
     async def _cross_obstacle_at_escape_altitude(
         self,
-        target_north_m,
-        target_east_m,
+        direction_north,
+        direction_east,
         escape_down_m,
         yaw_deg,
         cross_distance_m,
+        target_remaining_m,
     ):
-        """높은 회피 고도를 유지한 채 원래 목표 방향으로 전진한다."""
-        remaining = math.hypot(
-            target_north_m - self.latest_north_m,
-            target_east_m - self.latest_east_m,
-        )
-        if remaining <= 0.4 or cross_distance_m <= 0.2:
-            return True
-        direction_north = (target_north_m - self.latest_north_m) / remaining
-        direction_east = (target_east_m - self.latest_east_m) / remaining
-        travel = min(float(cross_distance_m), remaining)
-        cross_north = self.latest_north_m + direction_north * travel
-        cross_east = self.latest_east_m + direction_east * travel
+        """높은 회피 고도에서 고정된 통과 방향으로 전진한다.
+
+        수색 Waypoint가 장애물 앞에 있더라도 ``cross_distance_m`` 전체를
+        사용해 목표 너머의 가상 통과점으로 이동할 수 있다.
+        """
+        direction_norm = math.hypot(direction_north, direction_east)
+        if direction_norm <= 1.0e-6 or cross_distance_m <= 0.2:
+            return True, 0.0
+        direction_north = float(direction_north) / direction_norm
+        direction_east = float(direction_east) / direction_norm
+        travel = float(cross_distance_m)
+        cross_start_north_m = float(self.latest_north_m)
+        cross_start_east_m = float(self.latest_east_m)
+        cross_north = cross_start_north_m + direction_north * travel
+        cross_east = cross_start_east_m + direction_east * travel
         cross_tolerance = max(
             0.3,
             float(
@@ -3276,7 +3466,8 @@ class DroneControllerNode(TimestampedNode):
         )
         self._publish_status("AVOIDING_OBSTACLE_VERTICAL_CROSS")
         self.get_logger().warning(
-            f"상승 고도 장애물 통과: {travel:.1f}m → "
+            f"상승 고도 장애물 통과: {travel:.1f}m "
+            f"(Waypoint 잔여={target_remaining_m:.1f}m) → "
             f"N={cross_north:.1f}, E={cross_east:.1f}, D={escape_down_m:.1f}"
         )
         self._publish_movement_direction(cross_north, cross_east)
@@ -3292,7 +3483,7 @@ class DroneControllerNode(TimestampedNode):
         blocked_since = None
         while self._sim_time_sec() < deadline:
             if self.stop_search_event is not None and self.stop_search_event.is_set():
-                return False
+                return False, 0.0
             self._publish_movement_direction(cross_north, cross_east)
             horizontal_error = math.hypot(
                 self.latest_north_m - cross_north,
@@ -3306,7 +3497,7 @@ class DroneControllerNode(TimestampedNode):
                     "상승 고도 전진 중 근접 장애물 감지 → 즉시 Hover"
                 )
                 await self._brake_before_avoidance()
-                return False
+                return False, 0.0
             if self.obstacle_blocked:
                 if blocked_since is None:
                     blocked_since = self._sim_time_sec()
@@ -3315,16 +3506,20 @@ class DroneControllerNode(TimestampedNode):
                         "상승 고도 전진 통로가 계속 차단됨 → 더 높은 고도 재계획"
                     )
                     await self._brake_before_avoidance()
-                    return False
+                    return False, 0.0
             else:
                 blocked_since = None
             if horizontal_error <= cross_tolerance:
+                actual_travel_m = math.hypot(
+                    float(self.latest_north_m) - cross_start_north_m,
+                    float(self.latest_east_m) - cross_start_east_m,
+                )
                 await self._hold_current_position(stop_search=False)
-                return True
+                return True, actual_travel_m
             await asyncio.sleep(0.1)
         self.get_logger().warning("상승 고도 장애물 통과 시간 초과")
         await self._hold_current_position(stop_search=False)
-        return False
+        return False, 0.0
 
     async def _descend_after_vertical_escape(
         self,

@@ -513,10 +513,13 @@ drone_controller_01:
     avoidance_front_clearance_m: 3.5
     avoidance_probe_distance_m: 1.0
     avoidance_direction_hint_step_m: 0.75
-    avoidance_direction_attempts: 2
+    avoidance_direction_attempts: 7
     avoidance_min_forward_progress_m: 0.75
     search_horizontal_avoidance_budget_per_waypoint: 1
-    search_high_altitude_skip_horizontal_avoidance: true
+    search_high_altitude_skip_horizontal_avoidance: false
+    avoidance_vfh_candidate_angles_deg: [0.0, 20.0, -20.0, 40.0, -40.0, 60.0, -60.0]
+    vertical_escape_allow_waypoint_overrun_for_search: true
+    vertical_escape_waypoint_pass_margin_m: 0.30
     search_high_altitude_threshold_m: 1.0
     search_xy_priority_enabled: true
     search_keep_high_altitude_after_escape: false
@@ -836,10 +839,13 @@ drone_controller_02:
     avoidance_front_clearance_m: 3.5
     avoidance_probe_distance_m: 1.0
     avoidance_direction_hint_step_m: 0.75
-    avoidance_direction_attempts: 2
+    avoidance_direction_attempts: 7
     avoidance_min_forward_progress_m: 0.75
     search_horizontal_avoidance_budget_per_waypoint: 1
-    search_high_altitude_skip_horizontal_avoidance: true
+    search_high_altitude_skip_horizontal_avoidance: false
+    avoidance_vfh_candidate_angles_deg: [0.0, 20.0, -20.0, 40.0, -40.0, 60.0, -60.0]
+    vertical_escape_allow_waypoint_overrun_for_search: true
+    vertical_escape_waypoint_pass_margin_m: 0.30
     search_high_altitude_threshold_m: 1.0
     search_xy_priority_enabled: true
     search_keep_high_altitude_after_escape: false
@@ -1159,10 +1165,13 @@ drone_controller_03:
     avoidance_front_clearance_m: 3.5
     avoidance_probe_distance_m: 1.0
     avoidance_direction_hint_step_m: 0.75
-    avoidance_direction_attempts: 2
+    avoidance_direction_attempts: 7
     avoidance_min_forward_progress_m: 0.75
     search_horizontal_avoidance_budget_per_waypoint: 1
-    search_high_altitude_skip_horizontal_avoidance: true
+    search_high_altitude_skip_horizontal_avoidance: false
+    avoidance_vfh_candidate_angles_deg: [0.0, 20.0, -20.0, 40.0, -40.0, 60.0, -60.0]
+    vertical_escape_allow_waypoint_overrun_for_search: true
+    vertical_escape_waypoint_pass_margin_m: 0.30
     search_high_altitude_threshold_m: 1.0
     search_xy_priority_enabled: true
     search_keep_high_altitude_after_escape: false
@@ -1482,10 +1491,13 @@ drone_controller_04:
     avoidance_front_clearance_m: 3.5
     avoidance_probe_distance_m: 1.0
     avoidance_direction_hint_step_m: 0.75
-    avoidance_direction_attempts: 2
+    avoidance_direction_attempts: 7
     avoidance_min_forward_progress_m: 0.75
     search_horizontal_avoidance_budget_per_waypoint: 1
-    search_high_altitude_skip_horizontal_avoidance: true
+    search_high_altitude_skip_horizontal_avoidance: false
+    avoidance_vfh_candidate_angles_deg: [0.0, 20.0, -20.0, 40.0, -40.0, 60.0, -60.0]
+    vertical_escape_allow_waypoint_overrun_for_search: true
+    vertical_escape_waypoint_pass_margin_m: 0.30
     search_high_altitude_threshold_m: 1.0
     search_xy_priority_enabled: true
     search_keep_high_altitude_after_escape: false
