@@ -50,8 +50,8 @@ class PointCloudLocalMapperNode(TimestampedNode):
             "/drone_01/obstacle/local_costmap",
         )
         # 오래된 나무 voxel이 좌우 판단을 계속 끌고 가지 않도록 최근
-        # 1.5초만 누적한다. A*는 이 짧은 로컬 지도를 방향 힌트로 사용한다.
-        self.declare_parameter("accumulation_sec", 1.5)
+        # 2.5초만 누적한다. A*는 이 짧은 로컬 지도를 방향 힌트로 사용한다.
+        self.declare_parameter("accumulation_sec", 2.5)
         self.declare_parameter("processing_period_sec", 0.30)
         self.declare_parameter("publish_period_sec", 0.50)
         # PointCloud가 TF보다 수십 ms 먼저 도착할 수 있으므로 메시지를 잠시
@@ -62,8 +62,8 @@ class PointCloudLocalMapperNode(TimestampedNode):
         # 다른 시각의 latest TF로 대체하는 기능은 의도적으로 두지 않는다.
         self.declare_parameter("pending_cloud_queue_size", 8)
         self.declare_parameter("max_pending_clouds_per_cycle", 2)
-        self.declare_parameter("voxel_size_m", 0.25)
-        self.declare_parameter("minimum_voxel_observations", 2)
+        self.declare_parameter("voxel_size_m", 0.35)
+        self.declare_parameter("minimum_voxel_observations", 1)
         self.declare_parameter("maximum_points_per_scan", 8000)
         self.declare_parameter("minimum_height_m", -1.2)
         self.declare_parameter("maximum_height_m", 1.8)
@@ -226,7 +226,7 @@ class PointCloudLocalMapperNode(TimestampedNode):
         self.last_scan_stamp_sec = stamp_sec
 
         # wall time이 아니라 센서의 simulation timestamp로 입력을 제한한다.
-        # 시뮬레이션이 느리게 실행돼도 3초 윈도우에 과도한 프레임이 쌓이지 않는다.
+        # 시뮬레이션이 느리게 실행돼도 2.5초 윈도우에 과도한 프레임이 쌓이지 않는다.
         if (
             stamp_sec - self.last_accepted_scan_stamp_sec
             < self.processing_period_sec - 1.0e-6
@@ -371,11 +371,13 @@ class PointCloudLocalMapperNode(TimestampedNode):
         voxel_size = max(0.05, float(self.get_parameter("voxel_size_m").value))
         all_keys = np.vstack([frame[1] for frame in self.cloud_buffer])
         unique_keys, counts = np.unique(all_keys, axis=0, return_counts=True)
+        unique_voxel_count = int(len(unique_keys))
         minimum_observations = max(
             1,
             int(self.get_parameter("minimum_voxel_observations").value),
         )
         confirmed_keys = unique_keys[counts >= minimum_observations]
+        confirmed_before_filter_count = int(len(confirmed_keys))
         points_map = (
             confirmed_keys.astype(np.float32) + 0.5
         ) * voxel_size
@@ -431,6 +433,8 @@ class PointCloudLocalMapperNode(TimestampedNode):
                 "누적 PointCloud 갱신: "
                 f"buffer_frames={len(self.cloud_buffer)}, "
                 f"pending={len(self.pending_clouds)}, "
+                f"unique_voxels={unique_voxel_count}, "
+                f"confirmed_before_filter={confirmed_before_filter_count}, "
                 f"confirmed_voxels={points_map.shape[0]}, "
                 f"rx={self.received_cloud_count}, "
                 f"sampled={self.sampled_cloud_count}, "

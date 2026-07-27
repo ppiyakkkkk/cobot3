@@ -79,7 +79,7 @@ coverage_visualization_node:
     ray_grid_step_px: 4
     minimum_rays_per_triangle: 5
     minimum_depth_m: 0.2
-    maximum_depth_m: 15.0
+    maximum_depth_m: 30.0
     coverage_z_offset_m: 0.05
     flashlight_color_rgb: [1.0, 0.95, 0.70]
     drone_01_color_rgb: [0.55, 0.00, 0.85]

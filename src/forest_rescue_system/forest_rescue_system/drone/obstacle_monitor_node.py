@@ -31,7 +31,7 @@ class ObstacleMonitorNode(TimestampedNode):
             "/drone_01/obstacle/accumulated_cloud_body",
         )
         self.declare_parameter("use_accumulated_cloud_for_astar", True)
-        self.declare_parameter("accumulated_cloud_max_age_sec", 0.6)
+        self.declare_parameter("accumulated_cloud_max_age_sec", 1.2)
         self.declare_parameter(
             "local_astar_path_topic",
             "/drone_01/obstacle/local_astar_path",
@@ -47,17 +47,17 @@ class ObstacleMonitorNode(TimestampedNode):
             "/drone_01/obstacle/planning_distance",
         )
         self.declare_parameter("mission_state_topic", "/mission/state")
-        self.declare_parameter("safety_distance_m", 4.0)
+        self.declare_parameter("safety_distance_m", 4.5)
         # 진행 방향 앞쪽은 기존 1.2m 비상거리를 유지한다.
         # 측면·후방은 기체와 실제 충돌할 정도인 0.75m에서만 정지해,
         # 옆 나무와 1m 이상 간격을 두고 통과할 때 불필요하게 멈추지 않는다.
-        self.declare_parameter("emergency_front_distance_m", 1.2)
+        self.declare_parameter("emergency_front_distance_m", 1.8)
         self.declare_parameter("emergency_side_distance_m", 0.75)
         self.declare_parameter("front_sector_half_angle_deg", 45.0)
         self.declare_parameter("side_sector_offset_deg", 70.0)
         self.declare_parameter("side_sector_half_angle_deg", 30.0)
-        self.declare_parameter("minimum_obstacle_points", 3)
-        self.declare_parameter("blocked_confirm_scans", 2)
+        self.declare_parameter("minimum_obstacle_points", 2)
+        self.declare_parameter("blocked_confirm_scans", 1)
         self.declare_parameter("clear_confirm_scans", 3)
         self.declare_parameter("processing_period_sec", 0.10)
         self.declare_parameter("minimum_height_m", -0.8)
@@ -82,7 +82,7 @@ class ObstacleMonitorNode(TimestampedNode):
             "candidate_offsets_deg",
             [0.0, -20.0, 20.0, -40.0, 40.0, -60.0, 60.0],
         )
-        self.declare_parameter("candidate_sector_half_angle_deg", 15.0)
+        self.declare_parameter("candidate_sector_half_angle_deg", 20.0)
         self.declare_parameter("candidate_min_clearance_m", 3.5)
         self.declare_parameter("candidate_score_distance_cap_m", 15.0)
         self.declare_parameter("candidate_turn_penalty", 1.2)
@@ -93,12 +93,12 @@ class ObstacleMonitorNode(TimestampedNode):
         self.declare_parameter("candidate_side_hold_sec", 2.0)
         self.declare_parameter("candidate_max_offset_deg", 65.0)
         # A*는 멀리 돌아가는 경로 생성기가 아니라 근거리 방향 힌트다.
-        # 12m 로컬 창에서 4.5m 앞을 향해 계획하고 첫 1.25m만 제시한다.
+        # 12m 로컬 창에서 4.5m 앞을 향해 계획하고 첫 0.75m만 제시한다.
         self.declare_parameter("local_grid_size_m", 12.0)
         self.declare_parameter("local_grid_resolution_m", 0.25)
         self.declare_parameter("obstacle_inflation_radius_m", 1.1)
         self.declare_parameter("local_planner_goal_distance_m", 4.5)
-        self.declare_parameter("local_planner_lookahead_m", 1.25)
+        self.declare_parameter("local_planner_lookahead_m", 0.75)
         self.declare_parameter("local_planner_period_sec", 0.20)
         # 누적 코스트맵에서 원래 진행 통로가 앞으로 막힐 것으로 보이면
         # 근거리 blocked 판정 전에도 A*를 선제적으로 요청한다.
@@ -106,7 +106,7 @@ class ObstacleMonitorNode(TimestampedNode):
         self.declare_parameter("proactive_planning_distance_m", 6.0)
         self.declare_parameter("proactive_corridor_half_width_m", 1.10)
         self.declare_parameter("proactive_ignore_near_m", 0.80)
-        self.declare_parameter("proactive_min_obstacle_voxels", 3)
+        self.declare_parameter("proactive_min_obstacle_voxels", 2)
         self.declare_parameter("planner_start_release_radius_m", 0.50)
         # A* 경로의 첫 구간이 목표 방향으로 충분히 전진할 때만
         # 로컬 우회점으로 사용한다. 순수 측면·후진 경로는 거부한다.
@@ -202,6 +202,7 @@ class ObstacleMonitorNode(TimestampedNode):
         self.local_detour_valid = False
         self.local_astar_path_body = []
         self.local_plan_source = "NONE"
+        self.local_plan_status = "NOT_REQUESTED"
         self.latest_accumulated_x = np.empty(0, dtype=np.float32)
         self.latest_accumulated_y = np.empty(0, dtype=np.float32)
         self.latest_accumulated_stamp_sec = float("-inf")
@@ -250,6 +251,7 @@ class ObstacleMonitorNode(TimestampedNode):
         self.preferred_avoidance_side_until = float("-inf")
         self.local_astar_path_body = []
         self.local_plan_source = "NONE"
+        self.local_plan_status = "NOT_REQUESTED"
         self.latest_accumulated_x = np.empty(0, dtype=np.float32)
         self.latest_accumulated_y = np.empty(0, dtype=np.float32)
         self.latest_accumulated_stamp_sec = float("-inf")
@@ -486,11 +488,16 @@ class ObstacleMonitorNode(TimestampedNode):
             if measurement_time - self.last_local_plan_time >= planner_period:
                 obstacle_x = x[height_mask]
                 obstacle_y = y[height_mask]
-                self.local_plan_source = "latest_scan"
-                if self._accumulated_cloud_is_fresh(measurement_time):
+                plan_input_source = "latest_scan"
+                accumulated_fresh = self._accumulated_cloud_is_fresh(
+                    measurement_time
+                )
+                if accumulated_fresh:
                     obstacle_x = self.latest_accumulated_x
                     obstacle_y = self.latest_accumulated_y
-                    self.local_plan_source = "accumulated_3s"
+                    plan_input_source = "accumulated"
+
+                input_point_count = int(obstacle_x.size)
                 (
                     self.local_detour_x_m,
                     self.local_detour_y_m,
@@ -500,11 +507,30 @@ class ObstacleMonitorNode(TimestampedNode):
                     obstacle_y,
                     center,
                 )
+                if self.local_detour_valid:
+                    self.local_plan_source = plan_input_source
+                    self.local_plan_status = (
+                        f"OK(source={plan_input_source}, "
+                        f"points={input_point_count})"
+                    )
+                else:
+                    self.local_plan_source = "NONE"
+                    reason = (
+                        "EMPTY_INPUT"
+                        if input_point_count <= 0
+                        else "NO_VALID_PATH"
+                    )
+                    self.local_plan_status = (
+                        f"{reason}(source={plan_input_source}, "
+                        f"points={input_point_count}, "
+                        f"accumulated_fresh={accumulated_fresh})"
+                    )
                 self.last_local_plan_time = measurement_time
         else:
             self.local_detour_valid = False
             self.local_astar_path_body = []
             self.local_plan_source = "NONE"
+            self.local_plan_status = "NOT_REQUESTED"
 
         self._publish_result(
             front_distance,
@@ -638,6 +664,7 @@ class ObstacleMonitorNode(TimestampedNode):
             self.local_detour_valid = False
             self.local_astar_path_body = []
             self.local_plan_source = "NONE"
+            self.local_plan_status = "NOT_REQUESTED"
         distance_message = Float32()
         distance_message.data = front_distance
         self.distance_publisher.publish(distance_message)
@@ -705,7 +732,7 @@ class ObstacleMonitorNode(TimestampedNode):
                 f"({self.local_detour_x_m:.2f}, "
                 f"{self.local_detour_y_m:.2f})m"
                 if self.local_detour_valid
-                else "NONE"
+                else f"NONE[{self.local_plan_status}]"
             )
             if blocked:
                 trigger_parts = []

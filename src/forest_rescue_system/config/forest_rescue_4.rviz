@@ -5,7 +5,7 @@ Panels:
     Property Tree Widget:
       Expanded: ~
       Splitter Ratio: 0.5
-    Tree Height: 356
+    Tree Height: 795
   - Class: rviz_common/Selection
     Name: Selection
   - Class: rviz_common/Tool Properties
@@ -97,7 +97,7 @@ Visualization Manager:
       Buffer Length: 1
       Class: rviz_default_plugins/Path
       Color: 255; 70; 70
-      Enabled: false
+      Enabled: true
       Head Diameter: 0.30000001192092896
       Head Length: 0.20000000298023224
       Length: 0.30000001192092896
@@ -120,12 +120,12 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /drone_01/search_path
-      Value: false
+      Value: true
     - Alpha: 1
       Buffer Length: 1
       Class: rviz_default_plugins/Path
       Color: 70; 255; 70
-      Enabled: false
+      Enabled: true
       Head Diameter: 0.30000001192092896
       Head Length: 0.20000000298023224
       Length: 0.30000001192092896
@@ -148,12 +148,12 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /drone_02/search_path
-      Value: false
+      Value: true
     - Alpha: 1
       Buffer Length: 1
       Class: rviz_default_plugins/Path
       Color: 70; 120; 255
-      Enabled: false
+      Enabled: true
       Head Diameter: 0.30000001192092896
       Head Length: 0.20000000298023224
       Length: 0.30000001192092896
@@ -176,12 +176,12 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /drone_03/search_path
-      Value: false
+      Value: true
     - Alpha: 1
       Buffer Length: 1
       Class: rviz_default_plugins/Path
       Color: 255; 200; 40
-      Enabled: false
+      Enabled: true
       Head Diameter: 0.30000001192092896
       Head Length: 0.20000000298023224
       Length: 0.30000001192092896
@@ -204,7 +204,7 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /drone_04/search_path
-      Value: false
+      Value: true
     - Alpha: 1
       Buffer Length: 1
       Class: rviz_default_plugins/Path
@@ -433,9 +433,7 @@ Visualization Manager:
       Enabled: true
       Name: Cooperative Search Zones
       Namespaces:
-        cooperative_entries: true
-        cooperative_labels: true
-        cooperative_target: true
+        {}
       Topic:
         Depth: 1
         Durability Policy: Transient Local
@@ -462,7 +460,10 @@ Visualization Manager:
       Enabled: true
       Name: Camera Coverage
       Namespaces:
-        {}
+        coverage_drone_01: true
+        coverage_drone_02: true
+        coverage_drone_03: true
+        coverage_drone_04: true
       Topic:
         Depth: 1
         Durability Policy: Transient Local
@@ -471,7 +472,7 @@ Visualization Manager:
         Value: /forest_rescue/coverage_markers
       Value: true
     - Class: rviz_default_plugins/MarkerArray
-      Enabled: true
+      Enabled: false
       Name: Camera Flashlight
       Namespaces:
         {}
@@ -481,7 +482,7 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /forest_rescue/flashlight_markers
-      Value: true
+      Value: false
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -619,7 +620,7 @@ Visualization Manager:
       Use rainbow: true
       Value: false
     - Class: rviz_default_plugins/Image
-      Enabled: true
+      Enabled: false
       Max Value: 1
       Median window: 5
       Min Value: 0
@@ -631,7 +632,7 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Best Effort
         Value: /drone_01/victim/annotated_image
-      Value: true
+      Value: false
     - Class: rviz_default_plugins/Image
       Enabled: false
       Max Value: 1
@@ -1013,10 +1014,6 @@ Visualization Manager:
         drone_start_areas: true
         drone_start_height_guides: true
         drone_start_labels: true
-        height_guides: true
-        scene_labels: true
-        victim_beacon: true
-        victim_human: true
       Topic:
         Depth: 1
         Durability Policy: Transient Local
@@ -1146,14 +1143,14 @@ Window Geometry:
     collapsed: false
   Drone 04 Detection:
     collapsed: false
-  Height: 836
+  Height: 1016
   Hide Left Dock: false
   Hide Right Dock: false
-  QMainWindow State: 000000ff00000000fd000000010000000000000156000002eafc0200000007fb0000002400440072006f006e006500200030003400200044006500740065006300740069006f006e000000003d000001f20000002800fffffffb0000002400440072006f006e006500200030003300200044006500740065006300740069006f006e000000003d000001220000002800fffffffb0000002400440072006f006e006500200030003200200044006500740065006300740069006f006e000000003d0000013c0000002800fffffffb0000002400440072006f006e006500200030003100200044006500740065006300740069006f006e010000003d000000fd0000002800fffffffb000000100044006900730070006c0061007900730100000140000001e7000000c900fffffffb0000001200530065006c0065006300740069006f006e00000002690000005c0000005c00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007300000002bc0000006b0000005c00ffffff0000049e000002ea00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd0000000100000000000001560000039efc0200000007fb0000002400440072006f006e006500200030003400200044006500740065006300740069006f006e000000003d000001f20000002800fffffffb0000002400440072006f006e006500200030003300200044006500740065006300740069006f006e000000003d000001220000002800fffffffb0000002400440072006f006e006500200030003200200044006500740065006300740069006f006e000000003d0000013c0000002800fffffffb0000002400440072006f006e006500200030003100200044006500740065006300740069006f006e000000003d0000013b0000002800fffffffb000000100044006900730070006c006100790073010000003d0000039e000000c900fffffffb0000001200530065006c0065006300740069006f006e00000002690000005c0000005c00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007300000002bc0000006b0000005c00ffffff000005de0000039e00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Selection:
     collapsed: false
   Tool Properties:
     collapsed: false
-  Width: 1530
+  Width: 1850
   X: 70
   Y: 27

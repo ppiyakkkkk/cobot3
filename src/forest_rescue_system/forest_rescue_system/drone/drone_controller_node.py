@@ -81,8 +81,8 @@ class DroneControllerNode(TimestampedNode):
 
         # PX4 Position Offboard 모드의 이동 제한값이다. Position setpoint에는
         # 속도 필드가 없으므로 PX4 파라미터를 통해 실제 비행 속도를 정한다.
-        self.declare_parameter("search_horizontal_speed_m_s", 2.0)
-        self.declare_parameter("search_horizontal_acceleration_m_s2", 2.0)
+        self.declare_parameter("search_horizontal_speed_m_s", 1.3)
+        self.declare_parameter("search_horizontal_acceleration_m_s2", 1.2)
         self.declare_parameter("search_horizontal_position_gain", 0.8)
         self.declare_parameter("search_vertical_speed_up_m_s", 1.5)
         self.declare_parameter("search_vertical_speed_down_m_s", 1.5)
@@ -99,13 +99,13 @@ class DroneControllerNode(TimestampedNode):
         self.declare_parameter("avoidance_side_clearance_m", 5.0)
         self.declare_parameter("avoidance_xy_timeout_sec", 5.0)
         self.declare_parameter("avoidance_brake_timeout_sec", 2.5)
-        self.declare_parameter("avoidance_stopped_speed_m_s", 0.60)
-        self.declare_parameter("avoidance_direction_check_sec", 0.15)
+        self.declare_parameter("avoidance_stopped_speed_m_s", 0.35)
+        self.declare_parameter("avoidance_direction_check_sec", 0.30)
         self.declare_parameter("avoidance_front_clearance_m", 3.5)
         # A*/VFH는 완성된 우회 경로가 아니라 가까운 방향 힌트로만 쓴다.
         # 한 번에 긴 임시점을 명령하지 않고 짧게 이동한 뒤 새 LiDAR로 재평가한다.
-        self.declare_parameter("avoidance_probe_distance_m", 1.5)
-        self.declare_parameter("avoidance_direction_hint_step_m", 1.25)
+        self.declare_parameter("avoidance_probe_distance_m", 1.0)
+        self.declare_parameter("avoidance_direction_hint_step_m", 0.75)
         # 한 Waypoint에서 A*와 VFH를 반복해 수색 경로에서 멀어지지 않도록
         # A* 1회와 VFH 1회 정도만 검사한 뒤 상승 회피로 전환한다.
         self.declare_parameter("avoidance_direction_attempts", 2)
@@ -150,13 +150,13 @@ class DroneControllerNode(TimestampedNode):
         )
         self.declare_parameter("avoidance_vector_max_age_sec", 1.2)
         self.declare_parameter("local_detour_max_age_sec", 1.2)
-        self.declare_parameter("local_detour_hard_stop_distance_m", 0.75)
+        self.declare_parameter("local_detour_hard_stop_distance_m", 1.30)
         # 짧은 로컬 우회에서는 body 기준 경로가 바뀌지 않도록 현재 Yaw를
         # 유지한다. 이동 직후 센서 방향이 안정될 때까지 일반 차단 판정은
         # 잠시 유예하고, 이후에도 일정 시간 연속 차단일 때만 재계획한다.
         self.declare_parameter("avoidance_keep_yaw_during_detour", True)
-        self.declare_parameter("avoidance_commit_sec", 0.35)
-        self.declare_parameter("avoidance_block_confirm_sec", 0.20)
+        self.declare_parameter("avoidance_commit_sec", 0.10)
+        self.declare_parameter("avoidance_block_confirm_sec", 0.10)
         # 수평 A*/VFH가 모두 실패했을 때 충분히 상승한 뒤 원래 진행
         # 방향으로 장애물을 건넌다. LiDAR가 잠깐 clear가 되더라도 최소
         # 상승량을 채우며, 전진 중 다시 막히면 추가 상승 후 재시도한다.
@@ -2311,13 +2311,24 @@ class DroneControllerNode(TimestampedNode):
             required_front = float(
                 self.get_parameter("avoidance_front_clearance_m").value
             )
-            direction_is_clear = (
-                self.local_detour_nearest_360_m
-                >= float(
+            hard_stop_distance = max(
+                0.3,
+                float(
                     self.get_parameter(
                         "local_detour_hard_stop_distance_m"
                     ).value
-                )
+                ),
+            )
+            # 후보 방향이 비어 보이더라도 기체 바로 옆/앞에 장애물이 있으면
+            # 짧은 수평 Setpoint를 승인하지 않는다. 특히 로컬 A*가 없어서
+            # VFH로 대체될 때 1m 안쪽 나무를 향해 파고드는 현상을 막는다.
+            required_360_clearance = max(
+                hard_stop_distance,
+                min(required_front, detour_distance + 0.30),
+            )
+            direction_is_clear = (
+                self.local_detour_nearest_360_m
+                >= required_360_clearance
                 and (
                     (
                         math.isfinite(self.front_clearance_m)
@@ -2333,7 +2344,9 @@ class DroneControllerNode(TimestampedNode):
                 self.get_logger().warning(
                     f"{path_source} 경로각 "
                     f"{math.degrees(body_angle):.0f}° 사전검사 실패: "
-                    f"전방={self.front_clearance_m:.2f}m"
+                    f"전방={self.front_clearance_m:.2f}m, "
+                    f"360°최소={self.local_detour_nearest_360_m:.2f}m, "
+                    f"요구360°={required_360_clearance:.2f}m"
                 )
                 if path_source == "로컬A*":
                     ignore_local_detour = True
