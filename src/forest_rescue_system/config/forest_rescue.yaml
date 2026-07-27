@@ -506,7 +506,7 @@ drone_controller_01:
     avoidance_lateral_offset_m: 5.0
     avoidance_forward_offset_m: 2.0
     avoidance_side_clearance_m: 5.0
-    avoidance_xy_timeout_sec: 5.0
+    avoidance_xy_timeout_sec: 3.0
     avoidance_brake_timeout_sec: 2.5
     avoidance_stopped_speed_m_s: 0.35
     avoidance_direction_check_sec: 0.30
@@ -829,7 +829,7 @@ drone_controller_02:
     avoidance_lateral_offset_m: 5.0
     avoidance_forward_offset_m: 2.0
     avoidance_side_clearance_m: 5.0
-    avoidance_xy_timeout_sec: 5.0
+    avoidance_xy_timeout_sec: 3.0
     avoidance_brake_timeout_sec: 2.5
     avoidance_stopped_speed_m_s: 0.35
     avoidance_direction_check_sec: 0.30
@@ -1152,7 +1152,7 @@ drone_controller_03:
     avoidance_lateral_offset_m: 5.0
     avoidance_forward_offset_m: 2.0
     avoidance_side_clearance_m: 5.0
-    avoidance_xy_timeout_sec: 5.0
+    avoidance_xy_timeout_sec: 3.0
     avoidance_brake_timeout_sec: 2.5
     avoidance_stopped_speed_m_s: 0.35
     avoidance_direction_check_sec: 0.30
@@ -1475,7 +1475,7 @@ drone_controller_04:
     avoidance_lateral_offset_m: 5.0
     avoidance_forward_offset_m: 2.0
     avoidance_side_clearance_m: 5.0
-    avoidance_xy_timeout_sec: 5.0
+    avoidance_xy_timeout_sec: 3.0
     avoidance_brake_timeout_sec: 2.5
     avoidance_stopped_speed_m_s: 0.35
     avoidance_direction_check_sec: 0.30
