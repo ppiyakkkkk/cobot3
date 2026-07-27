@@ -188,7 +188,9 @@ FOR_TEST_VICTIM_KEEP_ON_GROUND = True
 # 넓힌다. Z는 고정하지 않고 PhysX Terrain raycast로 결정한다.
 RESCUER_XY = (-29.0, 28.0)
 RESCUER_SPAWN_PLATFORM_PATH = (
-    "/World/layout/root/World/Cube_001/Cube_001"
+    # "/World/layout/root/World/Cube_001/Cube_001"
+    # "/root/root/root_001/World/Cube_001/Cube_001"
+    "/World/layout/root/root_001/World/Cube_001/Cube_001"   
 )
 RESCUER_SPAWN_PLATFORM_MIN_DISTANCE_M = 3.0
 RESCUER_SPAWN_SEARCH_MAX_RADIUS_M = 36.0

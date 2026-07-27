@@ -1,0 +1,85 @@
+{
+  "format_version": 1,
+  "operation_mode": "eval_coverage",
+  "status": "completed",
+  "incomplete_reason": null,
+  "drone_count": 4,
+  "drone_ids": [
+    "quadrotor_01",
+    "quadrotor_02",
+    "quadrotor_03",
+    "quadrotor_04"
+  ],
+  "failed_drones": [],
+  "started_at_kst": "2026-07-27T19:52:01.554+09:00",
+  "finished_at_kst": "2026-07-27T20:55:53.402+09:00",
+  "elapsed_sim_sec": 1126.8160535210002,
+  "forward": {
+    "total_area_m2": 10857.92345715977,
+    "covered_area_m2": 8374.172472122818,
+    "coverage_percent": 77.12499084344573,
+    "covered_triangles": 6240,
+    "total_triangles": 7938,
+    "per_drone": {
+      "quadrotor_01": {
+        "terrain_covered_area_m2": 1602.9605502331756,
+        "terrain_covered_triangles": 1035,
+        "scene_covered_triangles": 4924
+      },
+      "quadrotor_02": {
+        "terrain_covered_area_m2": 1697.0235052279897,
+        "terrain_covered_triangles": 1112,
+        "scene_covered_triangles": 7492
+      },
+      "quadrotor_03": {
+        "terrain_covered_area_m2": 1999.2207318945316,
+        "terrain_covered_triangles": 1491,
+        "scene_covered_triangles": 9254
+      },
+      "quadrotor_04": {
+        "terrain_covered_area_m2": 3074.9676847671208,
+        "terrain_covered_triangles": 2602,
+        "scene_covered_triangles": 13971
+      }
+    },
+    "sim_time_sec": 743.00003529
+  },
+  "forward_reverse": {
+    "total_area_m2": 10857.92345715977,
+    "covered_area_m2": 8446.491420831659,
+    "coverage_percent": 77.79103853658131,
+    "covered_triangles": 6295,
+    "total_triangles": 7938,
+    "per_drone": {
+      "quadrotor_01": {
+        "terrain_covered_area_m2": 1644.919351268236,
+        "terrain_covered_triangles": 1064,
+        "scene_covered_triangles": 5122
+      },
+      "quadrotor_02": {
+        "terrain_covered_area_m2": 1698.5099915035137,
+        "terrain_covered_triangles": 1113,
+        "scene_covered_triangles": 7772
+      },
+      "quadrotor_03": {
+        "terrain_covered_area_m2": 2004.557660181974,
+        "terrain_covered_triangles": 1495,
+        "scene_covered_triangles": 9920
+      },
+      "quadrotor_04": {
+        "terrain_covered_area_m2": 3098.5044178779335,
+        "terrain_covered_triangles": 2623,
+        "scene_covered_triangles": 14971
+      }
+    },
+    "sim_time_sec": 1237.000058754
+  },
+  "reverse_gain": {
+    "area_m2": 72.31894870884025,
+    "percentage_points": 0.6660476931355817
+  },
+  "search_repeat_mode": "forward_reverse_once",
+  "pass_transition_mode": "per_drone_immediate",
+  "forward_checkpoint_note": "드론별 역방향을 즉시 시작하므로 forward 체크포인트에는 먼저 완료한 드론의 초기 역방향 관측이 포함될 수 있음",
+  "coverage_denominator": "terrain_triangle_surface_area_m2"
+}
