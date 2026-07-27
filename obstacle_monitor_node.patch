@@ -1,0 +1,72 @@
+--- a/src/forest_rescue_system/forest_rescue_system/drone/obstacle_monitor_node.py
++++ b/src/forest_rescue_system/forest_rescue_system/drone/obstacle_monitor_node.py
+@@ -217,6 +217,7 @@
+         # +1은 목표 방향 기준 왼쪽, -1은 오른쪽이다.
+         self.preferred_avoidance_side = 0
+         self.preferred_avoidance_side_until = float("-inf")
++        self.last_avoidance_selection_time = float("-inf")
+         self.processing_period_sec = max(
+             0.02,
+             float(self.get_parameter("processing_period_sec").value),
+@@ -255,6 +256,7 @@
+         self.clear_scan_count = 0
+         self.preferred_avoidance_side = 0
+         self.preferred_avoidance_side_until = float("-inf")
++        self.last_avoidance_selection_time = float("-inf")
+         self.local_astar_path_body = []
+         self.local_plan_source = "NONE"
+         self.local_plan_status = "NOT_REQUESTED"
+@@ -927,6 +929,13 @@
+             float(self.get_parameter("candidate_max_offset_deg").value)
+         )
+         now = measurement_time
++        # Isaac Sim이 재시작돼 /clock이 되감기면 이전 실행에서 저장된
++        # preferred_avoidance_side_until이 계속 유효한 것처럼 보일 수 있다.
++        # 시간 역행을 감지한 즉시 이전 좌/우 선호를 폐기한다.
++        if now < self.last_avoidance_selection_time:
++            self.preferred_avoidance_side = 0
++            self.preferred_avoidance_side_until = float("-inf")
++        self.last_avoidance_selection_time = now
+         side_hold_active = (
+             self.preferred_avoidance_side != 0
+             and now < self.preferred_avoidance_side_until
+@@ -1018,7 +1027,7 @@
+             cell_count += 1
+         center_cell = cell_count // 2
+         half_size = center_cell * resolution
+-        occupied = np.zeros((cell_count, cell_count), dtype=bool)
++        raw_occupied = np.zeros((cell_count, cell_count), dtype=bool)
+ 
+         valid = (
+             np.isfinite(obstacle_x)
+@@ -1033,10 +1042,10 @@
+                 (rows >= 0) & (rows < cell_count)
+                 & (columns >= 0) & (columns < cell_count)
+             )
+-            occupied[rows[inside], columns[inside]] = True
++            raw_occupied[rows[inside], columns[inside]] = True
+ 
+         occupied = self._inflate_grid(
+-            occupied,
++            raw_occupied,
+             int(math.ceil(
+                 float(
+                     self.get_parameter("obstacle_inflation_radius_m").value
+@@ -1071,10 +1080,15 @@
+                     > release_radius_cells ** 2
+                 ):
+                     continue
+-                occupied[
++                cell = (
+                     center_cell + row_offset,
+                     center_cell + column_offset,
+-                ] = False
++                )
++                # 드론 주변에서 해제하는 것은 팽창 버퍼뿐이다. LiDAR 원본
++                # 포인트로 직접 점유된 셀은 그대로 유지해 A*가 실제 나무를
++                # 통과 가능한 셀로 오인하지 않게 한다.
++                if not raw_occupied[cell]:
++                    occupied[cell] = False
+ 
+         goal_distance = min(
+             float(

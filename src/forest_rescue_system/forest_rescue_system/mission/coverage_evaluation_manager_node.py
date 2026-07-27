@@ -125,6 +125,10 @@ class CoverageEvaluationManagerNode(TimestampedNode):
         self.initial_takeoff_requested = False
         self.failed_drones = set()
         self.forward_finished = set()
+        # 정방향 완료 드론에 CONTINUE_REVERSE를 중복 발행하지 않기 위한 집합.
+        # 다른 드론의 정방향 완료를 기다리지 않고 드론별로 즉시 역방향을
+        # 시작하되, 최종 완료 판정은 기존처럼 전체 정상 드론을 대상으로 한다.
+        self.reverse_started = set()
         self.reverse_finished = set()
         self.latest_coverage_statistics = None
         self.latest_statistics_received_wall = float("-inf")
@@ -217,7 +221,25 @@ class CoverageEvaluationManagerNode(TimestampedNode):
             return
 
         if status == "SEARCH_FORWARD_FINISHED":
+            first_report = drone_id not in self.forward_finished
             self.forward_finished.add(drone_id)
+            if (
+                first_report
+                and drone_id not in self.failed_drones
+                and drone_id not in self.reverse_started
+            ):
+                self.reverse_started.add(drone_id)
+                self._send_command(drone_id, "CONTINUE_REVERSE")
+                remaining = [
+                    item
+                    for item in self._active_drones()
+                    if item not in self.forward_finished
+                ]
+                self.get_logger().warning(
+                    f"{drone_id} 정방향 수색 완료: 다른 드론을 기다리지 않고 "
+                    "즉시 역방향 수색을 시작합니다. "
+                    f"정방향 진행 중={remaining}"
+                )
             self._try_begin_forward_snapshot()
             return
 
@@ -285,6 +307,7 @@ class CoverageEvaluationManagerNode(TimestampedNode):
 
         self.failed_drones.clear()
         self.forward_finished.clear()
+        self.reverse_started.clear()
         self.reverse_finished.clear()
         self.forward_snapshot = None
         self.final_snapshot = None
@@ -317,8 +340,9 @@ class CoverageEvaluationManagerNode(TimestampedNode):
         self.snapshot_started_wall = time.monotonic()
         self._publish_state("EVAL_FORWARD_SNAPSHOT")
         self.get_logger().warning(
-            "모든 정상 드론의 정방향 수색 완료: 마지막 카메라 프레임을 "
-            "반영한 뒤 정방향 커버리지를 저장합니다."
+            "모든 정상 드론의 정방향 수색 완료: 드론별 역방향 수색은 이미 "
+            "독립적으로 진행 중이며, 마지막 카메라 프레임을 반영한 뒤 "
+            "정방향 완료 시점의 커버리지 체크포인트를 저장합니다."
         )
 
     def _try_begin_final_snapshot(self):
@@ -392,7 +416,11 @@ class CoverageEvaluationManagerNode(TimestampedNode):
                 f"{snapshot['total_area_m2']:.2f}m²)"
             )
             self._publish_state("EVAL_REVERSE")
-            self._send_active("CONTINUE_REVERSE")
+            # CONTINUE_REVERSE는 각 드론의 SEARCH_FORWARD_FINISHED 수신 즉시
+            # 개별 전송했다. 여기서 함대 전체에 다시 보내지 않는다.
+            # 먼저 역방향까지 마친 드론이 있을 수 있으므로 상태 전환 직후
+            # 최종 스냅샷 조건을 한 번 더 확인한다.
+            self._try_begin_final_snapshot()
             return
 
         self.final_snapshot = snapshot
@@ -560,6 +588,11 @@ class CoverageEvaluationManagerNode(TimestampedNode):
             "forward_reverse": final,
             "reverse_gain": reverse_gain,
             "search_repeat_mode": "forward_reverse_once",
+            "pass_transition_mode": "per_drone_immediate",
+            "forward_checkpoint_note": (
+                "드론별 역방향을 즉시 시작하므로 forward 체크포인트에는 "
+                "먼저 완료한 드론의 초기 역방향 관측이 포함될 수 있음"
+            ),
             "coverage_denominator": "terrain_triangle_surface_area_m2",
         }
 

@@ -1,0 +1,27 @@
+coverage_visualization_node.py 수동 변경 위치
+============================================
+
+1) 기본 최대 레이 거리
+
+기존:
+    self.declare_parameter("maximum_depth_m", 30.0)
+
+변경:
+    self.declare_parameter("maximum_depth_m", 13.0)
+
+2) 파라미터 추가
+
+`drone_04_color_rgb` 다음, `warning_period_sec` 앞에 추가:
+
+    # exact Depth timestamp TF가 아직 도착하지 않았을 때 최신 TF를
+    # 제한적으로 사용한다. 허용 시각차를 넘으면 프레임은 누적하지 않는다.
+    self.declare_parameter("tf_latest_fallback_enabled", True)
+    self.declare_parameter("tf_latest_fallback_max_age_sec", 0.15)
+
+3) `_process_drone()`의 exact TF try/except 블록
+
+직접 붙여넣기보다 tools/apply_coverage_tf_fallback.py 실행을 권장합니다.
+이 스크립트가 현재 브랜치의 정확한 블록만 찾아 백업 후 교체합니다.
+
+실행:
+    python3 tools/apply_coverage_tf_fallback.py --workspace ~/b3_cobot3_ws

@@ -73,21 +73,12 @@ class ObstacleMonitorNode(TimestampedNode):
             "/drone_01/navigation/direction_body_rad",
         )
         self.declare_parameter(
-            "avoidance_probe_direction_topic",
-            "/drone_01/navigation/avoidance_probe_direction_body_rad",
-        )
-        self.declare_parameter("avoidance_probe_direction_max_age_sec", 0.6)
-        self.declare_parameter(
             "clearances_topic",
             "/drone_01/obstacle/clearances",
         )
         self.declare_parameter(
             "avoidance_vector_topic",
             "/drone_01/obstacle/avoidance_vector",
-        )
-        self.declare_parameter(
-            "avoidance_source_topic",
-            "/drone_01/obstacle/avoidance_source",
         )
         self.declare_parameter(
             "local_detour_topic",
@@ -108,7 +99,7 @@ class ObstacleMonitorNode(TimestampedNode):
             ],
         )
         self.declare_parameter("candidate_sector_half_angle_deg", 20.0)
-        self.declare_parameter("candidate_min_clearance_m", 2.0)
+        self.declare_parameter("candidate_min_clearance_m", 3.0)
         self.declare_parameter("candidate_score_distance_cap_m", 15.0)
         self.declare_parameter("candidate_turn_penalty", 1.2)
         # 빈 공간만 넓다고 원래 목표에서 멀어지는 방향을 고르지 않도록
@@ -125,7 +116,7 @@ class ObstacleMonitorNode(TimestampedNode):
         self.declare_parameter("gap_following_enabled", True)
         self.declare_parameter("gap_sample_step_deg", 5.0)
         self.declare_parameter("gap_sector_half_angle_deg", 7.5)
-        self.declare_parameter("gap_min_clearance_m", 1.80)
+        self.declare_parameter("gap_min_clearance_m", 1.20)
         self.declare_parameter("gap_min_width_deg", 15.0)
         self.declare_parameter("gap_width_weight", 0.035)
         self.declare_parameter("gap_forward_weight", 4.0)
@@ -148,10 +139,7 @@ class ObstacleMonitorNode(TimestampedNode):
         self.declare_parameter("planner_start_release_radius_m", 0.50)
         # A* 경로의 첫 구간이 목표 방향으로 충분히 전진할 때만
         # 로컬 우회점으로 사용한다. 순수 측면·후진 경로는 거부한다.
-        # A*가 확보한 짧은 전진 구간도 방향 힌트로 사용한다. 컨트롤러가
-        # 다시 전진량/비율을 검사하므로 여기서 lookahead 전체(0.75m)를
-        # 강제해 유효 경로를 NONE으로 버리지 않는다.
-        self.declare_parameter("local_planner_min_forward_progress_m", 0.20)
+        self.declare_parameter("local_planner_min_forward_progress_m", 0.75)
         self.declare_parameter(
             "active_mission_states",
             [
@@ -196,11 +184,6 @@ class ObstacleMonitorNode(TimestampedNode):
             str(self.get_parameter("avoidance_vector_topic").value),
             10,
         )
-        self.avoidance_source_publisher = self.create_publisher(
-            String,
-            str(self.get_parameter("avoidance_source_topic").value),
-            10,
-        )
         self.local_detour_publisher = self.create_publisher(
             Vector3Stamped,
             str(self.get_parameter("local_detour_topic").value),
@@ -227,16 +210,6 @@ class ObstacleMonitorNode(TimestampedNode):
             Float32,
             str(self.get_parameter("movement_direction_topic").value),
             self._movement_direction_callback,
-            10,
-        )
-        self.create_subscription(
-            Float32,
-            str(
-                self.get_parameter(
-                    "avoidance_probe_direction_topic"
-                ).value
-            ),
-            self._avoidance_probe_direction_callback,
             10,
         )
         self.create_subscription(
@@ -268,7 +241,6 @@ class ObstacleMonitorNode(TimestampedNode):
         self.preferred_avoidance_side = 0
         self.preferred_avoidance_side_until = float("-inf")
         self.last_avoidance_selection_time = float("-inf")
-        self.last_recommendation_source = "UNINITIALIZED"
         self.processing_period_sec = max(
             0.02,
             float(self.get_parameter("processing_period_sec").value),
@@ -276,8 +248,6 @@ class ObstacleMonitorNode(TimestampedNode):
         # LiDAR body frame의 +X축을 0 rad로 사용한다. 컨트롤러가 다음
         # Waypoint 방향을 body frame 각도로 계속 갱신한다.
         self.movement_direction_rad = 0.0
-        self.avoidance_probe_direction_rad = 0.0
-        self.avoidance_probe_direction_received_wall = float("-inf")
         self.warning_period_sec = max(
             0.1,
             float(self.get_parameter("warning_period_sec").value),
@@ -297,14 +267,6 @@ class ObstacleMonitorNode(TimestampedNode):
             self.last_local_plan_time = float("-inf")
         self.movement_direction_rad = new_direction
 
-    def _avoidance_probe_direction_callback(self, message):
-        # 임시 우회점의 충돌 검사축만 바꾼다. A* 목표축과 캐시는 건드리지
-        # 않아 짧은 회피 Setpoint가 원래 Waypoint를 대체하지 않게 한다.
-        self.avoidance_probe_direction_rad = self._wrap_angle(
-            float(message.data)
-        )
-        self.avoidance_probe_direction_received_wall = time.monotonic()
-
     def _mission_state_callback(self, message):
         state = message.data.strip().upper()
         enabled = state in self.active_mission_states
@@ -321,7 +283,6 @@ class ObstacleMonitorNode(TimestampedNode):
         self.local_astar_path_body = []
         self.local_plan_source = "NONE"
         self.local_plan_status = "NOT_REQUESTED"
-        self.avoidance_probe_direction_received_wall = float("-inf")
         self.latest_accumulated_x = np.empty(0, dtype=np.float32)
         self.latest_accumulated_y = np.empty(0, dtype=np.float32)
         self.latest_accumulated_stamp_sec = float("-inf")
@@ -446,27 +407,7 @@ class ObstacleMonitorNode(TimestampedNode):
             self._publish_result(float("inf"), float("inf"), float("inf"), False)
             return
 
-        # planning_center는 항상 원래 Waypoint 방향이며 A*/FGM/VFH 목표축에
-        # 사용한다. safety_center만 짧은 임시 우회점 방향을 따라가므로,
-        # 후보 충돌검사 때문에 A* 목표가 순간적으로 돌아가지 않는다.
-        planning_center = self.movement_direction_rad
-        probe_age_wall = (
-            time.monotonic()
-            - self.avoidance_probe_direction_received_wall
-        )
-        probe_max_age = max(
-            0.1,
-            float(
-                self.get_parameter(
-                    "avoidance_probe_direction_max_age_sec"
-                ).value
-            ),
-        )
-        safety_center = (
-            self.avoidance_probe_direction_rad
-            if 0.0 <= probe_age_wall <= probe_max_age
-            else planning_center
-        )
+        center = self.movement_direction_rad
         front_half = math.radians(
             float(self.get_parameter("front_sector_half_angle_deg").value)
         )
@@ -485,14 +426,14 @@ class ObstacleMonitorNode(TimestampedNode):
         )
         planning_front_mask = (
             np.abs(
-                self._angle_difference(planning_angles, safety_center)
+                self._angle_difference(planning_angles, center)
             )
             <= front_half
         )
         planning_left_mask = (
             np.abs(
                 self._angle_difference(
-                    planning_angles, safety_center + side_offset
+                    planning_angles, center + side_offset
                 )
             )
             <= side_half
@@ -500,7 +441,7 @@ class ObstacleMonitorNode(TimestampedNode):
         planning_right_mask = (
             np.abs(
                 self._angle_difference(
-                    planning_angles, safety_center - side_offset
+                    planning_angles, center - side_offset
                 )
             )
             <= side_half
@@ -513,15 +454,13 @@ class ObstacleMonitorNode(TimestampedNode):
             + z[safety_mask] ** 2
         )
         safety_front_mask = (
-            np.abs(
-                self._angle_difference(safety_angles, safety_center)
-            )
+            np.abs(self._angle_difference(safety_angles, center))
             <= front_half
         )
         safety_left_mask = (
             np.abs(
                 self._angle_difference(
-                    safety_angles, safety_center + side_offset
+                    safety_angles, center + side_offset
                 )
             )
             <= side_half
@@ -529,7 +468,7 @@ class ObstacleMonitorNode(TimestampedNode):
         safety_right_mask = (
             np.abs(
                 self._angle_difference(
-                    safety_angles, safety_center - side_offset
+                    safety_angles, center - side_offset
                 )
             )
             <= side_half
@@ -559,10 +498,9 @@ class ObstacleMonitorNode(TimestampedNode):
         ) = self._select_gap_following_direction(
             planning_angles,
             planning_distances,
-            planning_center,
+            center,
             measurement_time,
         )
-        recommendation_source = "FGM" if recommended_valid else "NONE"
         if not recommended_valid:
             (
                 recommended_direction_rad,
@@ -571,29 +509,9 @@ class ObstacleMonitorNode(TimestampedNode):
             ) = self._select_avoidance_direction(
                 planning_angles,
                 planning_distances,
-                planning_center,
+                center,
                 measurement_time,
             )
-            recommendation_source = "VFH" if recommended_valid else "NONE"
-        if recommendation_source != self.last_recommendation_source:
-            if recommendation_source == "FGM":
-                self.get_logger().info(
-                    "[FGM] 선택 성공: "
-                    f"추천={math.degrees(recommended_direction_rad):.0f}°, "
-                    f"여유={recommended_clearance_m:.2f}m"
-                )
-            elif recommendation_source == "VFH":
-                self.get_logger().warning(
-                    "[FGM] 조건을 만족하는 연속 gap 없음 → "
-                    "[VFH] 대체 방향 선택: "
-                    f"추천={math.degrees(recommended_direction_rad):.0f}°, "
-                    f"여유={recommended_clearance_m:.2f}m"
-                )
-            else:
-                self.get_logger().warning(
-                    "[FGM] 실패 및 [VFH] 대체 후보 없음"
-                )
-            self.last_recommendation_source = recommendation_source
         safety_distance = float(
             self.get_parameter("safety_distance_m").value
         )
@@ -655,10 +573,7 @@ class ObstacleMonitorNode(TimestampedNode):
             proactive_blocked,
             proactive_nearest_m,
             proactive_voxel_count,
-        ) = self._proactive_corridor_check(
-            planning_center,
-            measurement_time,
-        )
+        ) = self._proactive_corridor_check(center, measurement_time)
 
         # 누적 PointCloud의 선제 통로 판정은 경로계획에만 사용한다.
         # 오래 남은 voxel이나 시야 전환 흔적만으로 드론을 Hover시키지 않는다.
@@ -709,7 +624,7 @@ class ObstacleMonitorNode(TimestampedNode):
                 ) = self._plan_local_detour(
                     obstacle_x,
                     obstacle_y,
-                    planning_center,
+                    center,
                 )
                 if self.local_detour_valid:
                     self.local_plan_source = plan_input_source
@@ -745,7 +660,6 @@ class ObstacleMonitorNode(TimestampedNode):
             recommended_direction_rad=recommended_direction_rad,
             recommended_clearance_m=recommended_clearance_m,
             recommended_valid=recommended_valid,
-            recommendation_source=recommendation_source,
             reactive_blocked=reactive_blocked,
             emergency_blocked=emergency_blocked,
             emergency_front_blocked=emergency_front_blocked,
@@ -855,7 +769,6 @@ class ObstacleMonitorNode(TimestampedNode):
         recommended_direction_rad=0.0,
         recommended_clearance_m=0.0,
         recommended_valid=False,
-        recommendation_source="NONE",
         reactive_blocked=False,
         emergency_blocked=False,
         emergency_front_blocked=False,
@@ -897,22 +810,11 @@ class ObstacleMonitorNode(TimestampedNode):
         avoidance.header = clearances.header
         # x: LiDAR body frame 기준 추천 진행각(rad)
         # y: 해당 후보 섹터의 실제 최소 여유거리(m)
-        # z: 1.0=FGM, 2.0=VFH, 0.0=검증된 회피 방향 없음.
-        # source 토픽과 별개로 같은 메시지에 출처를 함께 실어 DDS 토픽 간
-        # 도착 순서 차이로 컨트롤러 우선순위가 바뀌지 않게 한다.
+        # z: 1.0이면 유효, 0.0이면 검증된 회피 방향 없음
         avoidance.vector.x = float(recommended_direction_rad)
         avoidance.vector.y = float(recommended_clearance_m)
-        avoidance.vector.z = (
-            1.0
-            if recommendation_source == "FGM"
-            else 2.0
-            if recommendation_source == "VFH"
-            else 0.0
-        )
+        avoidance.vector.z = 1.0 if recommended_valid else 0.0
         self.avoidance_vector_publisher.publish(avoidance)
-        source_message = String()
-        source_message.data = recommendation_source
-        self.avoidance_source_publisher.publish(source_message)
 
         local_detour = Vector3Stamped()
         local_detour.header = clearances.header
@@ -939,11 +841,10 @@ class ObstacleMonitorNode(TimestampedNode):
             and now - self.last_warning_time >= self.warning_period_sec
         ):
             recommendation = (
-                f"{recommendation_source}:"
                 f"{math.degrees(recommended_direction_rad):.0f}°/"
                 f"{recommended_clearance_m:.2f}m"
                 if recommended_valid
-                else "NONE[FGM·VFH 모두 실패]"
+                else "NONE"
             )
             local_plan = (
                 f"{self.local_plan_source}:"
@@ -974,14 +875,14 @@ class ObstacleMonitorNode(TimestampedNode):
                     f"좌측={left_distance:.2f}m, "
                     f"우측={right_distance:.2f}m, "
                     f"360°최소={nearest_360_distance:.2f}m, "
-                    f"수평추천={recommendation}, 로컬A*={local_plan}"
+                    f"VFH참고={recommendation}, 로컬A*={local_plan}"
                 )
             else:
                 self.get_logger().info(
                     "선제 통로 장애물 예고(정지하지 않음): "
                     f"거리={proactive_nearest_m:.2f}m/"
                     f"{int(proactive_voxel_count)}vox, "
-                    f"수평추천={recommendation}, 로컬A*={local_plan}"
+                    f"VFH참고={recommendation}, 로컬A*={local_plan}"
                 )
             self.last_warning_time = now
         self.last_blocked = blocked
@@ -1437,20 +1338,10 @@ class ObstacleMonitorNode(TimestampedNode):
             detour_x * math.cos(target_angle)
             + detour_y * math.sin(target_angle)
         )
-        configured_minimum_progress = max(
-            0.0,
-            float(
+        minimum_progress = float(
             self.get_parameter(
                 "local_planner_min_forward_progress_m"
             ).value
-            ),
-        )
-        # 우회각이 있으면 0.75m lookahead의 전부가 목표축 전진량일 수 없다.
-        # 실제 선택된 힌트의 15% 또는 설정값 중 작은 값만 최소 조건으로
-        # 삼아, 확보한 전진량만큼 이동하도록 그대로 컨트롤러에 넘긴다.
-        minimum_progress = min(
-            configured_minimum_progress,
-            max(0.05, detour_distance * 0.15),
         )
         if target_forward_progress < minimum_progress:
             self.local_astar_path_body = []

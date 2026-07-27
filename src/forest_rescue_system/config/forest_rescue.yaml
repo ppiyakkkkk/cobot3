@@ -79,13 +79,17 @@ coverage_visualization_node:
     ray_grid_step_px: 4
     minimum_rays_per_triangle: 5
     minimum_depth_m: 0.2
-    maximum_depth_m: 9.0
+    maximum_depth_m: 11.0
     coverage_z_offset_m: 0.05
     flashlight_color_rgb: [1.0, 0.95, 0.70]
     drone_01_color_rgb: [0.55, 0.00, 0.85]
     drone_02_color_rgb: [0.73, 0.33, 0.83]
     drone_03_color_rgb: [0.60, 0.00, 0.50]
     drone_04_color_rgb: [0.90, 0.25, 0.65]
+    # Depth timestamp의 exact TF가 아직 도착하지 않았을 때만 최신 TF를
+    # 제한적으로 사용한다. 0.15초를 넘으면 프레임을 버려 위치 오차를 막는다.
+    tf_latest_fallback_enabled: true
+    tf_latest_fallback_max_age_sec: 0.15
     warning_period_sec: 5.0
 coverage_evaluation_manager_node:
   ros__parameters:
@@ -348,7 +352,7 @@ pointcloud_local_mapper_01:
     maximum_height_m: 2.0
     local_costmap_size_m: 14.0
     local_costmap_resolution_m: 0.25
-    obstacle_inflation_radius_m: 1.1
+    obstacle_inflation_radius_m: 0.7
     self_filter_radius_m: 0.65
     active_mission_states:
     - INITIAL_TAKEOFF
@@ -377,8 +381,11 @@ obstacle_monitor_01:
     planning_obstacle_distance_topic: /drone_01/obstacle/planning_distance
     clearances_topic: /drone_01/obstacle/clearances
     avoidance_vector_topic: /drone_01/obstacle/avoidance_vector
+    avoidance_source_topic: /drone_01/obstacle/avoidance_source
     local_detour_topic: /drone_01/obstacle/local_detour_body
     movement_direction_topic: /drone_01/navigation/direction_body_rad
+    avoidance_probe_direction_topic: /drone_01/navigation/avoidance_probe_direction_body_rad
+    avoidance_probe_direction_max_age_sec: 0.6
     mission_state_topic: /mission/state
     safety_distance_m: 4.5
     emergency_front_distance_m: 1.8
@@ -413,17 +420,27 @@ obstacle_monitor_01:
     - 40.0
     - -60.0
     - 60.0
+    - -80.0
+    - 80.0
     candidate_sector_half_angle_deg: 20.0
-    candidate_min_clearance_m: 3.5
+    candidate_min_clearance_m: 2.0
     candidate_score_distance_cap_m: 15.0
     candidate_turn_penalty: 1.2
     candidate_forward_progress_weight: 3.0
     candidate_side_switch_penalty: 4.0
     candidate_side_hold_sec: 2.0
-    candidate_max_offset_deg: 65.0
+    candidate_max_offset_deg: 80.0
+    gap_following_enabled: true
+    gap_sample_step_deg: 5.0
+    gap_sector_half_angle_deg: 7.5
+    gap_min_clearance_m: 1.8
+    gap_min_width_deg: 15.0
+    gap_width_weight: 0.035
+    gap_forward_weight: 4.0
+    gap_side_switch_penalty: 5.0
     local_grid_size_m: 12.0
     local_grid_resolution_m: 0.25
-    obstacle_inflation_radius_m: 1.1
+    obstacle_inflation_radius_m: 0.7
     local_planner_goal_distance_m: 4.5
     local_planner_lookahead_m: 0.75
     local_planner_period_sec: 0.2
@@ -433,7 +450,7 @@ obstacle_monitor_01:
     proactive_ignore_near_m: 0.8
     proactive_min_obstacle_voxels: 2
     planner_start_release_radius_m: 0.5
-    local_planner_min_forward_progress_m: 0.75
+    local_planner_min_forward_progress_m: 0.20
     warning_period_sec: 5.0
     safety_minimum_height_m: -1.5
     safety_maximum_height_m: 1.0
@@ -449,8 +466,10 @@ drone_controller_01:
     obstacle_clearances_topic: /drone_01/obstacle/clearances
     planning_obstacle_distance_topic: /drone_01/obstacle/planning_distance
     avoidance_vector_topic: /drone_01/obstacle/avoidance_vector
+    avoidance_source_topic: /drone_01/obstacle/avoidance_source
     local_detour_topic: /drone_01/obstacle/local_detour_body
     movement_direction_topic: /drone_01/navigation/direction_body_rad
+    avoidance_probe_direction_topic: /drone_01/navigation/avoidance_probe_direction_body_rad
     path_topic: /drone_01/search_path
     cooperative_plan_topic: /drone_01/mission/cooperative_plan
     cooperative_plan_ack_topic: /drone_01/mission/cooperative_plan_ack
@@ -470,7 +489,8 @@ drone_controller_01:
     waypoint_hold_seconds: 0.2
     waypoint_acceptance_radius_m: 0.8
     waypoint_altitude_tolerance_m: 0.8
-    waypoint_timeout_sec: 75.0
+    waypoint_timeout_sec: 120.0
+    search_require_waypoint_reach: true
     return_timeout_sec: 120.0
     terrain_mesh_path: ~/b3_cobot3_ws/isaac_sim/generated_terrain_mesh.npz
     environment_mesh_path: ~/b3_cobot3_ws/isaac_sim/generated_environment_meshes.npz
@@ -501,7 +521,7 @@ drone_controller_01:
     avoidance_climb_timeout_sec: 15.0
     avoidance_altitude_tolerance_m: 0.5
     avoidance_climb_step_retries: 2
-    avoidance_replan_attempts: 1
+    avoidance_replan_attempts: 2
     avoidance_retry_hover_sec: 0.3
     avoidance_lateral_offset_m: 5.0
     avoidance_forward_offset_m: 2.0
@@ -510,32 +530,42 @@ drone_controller_01:
     avoidance_brake_timeout_sec: 2.5
     avoidance_stopped_speed_m_s: 0.35
     avoidance_direction_check_sec: 0.30
-    avoidance_front_clearance_m: 3.5
+    avoidance_front_clearance_m: 2.0
     avoidance_probe_distance_m: 1.0
-    avoidance_direction_hint_step_m: 0.75
-    avoidance_direction_attempts: 7
-    avoidance_min_forward_progress_m: 0.75
-    search_horizontal_avoidance_budget_per_waypoint: 1
+    avoidance_direction_hint_step_m: 1.20
+    horizontal_avoidance_step_floor_m: 1.20
+    avoidance_direction_attempts: 11
+    horizontal_avoidance_attempts_floor: 11
+    avoidance_min_forward_progress_m: 0.20
+    avoidance_min_forward_progress_ratio: 0.15
+    avoidance_actual_waypoint_progress_m: 0.02
+    avoidance_waypoint_distance_increase_tolerance_m: 0.01
+    search_horizontal_avoidance_budget_per_waypoint: 4
+    horizontal_avoidance_budget_floor: 4
+    horizontal_replan_after_budget_enabled: true
+    horizontal_replan_min_waypoint_progress_m: 0.20
+    horizontal_replan_max_stalled_cycles: 1
     search_high_altitude_skip_horizontal_avoidance: false
-    avoidance_vfh_candidate_angles_deg: [0.0, 20.0, -20.0, 40.0, -40.0, 60.0, -60.0]
-    vertical_escape_allow_waypoint_overrun_for_search: true
+    avoidance_vfh_candidate_angles_deg: [0.0, 20.0, -20.0, 40.0, -40.0, 60.0, -60.0, 80.0, -80.0]
+    vertical_escape_allow_waypoint_overrun_for_search: false
     vertical_escape_waypoint_pass_margin_m: 0.30
     search_high_altitude_threshold_m: 1.0
     search_xy_priority_enabled: true
-    search_keep_high_altitude_after_escape: false
+    search_keep_high_altitude_after_escape: true
     avoidance_max_lateral_offset_m: 2.0
-    avoidance_max_lateral_to_forward_ratio: 0.8
+    avoidance_max_lateral_to_forward_ratio: 6.0
+    avoidance_lateral_to_forward_ratio_floor: 6.0
     avoidance_vector_max_age_sec: 0.8
     local_detour_max_age_sec: 0.8
-    local_detour_hard_stop_distance_m: 1.30
+    local_detour_hard_stop_distance_m: 1.20
     avoidance_keep_yaw_during_detour: true
     avoidance_commit_sec: 0.10
-    avoidance_block_confirm_sec: 0.10
+    avoidance_block_confirm_sec: 0.25
     vertical_escape_min_climb_m: 2.5
     vertical_escape_retry_climb_step_m: 1.5
     vertical_escape_cross_retries: 3
     vertical_escape_keep_high_on_descent_failure: true
-    vertical_escape_min_forward_m: 3.0
+    vertical_escape_min_forward_m: 5.0
     vertical_escape_max_forward_m: 8.0
     vertical_escape_obstacle_pass_margin_m: 1.5
     vertical_escape_extra_forward_m: 2.0
@@ -557,13 +587,14 @@ drone_controller_01:
     search_waypoints: 0,0,-6
     map_frame: map
     search_altitude_recovery_enabled: true
-    search_altitude_recovery_step_m: 2.0
-    search_altitude_recovery_min_excess_m: 1.0
+    search_altitude_recovery_step_m: 0.5
+    search_altitude_recovery_min_excess_m: 2.0
+    vertical_escape_min_high_hold_sec: 8.0
     cooperative_transit_climb_only_enabled: true
     direction_yaw_pre_align_threshold_deg: 75.0
     vertical_escape_descent_front_stop_distance_m: 1.8
     vertical_escape_descent_360_stop_distance_m: 1.8
-    vertical_escape_skip_retry_near_target_m: 1.0
+    vertical_escape_skip_retry_near_target_m: 1.5
     direction_yaw_abort_on_obstacle: true
 human_detector_02:
   ros__parameters:
@@ -674,7 +705,7 @@ pointcloud_local_mapper_02:
     maximum_height_m: 2.0
     local_costmap_size_m: 14.0
     local_costmap_resolution_m: 0.25
-    obstacle_inflation_radius_m: 1.1
+    obstacle_inflation_radius_m: 0.7
     self_filter_radius_m: 0.65
     active_mission_states:
     - INITIAL_TAKEOFF
@@ -703,8 +734,11 @@ obstacle_monitor_02:
     planning_obstacle_distance_topic: /drone_02/obstacle/planning_distance
     clearances_topic: /drone_02/obstacle/clearances
     avoidance_vector_topic: /drone_02/obstacle/avoidance_vector
+    avoidance_source_topic: /drone_02/obstacle/avoidance_source
     local_detour_topic: /drone_02/obstacle/local_detour_body
     movement_direction_topic: /drone_02/navigation/direction_body_rad
+    avoidance_probe_direction_topic: /drone_02/navigation/avoidance_probe_direction_body_rad
+    avoidance_probe_direction_max_age_sec: 0.6
     mission_state_topic: /mission/state
     safety_distance_m: 4.5
     emergency_front_distance_m: 1.8
@@ -739,17 +773,27 @@ obstacle_monitor_02:
     - 40.0
     - -60.0
     - 60.0
+    - -80.0
+    - 80.0
     candidate_sector_half_angle_deg: 20.0
-    candidate_min_clearance_m: 3.5
+    candidate_min_clearance_m: 2.0
     candidate_score_distance_cap_m: 15.0
     candidate_turn_penalty: 1.2
     candidate_forward_progress_weight: 3.0
     candidate_side_switch_penalty: 4.0
     candidate_side_hold_sec: 2.0
-    candidate_max_offset_deg: 65.0
+    candidate_max_offset_deg: 80.0
+    gap_following_enabled: true
+    gap_sample_step_deg: 5.0
+    gap_sector_half_angle_deg: 7.5
+    gap_min_clearance_m: 1.8
+    gap_min_width_deg: 15.0
+    gap_width_weight: 0.035
+    gap_forward_weight: 4.0
+    gap_side_switch_penalty: 5.0
     local_grid_size_m: 12.0
     local_grid_resolution_m: 0.25
-    obstacle_inflation_radius_m: 1.1
+    obstacle_inflation_radius_m: 0.7
     local_planner_goal_distance_m: 4.5
     local_planner_lookahead_m: 0.75
     local_planner_period_sec: 0.2
@@ -759,7 +803,7 @@ obstacle_monitor_02:
     proactive_ignore_near_m: 0.8
     proactive_min_obstacle_voxels: 2
     planner_start_release_radius_m: 0.5
-    local_planner_min_forward_progress_m: 0.75
+    local_planner_min_forward_progress_m: 0.20
     warning_period_sec: 5.0
     safety_minimum_height_m: -1.5
     safety_maximum_height_m: 1.0
@@ -775,8 +819,10 @@ drone_controller_02:
     obstacle_clearances_topic: /drone_02/obstacle/clearances
     planning_obstacle_distance_topic: /drone_02/obstacle/planning_distance
     avoidance_vector_topic: /drone_02/obstacle/avoidance_vector
+    avoidance_source_topic: /drone_02/obstacle/avoidance_source
     local_detour_topic: /drone_02/obstacle/local_detour_body
     movement_direction_topic: /drone_02/navigation/direction_body_rad
+    avoidance_probe_direction_topic: /drone_02/navigation/avoidance_probe_direction_body_rad
     path_topic: /drone_02/search_path
     cooperative_plan_topic: /drone_02/mission/cooperative_plan
     cooperative_plan_ack_topic: /drone_02/mission/cooperative_plan_ack
@@ -796,7 +842,8 @@ drone_controller_02:
     waypoint_hold_seconds: 0.2
     waypoint_acceptance_radius_m: 0.8
     waypoint_altitude_tolerance_m: 0.8
-    waypoint_timeout_sec: 75.0
+    waypoint_timeout_sec: 120.0
+    search_require_waypoint_reach: true
     return_timeout_sec: 120.0
     terrain_mesh_path: ~/b3_cobot3_ws/isaac_sim/generated_terrain_mesh.npz
     environment_mesh_path: ~/b3_cobot3_ws/isaac_sim/generated_environment_meshes.npz
@@ -827,7 +874,7 @@ drone_controller_02:
     avoidance_climb_timeout_sec: 15.0
     avoidance_altitude_tolerance_m: 0.5
     avoidance_climb_step_retries: 2
-    avoidance_replan_attempts: 1
+    avoidance_replan_attempts: 2
     avoidance_retry_hover_sec: 0.3
     avoidance_lateral_offset_m: 5.0
     avoidance_forward_offset_m: 2.0
@@ -836,32 +883,42 @@ drone_controller_02:
     avoidance_brake_timeout_sec: 2.5
     avoidance_stopped_speed_m_s: 0.35
     avoidance_direction_check_sec: 0.30
-    avoidance_front_clearance_m: 3.5
+    avoidance_front_clearance_m: 2.0
     avoidance_probe_distance_m: 1.0
-    avoidance_direction_hint_step_m: 0.75
-    avoidance_direction_attempts: 7
-    avoidance_min_forward_progress_m: 0.75
-    search_horizontal_avoidance_budget_per_waypoint: 1
+    avoidance_direction_hint_step_m: 1.20
+    horizontal_avoidance_step_floor_m: 1.20
+    avoidance_direction_attempts: 11
+    horizontal_avoidance_attempts_floor: 11
+    avoidance_min_forward_progress_m: 0.20
+    avoidance_min_forward_progress_ratio: 0.15
+    avoidance_actual_waypoint_progress_m: 0.02
+    avoidance_waypoint_distance_increase_tolerance_m: 0.01
+    search_horizontal_avoidance_budget_per_waypoint: 4
+    horizontal_avoidance_budget_floor: 4
+    horizontal_replan_after_budget_enabled: true
+    horizontal_replan_min_waypoint_progress_m: 0.20
+    horizontal_replan_max_stalled_cycles: 1
     search_high_altitude_skip_horizontal_avoidance: false
-    avoidance_vfh_candidate_angles_deg: [0.0, 20.0, -20.0, 40.0, -40.0, 60.0, -60.0]
-    vertical_escape_allow_waypoint_overrun_for_search: true
+    avoidance_vfh_candidate_angles_deg: [0.0, 20.0, -20.0, 40.0, -40.0, 60.0, -60.0, 80.0, -80.0]
+    vertical_escape_allow_waypoint_overrun_for_search: false
     vertical_escape_waypoint_pass_margin_m: 0.30
     search_high_altitude_threshold_m: 1.0
     search_xy_priority_enabled: true
-    search_keep_high_altitude_after_escape: false
+    search_keep_high_altitude_after_escape: true
     avoidance_max_lateral_offset_m: 2.0
-    avoidance_max_lateral_to_forward_ratio: 0.8
+    avoidance_max_lateral_to_forward_ratio: 6.0
+    avoidance_lateral_to_forward_ratio_floor: 6.0
     avoidance_vector_max_age_sec: 0.8
     local_detour_max_age_sec: 0.8
-    local_detour_hard_stop_distance_m: 1.30
+    local_detour_hard_stop_distance_m: 1.20
     avoidance_keep_yaw_during_detour: true
     avoidance_commit_sec: 0.10
-    avoidance_block_confirm_sec: 0.10
+    avoidance_block_confirm_sec: 0.25
     vertical_escape_min_climb_m: 2.5
     vertical_escape_retry_climb_step_m: 1.5
     vertical_escape_cross_retries: 3
     vertical_escape_keep_high_on_descent_failure: true
-    vertical_escape_min_forward_m: 3.0
+    vertical_escape_min_forward_m: 5.0
     vertical_escape_max_forward_m: 8.0
     vertical_escape_obstacle_pass_margin_m: 1.5
     vertical_escape_extra_forward_m: 2.0
@@ -883,13 +940,14 @@ drone_controller_02:
     search_waypoints: 0,0,-6
     map_frame: map
     search_altitude_recovery_enabled: true
-    search_altitude_recovery_step_m: 2.0
-    search_altitude_recovery_min_excess_m: 1.0
+    search_altitude_recovery_step_m: 0.5
+    search_altitude_recovery_min_excess_m: 2.0
+    vertical_escape_min_high_hold_sec: 8.0
     cooperative_transit_climb_only_enabled: true
     direction_yaw_pre_align_threshold_deg: 75.0
     vertical_escape_descent_front_stop_distance_m: 1.8
     vertical_escape_descent_360_stop_distance_m: 1.8
-    vertical_escape_skip_retry_near_target_m: 1.0
+    vertical_escape_skip_retry_near_target_m: 1.5
     direction_yaw_abort_on_obstacle: true
 human_detector_03:
   ros__parameters:
@@ -1000,7 +1058,7 @@ pointcloud_local_mapper_03:
     maximum_height_m: 2.0
     local_costmap_size_m: 14.0
     local_costmap_resolution_m: 0.25
-    obstacle_inflation_radius_m: 1.1
+    obstacle_inflation_radius_m: 0.7
     self_filter_radius_m: 0.65
     active_mission_states:
     - INITIAL_TAKEOFF
@@ -1029,8 +1087,11 @@ obstacle_monitor_03:
     planning_obstacle_distance_topic: /drone_03/obstacle/planning_distance
     clearances_topic: /drone_03/obstacle/clearances
     avoidance_vector_topic: /drone_03/obstacle/avoidance_vector
+    avoidance_source_topic: /drone_03/obstacle/avoidance_source
     local_detour_topic: /drone_03/obstacle/local_detour_body
     movement_direction_topic: /drone_03/navigation/direction_body_rad
+    avoidance_probe_direction_topic: /drone_03/navigation/avoidance_probe_direction_body_rad
+    avoidance_probe_direction_max_age_sec: 0.6
     mission_state_topic: /mission/state
     safety_distance_m: 4.5
     emergency_front_distance_m: 1.8
@@ -1065,17 +1126,27 @@ obstacle_monitor_03:
     - 40.0
     - -60.0
     - 60.0
+    - -80.0
+    - 80.0
     candidate_sector_half_angle_deg: 20.0
-    candidate_min_clearance_m: 3.5
+    candidate_min_clearance_m: 2.0
     candidate_score_distance_cap_m: 15.0
     candidate_turn_penalty: 1.2
     candidate_forward_progress_weight: 3.0
     candidate_side_switch_penalty: 4.0
     candidate_side_hold_sec: 2.0
-    candidate_max_offset_deg: 65.0
+    candidate_max_offset_deg: 80.0
+    gap_following_enabled: true
+    gap_sample_step_deg: 5.0
+    gap_sector_half_angle_deg: 7.5
+    gap_min_clearance_m: 1.8
+    gap_min_width_deg: 15.0
+    gap_width_weight: 0.035
+    gap_forward_weight: 4.0
+    gap_side_switch_penalty: 5.0
     local_grid_size_m: 12.0
     local_grid_resolution_m: 0.25
-    obstacle_inflation_radius_m: 1.1
+    obstacle_inflation_radius_m: 0.7
     local_planner_goal_distance_m: 4.5
     local_planner_lookahead_m: 0.75
     local_planner_period_sec: 0.2
@@ -1085,7 +1156,7 @@ obstacle_monitor_03:
     proactive_ignore_near_m: 0.8
     proactive_min_obstacle_voxels: 2
     planner_start_release_radius_m: 0.5
-    local_planner_min_forward_progress_m: 0.75
+    local_planner_min_forward_progress_m: 0.20
     warning_period_sec: 5.0
     safety_minimum_height_m: -1.5
     safety_maximum_height_m: 1.0
@@ -1101,8 +1172,10 @@ drone_controller_03:
     obstacle_clearances_topic: /drone_03/obstacle/clearances
     planning_obstacle_distance_topic: /drone_03/obstacle/planning_distance
     avoidance_vector_topic: /drone_03/obstacle/avoidance_vector
+    avoidance_source_topic: /drone_03/obstacle/avoidance_source
     local_detour_topic: /drone_03/obstacle/local_detour_body
     movement_direction_topic: /drone_03/navigation/direction_body_rad
+    avoidance_probe_direction_topic: /drone_03/navigation/avoidance_probe_direction_body_rad
     path_topic: /drone_03/search_path
     cooperative_plan_topic: /drone_03/mission/cooperative_plan
     cooperative_plan_ack_topic: /drone_03/mission/cooperative_plan_ack
@@ -1122,7 +1195,8 @@ drone_controller_03:
     waypoint_hold_seconds: 0.2
     waypoint_acceptance_radius_m: 0.8
     waypoint_altitude_tolerance_m: 0.8
-    waypoint_timeout_sec: 75.0
+    waypoint_timeout_sec: 120.0
+    search_require_waypoint_reach: true
     return_timeout_sec: 120.0
     terrain_mesh_path: ~/b3_cobot3_ws/isaac_sim/generated_terrain_mesh.npz
     environment_mesh_path: ~/b3_cobot3_ws/isaac_sim/generated_environment_meshes.npz
@@ -1153,7 +1227,7 @@ drone_controller_03:
     avoidance_climb_timeout_sec: 15.0
     avoidance_altitude_tolerance_m: 0.5
     avoidance_climb_step_retries: 2
-    avoidance_replan_attempts: 1
+    avoidance_replan_attempts: 2
     avoidance_retry_hover_sec: 0.3
     avoidance_lateral_offset_m: 5.0
     avoidance_forward_offset_m: 2.0
@@ -1162,32 +1236,42 @@ drone_controller_03:
     avoidance_brake_timeout_sec: 2.5
     avoidance_stopped_speed_m_s: 0.35
     avoidance_direction_check_sec: 0.30
-    avoidance_front_clearance_m: 3.5
+    avoidance_front_clearance_m: 2.0
     avoidance_probe_distance_m: 1.0
-    avoidance_direction_hint_step_m: 0.75
-    avoidance_direction_attempts: 7
-    avoidance_min_forward_progress_m: 0.75
-    search_horizontal_avoidance_budget_per_waypoint: 1
+    avoidance_direction_hint_step_m: 1.20
+    horizontal_avoidance_step_floor_m: 1.20
+    avoidance_direction_attempts: 11
+    horizontal_avoidance_attempts_floor: 11
+    avoidance_min_forward_progress_m: 0.20
+    avoidance_min_forward_progress_ratio: 0.15
+    avoidance_actual_waypoint_progress_m: 0.02
+    avoidance_waypoint_distance_increase_tolerance_m: 0.01
+    search_horizontal_avoidance_budget_per_waypoint: 4
+    horizontal_avoidance_budget_floor: 4
+    horizontal_replan_after_budget_enabled: true
+    horizontal_replan_min_waypoint_progress_m: 0.20
+    horizontal_replan_max_stalled_cycles: 1
     search_high_altitude_skip_horizontal_avoidance: false
-    avoidance_vfh_candidate_angles_deg: [0.0, 20.0, -20.0, 40.0, -40.0, 60.0, -60.0]
-    vertical_escape_allow_waypoint_overrun_for_search: true
+    avoidance_vfh_candidate_angles_deg: [0.0, 20.0, -20.0, 40.0, -40.0, 60.0, -60.0, 80.0, -80.0]
+    vertical_escape_allow_waypoint_overrun_for_search: false
     vertical_escape_waypoint_pass_margin_m: 0.30
     search_high_altitude_threshold_m: 1.0
     search_xy_priority_enabled: true
-    search_keep_high_altitude_after_escape: false
+    search_keep_high_altitude_after_escape: true
     avoidance_max_lateral_offset_m: 2.0
-    avoidance_max_lateral_to_forward_ratio: 0.8
+    avoidance_max_lateral_to_forward_ratio: 6.0
+    avoidance_lateral_to_forward_ratio_floor: 6.0
     avoidance_vector_max_age_sec: 0.8
     local_detour_max_age_sec: 0.8
-    local_detour_hard_stop_distance_m: 1.30
+    local_detour_hard_stop_distance_m: 1.20
     avoidance_keep_yaw_during_detour: true
     avoidance_commit_sec: 0.10
-    avoidance_block_confirm_sec: 0.10
+    avoidance_block_confirm_sec: 0.25
     vertical_escape_min_climb_m: 2.5
     vertical_escape_retry_climb_step_m: 1.5
     vertical_escape_cross_retries: 3
     vertical_escape_keep_high_on_descent_failure: true
-    vertical_escape_min_forward_m: 3.0
+    vertical_escape_min_forward_m: 5.0
     vertical_escape_max_forward_m: 8.0
     vertical_escape_obstacle_pass_margin_m: 1.5
     vertical_escape_extra_forward_m: 2.0
@@ -1209,13 +1293,14 @@ drone_controller_03:
     search_waypoints: 0,0,-6
     map_frame: map
     search_altitude_recovery_enabled: true
-    search_altitude_recovery_step_m: 2.0
-    search_altitude_recovery_min_excess_m: 1.0
+    search_altitude_recovery_step_m: 0.5
+    search_altitude_recovery_min_excess_m: 2.0
+    vertical_escape_min_high_hold_sec: 8.0
     cooperative_transit_climb_only_enabled: true
     direction_yaw_pre_align_threshold_deg: 75.0
     vertical_escape_descent_front_stop_distance_m: 1.8
     vertical_escape_descent_360_stop_distance_m: 1.8
-    vertical_escape_skip_retry_near_target_m: 1.0
+    vertical_escape_skip_retry_near_target_m: 1.5
     direction_yaw_abort_on_obstacle: true
 human_detector_04:
   ros__parameters:
@@ -1326,7 +1411,7 @@ pointcloud_local_mapper_04:
     maximum_height_m: 2.0
     local_costmap_size_m: 14.0
     local_costmap_resolution_m: 0.25
-    obstacle_inflation_radius_m: 1.1
+    obstacle_inflation_radius_m: 0.7
     self_filter_radius_m: 0.65
     active_mission_states:
     - INITIAL_TAKEOFF
@@ -1355,8 +1440,11 @@ obstacle_monitor_04:
     planning_obstacle_distance_topic: /drone_04/obstacle/planning_distance
     clearances_topic: /drone_04/obstacle/clearances
     avoidance_vector_topic: /drone_04/obstacle/avoidance_vector
+    avoidance_source_topic: /drone_04/obstacle/avoidance_source
     local_detour_topic: /drone_04/obstacle/local_detour_body
     movement_direction_topic: /drone_04/navigation/direction_body_rad
+    avoidance_probe_direction_topic: /drone_04/navigation/avoidance_probe_direction_body_rad
+    avoidance_probe_direction_max_age_sec: 0.6
     mission_state_topic: /mission/state
     safety_distance_m: 4.5
     emergency_front_distance_m: 1.8
@@ -1391,17 +1479,27 @@ obstacle_monitor_04:
     - 40.0
     - -60.0
     - 60.0
+    - -80.0
+    - 80.0
     candidate_sector_half_angle_deg: 20.0
-    candidate_min_clearance_m: 3.5
+    candidate_min_clearance_m: 2.0
     candidate_score_distance_cap_m: 15.0
     candidate_turn_penalty: 1.2
     candidate_forward_progress_weight: 3.0
     candidate_side_switch_penalty: 4.0
     candidate_side_hold_sec: 2.0
-    candidate_max_offset_deg: 65.0
+    candidate_max_offset_deg: 80.0
+    gap_following_enabled: true
+    gap_sample_step_deg: 5.0
+    gap_sector_half_angle_deg: 7.5
+    gap_min_clearance_m: 1.8
+    gap_min_width_deg: 15.0
+    gap_width_weight: 0.035
+    gap_forward_weight: 4.0
+    gap_side_switch_penalty: 5.0
     local_grid_size_m: 12.0
     local_grid_resolution_m: 0.25
-    obstacle_inflation_radius_m: 1.1
+    obstacle_inflation_radius_m: 0.7
     local_planner_goal_distance_m: 4.5
     local_planner_lookahead_m: 0.75
     local_planner_period_sec: 0.2
@@ -1411,7 +1509,7 @@ obstacle_monitor_04:
     proactive_ignore_near_m: 0.8
     proactive_min_obstacle_voxels: 2
     planner_start_release_radius_m: 0.5
-    local_planner_min_forward_progress_m: 0.75
+    local_planner_min_forward_progress_m: 0.20
     warning_period_sec: 5.0
     safety_minimum_height_m: -1.5
     safety_maximum_height_m: 1.0
@@ -1427,8 +1525,10 @@ drone_controller_04:
     obstacle_clearances_topic: /drone_04/obstacle/clearances
     planning_obstacle_distance_topic: /drone_04/obstacle/planning_distance
     avoidance_vector_topic: /drone_04/obstacle/avoidance_vector
+    avoidance_source_topic: /drone_04/obstacle/avoidance_source
     local_detour_topic: /drone_04/obstacle/local_detour_body
     movement_direction_topic: /drone_04/navigation/direction_body_rad
+    avoidance_probe_direction_topic: /drone_04/navigation/avoidance_probe_direction_body_rad
     path_topic: /drone_04/search_path
     cooperative_plan_topic: /drone_04/mission/cooperative_plan
     cooperative_plan_ack_topic: /drone_04/mission/cooperative_plan_ack
@@ -1448,7 +1548,8 @@ drone_controller_04:
     waypoint_hold_seconds: 0.2
     waypoint_acceptance_radius_m: 0.8
     waypoint_altitude_tolerance_m: 0.8
-    waypoint_timeout_sec: 75.0
+    waypoint_timeout_sec: 120.0
+    search_require_waypoint_reach: true
     return_timeout_sec: 120.0
     terrain_mesh_path: ~/b3_cobot3_ws/isaac_sim/generated_terrain_mesh.npz
     environment_mesh_path: ~/b3_cobot3_ws/isaac_sim/generated_environment_meshes.npz
@@ -1479,7 +1580,7 @@ drone_controller_04:
     avoidance_climb_timeout_sec: 15.0
     avoidance_altitude_tolerance_m: 0.5
     avoidance_climb_step_retries: 2
-    avoidance_replan_attempts: 1
+    avoidance_replan_attempts: 2
     avoidance_retry_hover_sec: 0.3
     avoidance_lateral_offset_m: 5.0
     avoidance_forward_offset_m: 2.0
@@ -1488,32 +1589,42 @@ drone_controller_04:
     avoidance_brake_timeout_sec: 2.5
     avoidance_stopped_speed_m_s: 0.35
     avoidance_direction_check_sec: 0.30
-    avoidance_front_clearance_m: 3.5
+    avoidance_front_clearance_m: 2.0
     avoidance_probe_distance_m: 1.0
-    avoidance_direction_hint_step_m: 0.75
-    avoidance_direction_attempts: 7
-    avoidance_min_forward_progress_m: 0.75
-    search_horizontal_avoidance_budget_per_waypoint: 1
+    avoidance_direction_hint_step_m: 1.20
+    horizontal_avoidance_step_floor_m: 1.20
+    avoidance_direction_attempts: 11
+    horizontal_avoidance_attempts_floor: 11
+    avoidance_min_forward_progress_m: 0.20
+    avoidance_min_forward_progress_ratio: 0.15
+    avoidance_actual_waypoint_progress_m: 0.02
+    avoidance_waypoint_distance_increase_tolerance_m: 0.01
+    search_horizontal_avoidance_budget_per_waypoint: 4
+    horizontal_avoidance_budget_floor: 4
+    horizontal_replan_after_budget_enabled: true
+    horizontal_replan_min_waypoint_progress_m: 0.20
+    horizontal_replan_max_stalled_cycles: 1
     search_high_altitude_skip_horizontal_avoidance: false
-    avoidance_vfh_candidate_angles_deg: [0.0, 20.0, -20.0, 40.0, -40.0, 60.0, -60.0]
-    vertical_escape_allow_waypoint_overrun_for_search: true
+    avoidance_vfh_candidate_angles_deg: [0.0, 20.0, -20.0, 40.0, -40.0, 60.0, -60.0, 80.0, -80.0]
+    vertical_escape_allow_waypoint_overrun_for_search: false
     vertical_escape_waypoint_pass_margin_m: 0.30
     search_high_altitude_threshold_m: 1.0
     search_xy_priority_enabled: true
-    search_keep_high_altitude_after_escape: false
+    search_keep_high_altitude_after_escape: true
     avoidance_max_lateral_offset_m: 2.0
-    avoidance_max_lateral_to_forward_ratio: 0.8
+    avoidance_max_lateral_to_forward_ratio: 6.0
+    avoidance_lateral_to_forward_ratio_floor: 6.0
     avoidance_vector_max_age_sec: 0.8
     local_detour_max_age_sec: 0.8
-    local_detour_hard_stop_distance_m: 1.30
+    local_detour_hard_stop_distance_m: 1.20
     avoidance_keep_yaw_during_detour: true
     avoidance_commit_sec: 0.10
-    avoidance_block_confirm_sec: 0.10
+    avoidance_block_confirm_sec: 0.25
     vertical_escape_min_climb_m: 2.5
     vertical_escape_retry_climb_step_m: 1.5
     vertical_escape_cross_retries: 3
     vertical_escape_keep_high_on_descent_failure: true
-    vertical_escape_min_forward_m: 3.0
+    vertical_escape_min_forward_m: 5.0
     vertical_escape_max_forward_m: 8.0
     vertical_escape_obstacle_pass_margin_m: 1.5
     vertical_escape_extra_forward_m: 2.0
@@ -1535,11 +1646,12 @@ drone_controller_04:
     search_waypoints: 0,0,-6
     map_frame: map
     search_altitude_recovery_enabled: true
-    search_altitude_recovery_step_m: 2.0
-    search_altitude_recovery_min_excess_m: 1.0
+    search_altitude_recovery_step_m: 0.5
+    search_altitude_recovery_min_excess_m: 2.0
+    vertical_escape_min_high_hold_sec: 8.0
     cooperative_transit_climb_only_enabled: true
     direction_yaw_pre_align_threshold_deg: 75.0
     vertical_escape_descent_front_stop_distance_m: 1.8
     vertical_escape_descent_360_stop_distance_m: 1.8
-    vertical_escape_skip_retry_near_target_m: 1.0
+    vertical_escape_skip_retry_near_target_m: 1.5
     direction_yaw_abort_on_obstacle: true

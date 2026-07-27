@@ -1,0 +1,21 @@
+--- a/src/forest_rescue_system/config/forest_rescue.yaml
++++ b/src/forest_rescue_system/config/forest_rescue.yaml
+@@ -79,13 +79,17 @@
+     ray_grid_step_px: 4
+     minimum_rays_per_triangle: 5
+     minimum_depth_m: 0.2
+-    maximum_depth_m: 9.0
++    maximum_depth_m: 13.0
+     coverage_z_offset_m: 0.05
+     flashlight_color_rgb: [1.0, 0.95, 0.70]
+     drone_01_color_rgb: [0.55, 0.00, 0.85]
+     drone_02_color_rgb: [0.73, 0.33, 0.83]
+     drone_03_color_rgb: [0.60, 0.00, 0.50]
+     drone_04_color_rgb: [0.90, 0.25, 0.65]
++    # Depth timestamp의 exact TF가 아직 도착하지 않았을 때만 최신 TF를
++    # 제한적으로 사용한다. 0.15초를 넘으면 프레임을 버려 위치 오차를 막는다.
++    tf_latest_fallback_enabled: true
++    tf_latest_fallback_max_age_sec: 0.15
+     warning_period_sec: 5.0
+ coverage_evaluation_manager_node:
+   ros__parameters:

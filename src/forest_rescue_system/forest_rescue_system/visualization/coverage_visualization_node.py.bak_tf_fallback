@@ -107,17 +107,13 @@ class CoverageVisualizationNode(TimestampedNode):
         self.declare_parameter("ray_grid_step_px", 4)
         self.declare_parameter("minimum_rays_per_triangle", 3)
         self.declare_parameter("minimum_depth_m", 0.20)
-        self.declare_parameter("maximum_depth_m", 13.0)
+        self.declare_parameter("maximum_depth_m", 30.0)
         self.declare_parameter("coverage_z_offset_m", 0.05)
         self.declare_parameter("flashlight_color_rgb", [1.0, 0.95, 0.70])
         self.declare_parameter("drone_01_color_rgb", [0.55, 0.00, 0.85])
         self.declare_parameter("drone_02_color_rgb", [0.73, 0.33, 0.83])
         self.declare_parameter("drone_03_color_rgb", [0.60, 0.00, 0.50])
         self.declare_parameter("drone_04_color_rgb", [0.90, 0.25, 0.65])
-        # exact Depth timestamp TF가 아직 도착하지 않았을 때 최신 TF를
-        # 제한적으로 사용한다. 허용 시각차를 넘으면 프레임은 누적하지 않는다.
-        self.declare_parameter("tf_latest_fallback_enabled", True)
-        self.declare_parameter("tf_latest_fallback_max_age_sec", 0.15)
         self.declare_parameter("warning_period_sec", 5.0)
 
         self.operation_mode = str(
@@ -363,7 +359,6 @@ class CoverageVisualizationNode(TimestampedNode):
             return False
 
         camera_frame = f"{drone_id}/camera_optical_frame"
-        exact_tf_error = None
         try:
             transform_stamped = self.tf_buffer.lookup_transform(
                 self.map_frame,
@@ -372,53 +367,12 @@ class CoverageVisualizationNode(TimestampedNode):
                 timeout=Duration(seconds=0.0),
             )
         except TransformException as error:
-            exact_tf_error = error
-            fallback_enabled = bool(
-                self.get_parameter("tf_latest_fallback_enabled").value
+            self.flashlight_state.pop(drone_id, None)
+            self._warn_throttled(
+                f"tf_{drone_id}",
+                f"{drone_id} Camera→map exact TF 대기 중: {error}",
             )
-            if not fallback_enabled:
-                self.flashlight_state.pop(drone_id, None)
-                self._warn_throttled(
-                    f"tf_{drone_id}",
-                    f"{drone_id} Camera→map exact TF 대기 중: {error}",
-                )
-                return False
-            try:
-                transform_stamped = self.tf_buffer.lookup_transform(
-                    self.map_frame,
-                    camera_frame,
-                    Time(),
-                    timeout=Duration(seconds=0.0),
-                )
-            except TransformException as latest_error:
-                self.flashlight_state.pop(drone_id, None)
-                self._warn_throttled(
-                    f"tf_{drone_id}",
-                    f"{drone_id} Camera→map TF 없음: "
-                    f"exact={error}; latest={latest_error}",
-                )
-                return False
-            depth_stamp_ns = _stamp_to_nanoseconds(depth_stamp)
-            tf_stamp_ns = _stamp_to_nanoseconds(transform_stamped.header.stamp)
-            tf_time_error_sec = abs(depth_stamp_ns - tf_stamp_ns) / 1.0e9
-            maximum_fallback_age_sec = max(
-                0.0,
-                float(
-                    self.get_parameter(
-                        "tf_latest_fallback_max_age_sec"
-                    ).value
-                ),
-            )
-            if tf_time_error_sec > maximum_fallback_age_sec:
-                self.flashlight_state.pop(drone_id, None)
-                self._warn_throttled(
-                    f"tf_{drone_id}",
-                    f"{drone_id} Camera→map 최신 TF 시각차 초과: "
-                    f"차이={tf_time_error_sec:.3f}s/"
-                    f"{maximum_fallback_age_sec:.3f}s, "
-                    f"exact_error={exact_tf_error}",
-                )
-                return False
+            return False
 
         transform = transform_stamped.transform
         matrix = coverage_utils.transform_matrix_from_tf(
