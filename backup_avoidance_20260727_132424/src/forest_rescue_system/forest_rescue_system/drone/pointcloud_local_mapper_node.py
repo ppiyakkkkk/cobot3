@@ -52,8 +52,8 @@ class PointCloudLocalMapperNode(TimestampedNode):
         # 오래된 나무 voxel이 좌우 판단을 계속 끌고 가지 않도록 최근
         # 2.5초만 누적한다. A*는 이 짧은 로컬 지도를 방향 힌트로 사용한다.
         self.declare_parameter("accumulation_sec", 2.5)
-        self.declare_parameter("processing_period_sec", 0.20)
-        self.declare_parameter("publish_period_sec", 0.30)
+        self.declare_parameter("processing_period_sec", 0.30)
+        self.declare_parameter("publish_period_sec", 0.50)
         # PointCloud가 TF보다 수십 ms 먼저 도착할 수 있으므로 메시지를 잠시
         # 보류했다가 같은 시각의 TF가 들어오면 처리한다.
         self.declare_parameter("tf_retry_period_sec", 0.05)
@@ -64,9 +64,9 @@ class PointCloudLocalMapperNode(TimestampedNode):
         self.declare_parameter("max_pending_clouds_per_cycle", 2)
         self.declare_parameter("voxel_size_m", 0.35)
         self.declare_parameter("minimum_voxel_observations", 1)
-        self.declare_parameter("maximum_points_per_scan", 12000)
-        self.declare_parameter("minimum_height_m", -1.5)
-        self.declare_parameter("maximum_height_m", 2.0)
+        self.declare_parameter("maximum_points_per_scan", 8000)
+        self.declare_parameter("minimum_height_m", -1.2)
+        self.declare_parameter("maximum_height_m", 1.8)
         self.declare_parameter("local_costmap_size_m", 14.0)
         self.declare_parameter("local_costmap_resolution_m", 0.25)
         self.declare_parameter("obstacle_inflation_radius_m", 1.10)

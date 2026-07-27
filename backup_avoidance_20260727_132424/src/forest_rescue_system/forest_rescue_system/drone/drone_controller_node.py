@@ -178,25 +178,6 @@ class DroneControllerNode(TimestampedNode):
         self.declare_parameter("vertical_escape_descent_timeout_sec", 8.0)
         self.declare_parameter("vertical_escape_descent_retries", 1)
         self.declare_parameter("vertical_escape_descent_clear_sec", 0.4)
-        # 하강 판단은 일반 전방 회피거리(3.5m)와 분리한다. 나무가 멀리
-        # 보인다는 이유만으로 같은 자리에서 상승/하강을 반복하지 않고,
-        # 실제 하강 충돌 위험이 있는 거리에서만 중단한다.
-        self.declare_parameter(
-            "vertical_escape_descent_front_stop_distance_m",
-            1.8,
-        )
-        # 하방 안전 높이대의 점은 방향과 관계없이 3D 최근접거리로 본다.
-        # 하강 중에는 일반 수평 우회의 1.3m보다 조금 일찍 정지한다.
-        self.declare_parameter(
-            "vertical_escape_descent_360_stop_distance_m",
-            1.8,
-        )
-        # 목표 XY에 거의 도착한 상태에서 하강이 막히면 같은 위치에서
-        # 재하강하지 않고 높은 고도를 유지해 다음 Waypoint로 진행한다.
-        self.declare_parameter(
-            "vertical_escape_skip_retry_near_target_m",
-            1.0,
-        )
         self.declare_parameter("victim_approach_timeout_sec", 120.0)
 
         # 수평 이동 전에 기체 전방과 RGB 카메라가 목표 진행방향을
@@ -211,9 +192,6 @@ class DroneControllerNode(TimestampedNode):
         self.declare_parameter("direction_yaw_timeout_sec", 4.0)
         self.declare_parameter("direction_yaw_stable_samples", 1)
         self.declare_parameter("direction_yaw_settle_sec", 0.05)
-        # 큰 Yaw 정렬 중 장애물이 확인되면 정렬 완료를 기다리지 않고
-        # 현재 위치 Setpoint로 감속한 뒤 회피 루프로 넘긴다.
-        self.declare_parameter("direction_yaw_abort_on_obstacle", True)
         self.declare_parameter(
             "search_plan_path",
             "~/b3_cobot3_ws/isaac_sim/generated_search_plan.json",
@@ -1540,7 +1518,6 @@ class DroneControllerNode(TimestampedNode):
         target_north_m,
         target_east_m,
         fallback_yaw_deg,
-        abort_on_obstacle=False,
     ):
         """현재 위치를 유지한 채 목표 진행방향으로 먼저 회전한다.
 
@@ -1594,21 +1571,6 @@ class DroneControllerNode(TimestampedNode):
             ),
         )
 
-        obstacle_abort_enabled = (
-            bool(abort_on_obstacle)
-            and bool(
-                self.get_parameter(
-                    "direction_yaw_abort_on_obstacle"
-                ).value
-            )
-        )
-        if obstacle_abort_enabled and self.obstacle_blocked:
-            self.get_logger().warning(
-                "Yaw 정렬 시작 전 장애물 감지 → 즉시 감속 후 회피 전환"
-            )
-            await self._brake_before_avoidance()
-            return float(self.latest_yaw_deg)
-
         initial_error_deg = self._normalize_angle_deg(
             target_yaw_deg - self.latest_yaw_deg
         )
@@ -1644,13 +1606,6 @@ class DroneControllerNode(TimestampedNode):
         stable_samples = 0
 
         while self._sim_time_sec() < deadline:
-            if obstacle_abort_enabled and self.obstacle_blocked:
-                self.get_logger().warning(
-                    "Yaw 정렬 중 장애물 감지 → 정렬을 중단하고 즉시 감속"
-                )
-                await self._brake_before_avoidance()
-                return float(self.latest_yaw_deg)
-
             self._publish_movement_direction(
                 target_north_m,
                 target_east_m,
@@ -1825,7 +1780,6 @@ class DroneControllerNode(TimestampedNode):
             north_m,
             east_m,
             yaw_deg,
-            abort_on_obstacle=allow_avoidance,
         )
         self._publish_movement_direction(north_m, east_m)
 
@@ -2009,13 +1963,8 @@ class DroneControllerNode(TimestampedNode):
                     north_m,
                     east_m,
                     command_yaw_deg,
-                    abort_on_obstacle=allow_avoidance,
                 )
                 self._publish_movement_direction(north_m, east_m)
-                if allow_avoidance and self.obstacle_blocked:
-                    # Yaw 정렬 도중 새 장애물이 들어온 경우 원래 Waypoint
-                    # Setpoint를 다시 보내지 않고 다음 루프에서 즉시 회피한다.
-                    continue
                 await self.drone.offboard.set_position_ned(
                     PositionNedYaw(
                         north_m,
@@ -2955,34 +2904,9 @@ class DroneControllerNode(TimestampedNode):
             if descent_attempt >= descent_retries:
                 break
 
-            remaining_to_target = math.hypot(
-                target_north_m - self.latest_north_m,
-                target_east_m - self.latest_east_m,
-            )
-            skip_retry_distance = max(
-                0.4,
-                float(
-                    self.get_parameter(
-                        "vertical_escape_skip_retry_near_target_m"
-                    ).value
-                ),
-            )
-            if remaining_to_target <= skip_retry_distance:
-                self.get_logger().warning(
-                    "하강 중 장애물 재감지, 목표 XY에 이미 근접: "
-                    f"남은거리={remaining_to_target:.2f}m ≤ "
-                    f"{skip_retry_distance:.2f}m → 같은 자리 재하강을 "
-                    "생략하고 높은 회피 고도를 유지합니다."
-                )
-                break
-
             self.get_logger().warning(
                 f"하강 중 장애물 재감지: 회피 고도로 복귀 후 "
-                f"추가 전진 {descent_attempt + 1}/{descent_retries}, "
-                f"목표까지={remaining_to_target:.2f}m"
-            )
-            self._publish_status(
-                "AVOIDING_OBSTACLE_VERTICAL_CLIMB"
+                f"추가 전진 {descent_attempt + 1}/{descent_retries}"
             )
             if not await self._command_vertical_level(
                 self.latest_north_m,
@@ -3138,22 +3062,6 @@ class DroneControllerNode(TimestampedNode):
                 self.get_parameter("vertical_escape_descent_clear_sec").value
             ),
         )
-        descent_front_stop = max(
-            0.3,
-            float(
-                self.get_parameter(
-                    "vertical_escape_descent_front_stop_distance_m"
-                ).value
-            ),
-        )
-        descent_360_stop = max(
-            0.3,
-            float(
-                self.get_parameter(
-                    "vertical_escape_descent_360_stop_distance_m"
-                ).value
-            ),
-        )
         while self.latest_down_m < planned_down_m - altitude_tolerance:
             if self.stop_search_event is not None and self.stop_search_event.is_set():
                 return False
@@ -3172,8 +3080,6 @@ class DroneControllerNode(TimestampedNode):
                 ascending=False,
                 retries=0,
                 abort_on_obstacle=True,
-                obstacle_front_stop_distance=descent_front_stop,
-                obstacle_hard_stop_distance=descent_360_stop,
             )
             if not reached:
                 # 하강 중 obstacle_blocked 또는 hard stop이 잡힌 경우
@@ -3181,10 +3087,7 @@ class DroneControllerNode(TimestampedNode):
                 await self._hold_current_position(stop_search=False)
                 return False
             if not await self._wait_for_clear_corridor(
-                clear_sec,
-                reactive_only=True,
-                front_stop_distance=descent_front_stop,
-                hard_stop_distance=descent_360_stop,
+                clear_sec, reactive_only=True
             ):
                 await self._hold_current_position(stop_search=False)
                 return False
@@ -3201,8 +3104,6 @@ class DroneControllerNode(TimestampedNode):
         ascending,
         retries=0,
         abort_on_obstacle=False,
-        obstacle_front_stop_distance=None,
-        obstacle_hard_stop_distance=None,
     ):
         """한 단계 수직 이동 명령을 재전송하며 목표 고도 도달을 확인한다."""
         vertical_speed = max(
@@ -3228,34 +3129,14 @@ class DroneControllerNode(TimestampedNode):
                 if self.stop_search_event is not None and self.stop_search_event.is_set():
                     return False
                 if abort_on_obstacle:
-                    hard_stop = (
-                        float(obstacle_hard_stop_distance)
-                        if obstacle_hard_stop_distance is not None
-                        else float(
-                            self.get_parameter(
-                                "local_detour_hard_stop_distance_m"
-                            ).value
-                        )
+                    hard_stop = float(
+                        self.get_parameter(
+                            "local_detour_hard_stop_distance_m"
+                        ).value
                     )
-                    if self._reactive_obstacle_present(
-                        hard_stop_distance=hard_stop,
-                        front_stop_distance=obstacle_front_stop_distance,
-                    ):
-                        front_limit = (
-                            float(obstacle_front_stop_distance)
-                            if obstacle_front_stop_distance is not None
-                            else float(
-                                self.get_parameter(
-                                    "avoidance_front_clearance_m"
-                                ).value
-                            )
-                        )
+                    if self._reactive_obstacle_present(hard_stop):
                         self.get_logger().warning(
-                            "단계 하강 중 장애물 감지 → 하강 중단: "
-                            f"전방={self.front_clearance_m:.2f}m/"
-                            f"기준={front_limit:.2f}m, "
-                            f"360°최소={self.local_detour_nearest_360_m:.2f}m/"
-                            f"기준={hard_stop:.2f}m"
+                            "단계 하강 중 근거리 장애물 감지 → 하강 중단"
                         )
                         return False
                 if ascending:
@@ -3273,11 +3154,7 @@ class DroneControllerNode(TimestampedNode):
                 await self._hold_current_position(stop_search=False)
         return False
 
-    def _reactive_obstacle_present(
-        self,
-        hard_stop_distance=None,
-        front_stop_distance=None,
-    ):
+    def _reactive_obstacle_present(self, hard_stop_distance=None):
         """현재 고도에서 실제 근접 충돌 위험이 있는지 확인한다.
 
         선제 A*용 10m 통로 차단은 포함하지 않는다. 수직 회피 후 하강
@@ -3291,12 +3168,8 @@ class DroneControllerNode(TimestampedNode):
                 self.get_parameter("local_detour_hard_stop_distance_m").value
             )
         )
-        required_front = (
-            float(front_stop_distance)
-            if front_stop_distance is not None
-            else float(
-                self.get_parameter("avoidance_front_clearance_m").value
-            )
+        required_front = float(
+            self.get_parameter("avoidance_front_clearance_m").value
         )
         front_blocked = (
             math.isfinite(self.front_clearance_m)
@@ -3306,11 +3179,7 @@ class DroneControllerNode(TimestampedNode):
         return bool(front_blocked or emergency_blocked)
 
     async def _wait_for_clear_corridor(
-        self,
-        required_clear_sec,
-        reactive_only=False,
-        front_stop_distance=None,
-        hard_stop_distance=None,
+        self, required_clear_sec, reactive_only=False
     ):
         """진행 통로가 연속해서 clear인 시간을 확인한다."""
         required = max(0.0, float(required_clear_sec))
@@ -3320,10 +3189,7 @@ class DroneControllerNode(TimestampedNode):
             if self.stop_search_event is not None and self.stop_search_event.is_set():
                 return False
             blocked = (
-                self._reactive_obstacle_present(
-                    hard_stop_distance=hard_stop_distance,
-                    front_stop_distance=front_stop_distance,
-                )
+                self._reactive_obstacle_present()
                 if reactive_only
                 else self.obstacle_blocked
             )

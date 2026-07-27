@@ -335,17 +335,17 @@ pointcloud_local_mapper_01:
     accumulated_cloud_body_topic: /drone_01/obstacle/accumulated_cloud_body
     local_costmap_topic: /drone_01/obstacle/local_costmap
     accumulation_sec: 2.5
-    processing_period_sec: 0.20
-    publish_period_sec: 0.30
+    processing_period_sec: 0.3
+    publish_period_sec: 0.5
     tf_retry_period_sec: 0.05
     tf_exact_wait_sec: 1.0
     pending_cloud_queue_size: 8
     max_pending_clouds_per_cycle: 2
     voxel_size_m: 0.35
     minimum_voxel_observations: 1
-    maximum_points_per_scan: 12000
-    minimum_height_m: -1.5
-    maximum_height_m: 2.0
+    maximum_points_per_scan: 8000
+    minimum_height_m: -1.2
+    maximum_height_m: 1.8
     local_costmap_size_m: 14.0
     local_costmap_resolution_m: 0.25
     obstacle_inflation_radius_m: 1.1
@@ -389,9 +389,9 @@ obstacle_monitor_01:
     minimum_obstacle_points: 2
     blocked_confirm_scans: 1
     clear_confirm_scans: 3
-    processing_period_sec: 0.08
-    minimum_height_m: -0.8
-    maximum_height_m: 1.0
+    processing_period_sec: 0.1
+    minimum_height_m: -1.2
+    maximum_height_m: 1.8
     active_mission_states:
     - INITIAL_TAKEOFF
     - INITIAL_HOVER
@@ -435,8 +435,6 @@ obstacle_monitor_01:
     planner_start_release_radius_m: 0.5
     local_planner_min_forward_progress_m: 0.75
     warning_period_sec: 5.0
-    safety_minimum_height_m: -1.5
-    safety_maximum_height_m: 1.0
 drone_controller_01:
   ros__parameters:
     drone_id: quadrotor_01
@@ -507,9 +505,9 @@ drone_controller_01:
     avoidance_forward_offset_m: 2.0
     avoidance_side_clearance_m: 5.0
     avoidance_xy_timeout_sec: 5.0
-    avoidance_brake_timeout_sec: 2.5
+    avoidance_brake_timeout_sec: 3.0
     avoidance_stopped_speed_m_s: 0.35
-    avoidance_direction_check_sec: 0.30
+    avoidance_direction_check_sec: 0.3
     avoidance_front_clearance_m: 3.5
     avoidance_probe_distance_m: 1.0
     avoidance_direction_hint_step_m: 0.75
@@ -524,10 +522,10 @@ drone_controller_01:
     avoidance_max_lateral_to_forward_ratio: 0.8
     avoidance_vector_max_age_sec: 0.8
     local_detour_max_age_sec: 0.8
-    local_detour_hard_stop_distance_m: 1.30
+    local_detour_hard_stop_distance_m: 1.3
     avoidance_keep_yaw_during_detour: true
-    avoidance_commit_sec: 0.10
-    avoidance_block_confirm_sec: 0.10
+    avoidance_commit_sec: 0.1
+    avoidance_block_confirm_sec: 0.1
     vertical_escape_min_climb_m: 2.5
     vertical_escape_retry_climb_step_m: 1.5
     vertical_escape_cross_retries: 3
@@ -558,10 +556,6 @@ drone_controller_01:
     search_altitude_recovery_min_excess_m: 1.0
     cooperative_transit_climb_only_enabled: true
     direction_yaw_pre_align_threshold_deg: 75.0
-    vertical_escape_descent_front_stop_distance_m: 1.8
-    vertical_escape_descent_360_stop_distance_m: 1.8
-    vertical_escape_skip_retry_near_target_m: 1.0
-    direction_yaw_abort_on_obstacle: true
 human_detector_02:
   ros__parameters:
     drone_id: quadrotor_02
@@ -658,17 +652,17 @@ pointcloud_local_mapper_02:
     accumulated_cloud_body_topic: /drone_02/obstacle/accumulated_cloud_body
     local_costmap_topic: /drone_02/obstacle/local_costmap
     accumulation_sec: 2.5
-    processing_period_sec: 0.20
-    publish_period_sec: 0.30
+    processing_period_sec: 0.3
+    publish_period_sec: 0.5
     tf_retry_period_sec: 0.05
     tf_exact_wait_sec: 1.0
     pending_cloud_queue_size: 8
     max_pending_clouds_per_cycle: 2
     voxel_size_m: 0.35
     minimum_voxel_observations: 1
-    maximum_points_per_scan: 12000
-    minimum_height_m: -1.5
-    maximum_height_m: 2.0
+    maximum_points_per_scan: 8000
+    minimum_height_m: -1.2
+    maximum_height_m: 1.8
     local_costmap_size_m: 14.0
     local_costmap_resolution_m: 0.25
     obstacle_inflation_radius_m: 1.1
@@ -712,9 +706,9 @@ obstacle_monitor_02:
     minimum_obstacle_points: 2
     blocked_confirm_scans: 1
     clear_confirm_scans: 3
-    processing_period_sec: 0.08
-    minimum_height_m: -0.8
-    maximum_height_m: 1.0
+    processing_period_sec: 0.1
+    minimum_height_m: -1.2
+    maximum_height_m: 1.8
     active_mission_states:
     - INITIAL_TAKEOFF
     - INITIAL_HOVER
@@ -758,8 +752,6 @@ obstacle_monitor_02:
     planner_start_release_radius_m: 0.5
     local_planner_min_forward_progress_m: 0.75
     warning_period_sec: 5.0
-    safety_minimum_height_m: -1.5
-    safety_maximum_height_m: 1.0
 drone_controller_02:
   ros__parameters:
     drone_id: quadrotor_02
@@ -830,9 +822,9 @@ drone_controller_02:
     avoidance_forward_offset_m: 2.0
     avoidance_side_clearance_m: 5.0
     avoidance_xy_timeout_sec: 5.0
-    avoidance_brake_timeout_sec: 2.5
+    avoidance_brake_timeout_sec: 3.0
     avoidance_stopped_speed_m_s: 0.35
-    avoidance_direction_check_sec: 0.30
+    avoidance_direction_check_sec: 0.3
     avoidance_front_clearance_m: 3.5
     avoidance_probe_distance_m: 1.0
     avoidance_direction_hint_step_m: 0.75
@@ -847,10 +839,10 @@ drone_controller_02:
     avoidance_max_lateral_to_forward_ratio: 0.8
     avoidance_vector_max_age_sec: 0.8
     local_detour_max_age_sec: 0.8
-    local_detour_hard_stop_distance_m: 1.30
+    local_detour_hard_stop_distance_m: 1.3
     avoidance_keep_yaw_during_detour: true
-    avoidance_commit_sec: 0.10
-    avoidance_block_confirm_sec: 0.10
+    avoidance_commit_sec: 0.1
+    avoidance_block_confirm_sec: 0.1
     vertical_escape_min_climb_m: 2.5
     vertical_escape_retry_climb_step_m: 1.5
     vertical_escape_cross_retries: 3
@@ -881,10 +873,6 @@ drone_controller_02:
     search_altitude_recovery_min_excess_m: 1.0
     cooperative_transit_climb_only_enabled: true
     direction_yaw_pre_align_threshold_deg: 75.0
-    vertical_escape_descent_front_stop_distance_m: 1.8
-    vertical_escape_descent_360_stop_distance_m: 1.8
-    vertical_escape_skip_retry_near_target_m: 1.0
-    direction_yaw_abort_on_obstacle: true
 human_detector_03:
   ros__parameters:
     drone_id: quadrotor_03
@@ -981,17 +969,17 @@ pointcloud_local_mapper_03:
     accumulated_cloud_body_topic: /drone_03/obstacle/accumulated_cloud_body
     local_costmap_topic: /drone_03/obstacle/local_costmap
     accumulation_sec: 2.5
-    processing_period_sec: 0.20
-    publish_period_sec: 0.30
+    processing_period_sec: 0.3
+    publish_period_sec: 0.5
     tf_retry_period_sec: 0.05
     tf_exact_wait_sec: 1.0
     pending_cloud_queue_size: 8
     max_pending_clouds_per_cycle: 2
     voxel_size_m: 0.35
     minimum_voxel_observations: 1
-    maximum_points_per_scan: 12000
-    minimum_height_m: -1.5
-    maximum_height_m: 2.0
+    maximum_points_per_scan: 8000
+    minimum_height_m: -1.2
+    maximum_height_m: 1.8
     local_costmap_size_m: 14.0
     local_costmap_resolution_m: 0.25
     obstacle_inflation_radius_m: 1.1
@@ -1035,9 +1023,9 @@ obstacle_monitor_03:
     minimum_obstacle_points: 2
     blocked_confirm_scans: 1
     clear_confirm_scans: 3
-    processing_period_sec: 0.08
-    minimum_height_m: -0.8
-    maximum_height_m: 1.0
+    processing_period_sec: 0.1
+    minimum_height_m: -1.2
+    maximum_height_m: 1.8
     active_mission_states:
     - INITIAL_TAKEOFF
     - INITIAL_HOVER
@@ -1081,8 +1069,6 @@ obstacle_monitor_03:
     planner_start_release_radius_m: 0.5
     local_planner_min_forward_progress_m: 0.75
     warning_period_sec: 5.0
-    safety_minimum_height_m: -1.5
-    safety_maximum_height_m: 1.0
 drone_controller_03:
   ros__parameters:
     drone_id: quadrotor_03
@@ -1153,9 +1139,9 @@ drone_controller_03:
     avoidance_forward_offset_m: 2.0
     avoidance_side_clearance_m: 5.0
     avoidance_xy_timeout_sec: 5.0
-    avoidance_brake_timeout_sec: 2.5
+    avoidance_brake_timeout_sec: 3.0
     avoidance_stopped_speed_m_s: 0.35
-    avoidance_direction_check_sec: 0.30
+    avoidance_direction_check_sec: 0.3
     avoidance_front_clearance_m: 3.5
     avoidance_probe_distance_m: 1.0
     avoidance_direction_hint_step_m: 0.75
@@ -1170,10 +1156,10 @@ drone_controller_03:
     avoidance_max_lateral_to_forward_ratio: 0.8
     avoidance_vector_max_age_sec: 0.8
     local_detour_max_age_sec: 0.8
-    local_detour_hard_stop_distance_m: 1.30
+    local_detour_hard_stop_distance_m: 1.3
     avoidance_keep_yaw_during_detour: true
-    avoidance_commit_sec: 0.10
-    avoidance_block_confirm_sec: 0.10
+    avoidance_commit_sec: 0.1
+    avoidance_block_confirm_sec: 0.1
     vertical_escape_min_climb_m: 2.5
     vertical_escape_retry_climb_step_m: 1.5
     vertical_escape_cross_retries: 3
@@ -1204,10 +1190,6 @@ drone_controller_03:
     search_altitude_recovery_min_excess_m: 1.0
     cooperative_transit_climb_only_enabled: true
     direction_yaw_pre_align_threshold_deg: 75.0
-    vertical_escape_descent_front_stop_distance_m: 1.8
-    vertical_escape_descent_360_stop_distance_m: 1.8
-    vertical_escape_skip_retry_near_target_m: 1.0
-    direction_yaw_abort_on_obstacle: true
 human_detector_04:
   ros__parameters:
     drone_id: quadrotor_04
@@ -1304,17 +1286,17 @@ pointcloud_local_mapper_04:
     accumulated_cloud_body_topic: /drone_04/obstacle/accumulated_cloud_body
     local_costmap_topic: /drone_04/obstacle/local_costmap
     accumulation_sec: 2.5
-    processing_period_sec: 0.20
-    publish_period_sec: 0.30
+    processing_period_sec: 0.3
+    publish_period_sec: 0.5
     tf_retry_period_sec: 0.05
     tf_exact_wait_sec: 1.0
     pending_cloud_queue_size: 8
     max_pending_clouds_per_cycle: 2
     voxel_size_m: 0.35
     minimum_voxel_observations: 1
-    maximum_points_per_scan: 12000
-    minimum_height_m: -1.5
-    maximum_height_m: 2.0
+    maximum_points_per_scan: 8000
+    minimum_height_m: -1.2
+    maximum_height_m: 1.8
     local_costmap_size_m: 14.0
     local_costmap_resolution_m: 0.25
     obstacle_inflation_radius_m: 1.1
@@ -1358,9 +1340,9 @@ obstacle_monitor_04:
     minimum_obstacle_points: 2
     blocked_confirm_scans: 1
     clear_confirm_scans: 3
-    processing_period_sec: 0.08
-    minimum_height_m: -0.8
-    maximum_height_m: 1.0
+    processing_period_sec: 0.1
+    minimum_height_m: -1.2
+    maximum_height_m: 1.8
     active_mission_states:
     - INITIAL_TAKEOFF
     - INITIAL_HOVER
@@ -1404,8 +1386,6 @@ obstacle_monitor_04:
     planner_start_release_radius_m: 0.5
     local_planner_min_forward_progress_m: 0.75
     warning_period_sec: 5.0
-    safety_minimum_height_m: -1.5
-    safety_maximum_height_m: 1.0
 drone_controller_04:
   ros__parameters:
     drone_id: quadrotor_04
@@ -1476,9 +1456,9 @@ drone_controller_04:
     avoidance_forward_offset_m: 2.0
     avoidance_side_clearance_m: 5.0
     avoidance_xy_timeout_sec: 5.0
-    avoidance_brake_timeout_sec: 2.5
+    avoidance_brake_timeout_sec: 3.0
     avoidance_stopped_speed_m_s: 0.35
-    avoidance_direction_check_sec: 0.30
+    avoidance_direction_check_sec: 0.3
     avoidance_front_clearance_m: 3.5
     avoidance_probe_distance_m: 1.0
     avoidance_direction_hint_step_m: 0.75
@@ -1493,10 +1473,10 @@ drone_controller_04:
     avoidance_max_lateral_to_forward_ratio: 0.8
     avoidance_vector_max_age_sec: 0.8
     local_detour_max_age_sec: 0.8
-    local_detour_hard_stop_distance_m: 1.30
+    local_detour_hard_stop_distance_m: 1.3
     avoidance_keep_yaw_during_detour: true
-    avoidance_commit_sec: 0.10
-    avoidance_block_confirm_sec: 0.10
+    avoidance_commit_sec: 0.1
+    avoidance_block_confirm_sec: 0.1
     vertical_escape_min_climb_m: 2.5
     vertical_escape_retry_climb_step_m: 1.5
     vertical_escape_cross_retries: 3
@@ -1527,7 +1507,3 @@ drone_controller_04:
     search_altitude_recovery_min_excess_m: 1.0
     cooperative_transit_climb_only_enabled: true
     direction_yaw_pre_align_threshold_deg: 75.0
-    vertical_escape_descent_front_stop_distance_m: 1.8
-    vertical_escape_descent_360_stop_distance_m: 1.8
-    vertical_escape_skip_retry_near_target_m: 1.0
-    direction_yaw_abort_on_obstacle: true

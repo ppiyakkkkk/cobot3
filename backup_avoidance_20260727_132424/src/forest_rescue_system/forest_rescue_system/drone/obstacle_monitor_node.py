@@ -59,15 +59,9 @@ class ObstacleMonitorNode(TimestampedNode):
         self.declare_parameter("minimum_obstacle_points", 2)
         self.declare_parameter("blocked_confirm_scans", 1)
         self.declare_parameter("clear_confirm_scans", 3)
-        self.declare_parameter("processing_period_sec", 0.08)
-        # 수평 A*/VFH 계획에 사용하는 높이대다. 지면 전체가 2D 장애물로
-        # 들어오는 것을 막기 위해 기존 중심 높이대는 유지한다.
+        self.declare_parameter("processing_period_sec", 0.10)
         self.declare_parameter("minimum_height_m", -0.8)
-        self.declare_parameter("maximum_height_m", 1.0)
-        # 즉시 충돌 안전판은 더 아래까지 본다. 안전거리에는 3D 거리를
-        # 사용해 지면 바로 아래 점이 XY거리 0m로 오인되는 문제를 막는다.
-        self.declare_parameter("safety_minimum_height_m", -1.5)
-        self.declare_parameter("safety_maximum_height_m", 1.0)
+        self.declare_parameter("maximum_height_m", 0.8)
         self.declare_parameter(
             "movement_direction_topic",
             "/drone_01/navigation/direction_body_rad",
@@ -352,36 +346,21 @@ class ObstacleMonitorNode(TimestampedNode):
         x = points[:, 0]
         y = points[:, 1]
         z = points[:, 2]
-        finite_mask = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
         minimum_height = float(
             self.get_parameter("minimum_height_m").value
         )
         maximum_height = float(
             self.get_parameter("maximum_height_m").value
         )
-        safety_minimum_height = float(
-            self.get_parameter("safety_minimum_height_m").value
-        )
-        safety_maximum_height = float(
-            self.get_parameter("safety_maximum_height_m").value
-        )
 
-        # planning_mask: 수평 경로계획과 일반 전방 차단용
-        # safety_mask: 아래 가지까지 포함한 즉시 정지/하강 안전판용
-        planning_mask = (
-            finite_mask
-            & (z >= minimum_height)
-            & (z <= maximum_height)
-        )
-        safety_mask = (
-            finite_mask
-            & (z >= safety_minimum_height)
-            & (z <= safety_maximum_height)
-        )
-        if not np.any(planning_mask) and not np.any(safety_mask):
+        height_mask = (z >= minimum_height) & (z <= maximum_height)
+        if not np.any(height_mask):
             self._publish_result(float("inf"), float("inf"), float("inf"), False)
             return
 
+        # x>0 고정 필터를 제거하고 360도 포인트의 각도를 모두 계산한다.
+        angles = np.arctan2(y[height_mask], x[height_mask])
+        distances = np.hypot(x[height_mask], y[height_mask])
         center = self.movement_direction_rad
         front_half = math.radians(
             float(self.get_parameter("front_sector_half_angle_deg").value)
@@ -393,86 +372,27 @@ class ObstacleMonitorNode(TimestampedNode):
             float(self.get_parameter("side_sector_half_angle_deg").value)
         )
 
-        planning_angles = np.arctan2(y[planning_mask], x[planning_mask])
-        planning_distances = np.sqrt(
-            x[planning_mask] ** 2
-            + y[planning_mask] ** 2
-            + z[planning_mask] ** 2
-        )
-        planning_front_mask = (
-            np.abs(
-                self._angle_difference(planning_angles, center)
-            )
-            <= front_half
-        )
-        planning_left_mask = (
-            np.abs(
-                self._angle_difference(
-                    planning_angles, center + side_offset
-                )
-            )
+        front_mask = np.abs(self._angle_difference(angles, center)) <= front_half
+        left_mask = (
+            np.abs(self._angle_difference(angles, center + side_offset))
             <= side_half
         )
-        planning_right_mask = (
-            np.abs(
-                self._angle_difference(
-                    planning_angles, center - side_offset
-                )
-            )
+        right_mask = (
+            np.abs(self._angle_difference(angles, center - side_offset))
             <= side_half
         )
 
-        safety_angles = np.arctan2(y[safety_mask], x[safety_mask])
-        safety_distances = np.sqrt(
-            x[safety_mask] ** 2
-            + y[safety_mask] ** 2
-            + z[safety_mask] ** 2
-        )
-        safety_front_mask = (
-            np.abs(self._angle_difference(safety_angles, center))
-            <= front_half
-        )
-        safety_left_mask = (
-            np.abs(
-                self._angle_difference(
-                    safety_angles, center + side_offset
-                )
-            )
-            <= side_half
-        )
-        safety_right_mask = (
-            np.abs(
-                self._angle_difference(
-                    safety_angles, center - side_offset
-                )
-            )
-            <= side_half
-        )
-
-        nearest_360_distance = (
-            float(np.min(safety_distances))
-            if safety_distances.size
-            else float("inf")
-        )
-        # 공개하는 전/좌/우 여유거리는 수평 계획 높이대만 사용한다.
-        # 하방 확장 점은 nearest_360_distance와 emergency 판정에만 사용해
-        # 지면이 3.5m 전방 장애물처럼 보이며 계속 상승하는 것을 막는다.
-        front_distance = self._minimum_distance(
-            planning_distances, planning_front_mask
-        )
-        left_distance = self._minimum_distance(
-            planning_distances, planning_left_mask
-        )
-        right_distance = self._minimum_distance(
-            planning_distances, planning_right_mask
-        )
+        nearest_360_distance = float(np.min(distances))
+        front_distance = self._minimum_distance(distances, front_mask)
+        left_distance = self._minimum_distance(distances, left_mask)
+        right_distance = self._minimum_distance(distances, right_mask)
         (
             recommended_direction_rad,
             recommended_clearance_m,
             recommended_valid,
         ) = self._select_avoidance_direction(
-            planning_angles,
-            planning_distances,
+            angles,
+            distances,
             center,
             measurement_time,
         )
@@ -483,10 +403,7 @@ class ObstacleMonitorNode(TimestampedNode):
             self.get_parameter("minimum_obstacle_points").value
         )
         close_front_points = int(
-            np.count_nonzero(
-                planning_front_mask
-                & (planning_distances < safety_distance)
-            )
+            np.count_nonzero(front_mask & (distances < safety_distance))
         )
         emergency_front_distance = max(
             0.1,
@@ -508,17 +425,17 @@ class ObstacleMonitorNode(TimestampedNode):
         # 진행 방향 앞쪽과 측면·후방의 비상 정지 반경을 분리한다.
         # 예: 오른쪽 나무가 1.1m에 있어도 전방이 비어 있으면 계속 전진하고,
         # 측면 장애물이 0.75m 안으로 들어왔을 때만 즉시 정지한다.
-        safety_non_front_mask = np.logical_not(safety_front_mask)
+        non_front_mask = np.logical_not(front_mask)
         close_emergency_front_points = int(
             np.count_nonzero(
-                safety_front_mask
-                & (safety_distances < emergency_front_distance)
+                front_mask
+                & (distances < emergency_front_distance)
             )
         )
         close_emergency_side_points = int(
             np.count_nonzero(
-                safety_non_front_mask
-                & (safety_distances < emergency_side_distance)
+                non_front_mask
+                & (distances < emergency_side_distance)
             )
         )
 
@@ -569,8 +486,8 @@ class ObstacleMonitorNode(TimestampedNode):
                 # Isaac 재시작 등으로 시간이 되감기면 이전 실행의 제한값을 폐기한다.
                 self.last_local_plan_time = float("-inf")
             if measurement_time - self.last_local_plan_time >= planner_period:
-                obstacle_x = x[planning_mask]
-                obstacle_y = y[planning_mask]
+                obstacle_x = x[height_mask]
+                obstacle_y = y[height_mask]
                 plan_input_source = "latest_scan"
                 accumulated_fresh = self._accumulated_cloud_is_fresh(
                     measurement_time
