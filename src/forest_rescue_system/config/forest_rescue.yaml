@@ -181,9 +181,9 @@ mission_manager_node:
     - 46.7
     - -46.7
     - 46.7
-    required_detection_frames: 3
+    required_detection_frames: 2
     minimum_detection_confidence: 0.4
-    detection_start_delay_sec: 1.0
+    detection_start_delay_sec: 10.0
     require_map_position_before_detection: true
     start_exclusion_radius_m: 15.0
     start_exclusion_centers_xy:

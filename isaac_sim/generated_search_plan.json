@@ -35,15 +35,15 @@
     "selection": "hardcoded_xyz",
     "z_mode": "terrain_snap",
     "configured_world_enu": [
-      -2.0,
-      35.0,
+      -11.5,
+      -2.5,
       0.0
     ],
-    "terrain_z": 16.48916167418826,
+    "terrain_z": 50.97928609544377,
     "world_enu": [
-      -2.0,
-      35.0,
-      16.56916167418826
+      -11.5,
+      -2.5,
+      51.05928609544377
     ]
   },
   "drones": {
